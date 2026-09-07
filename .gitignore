@@ -3,3 +3,5 @@ _opam/
 .deps/
 .local/
 *.log
+__pycache__/
+.pi-lens/
