@@ -1,0 +1,14 @@
+(executables
+ (names async_probe)
+ (modules async_probe)
+ (libraries async threads)
+ (modes exe))
+
+(executables
+ (names eio_probe)
+ (modules eio_probe)
+ (libraries base eio_main threads)
+ (modes exe))
+
+(cram
+ (deps async_probe.exe eio_probe.exe))

@@ -1,4 +1,5 @@
 """Offline regression tests for the isolated stage-1 bootstrap."""
+
 import hashlib
 import importlib.util
 import pathlib
@@ -6,9 +7,13 @@ import tempfile
 import unittest
 
 SOURCE = pathlib.Path(__file__).with_name("setup.py")
+
+
 class SetupTests(unittest.TestCase):
     def setUp(self):
-        self.assertTrue(SOURCE.exists(), "stage1/setup.py must implement bootstrap validation")
+        self.assertTrue(
+            SOURCE.exists(), "stage1/setup.py must implement bootstrap validation"
+        )
         spec = importlib.util.spec_from_file_location("stage1_setup", SOURCE)
         assert spec is not None and spec.loader is not None
         self.setup = importlib.util.module_from_spec(spec)
@@ -50,12 +55,18 @@ class SetupTests(unittest.TestCase):
             self.setup.validate_lock(lock)
 
     def test_environment_ignores_shared_switch(self):
-        environment = self.setup.local_environment({
-            "HOME": "/home/example", "PATH": "/shared/bin:/usr/bin",
-            "OPAMROOT": "/shared/opam", "OPAMSWITCH": "shared",
-            "OCAMLPATH": "/shared/lib", "CAML_LD_LIBRARY_PATH": "/shared/stubs",
-            "OPAMEXTERNALSOLVER": "untrusted-solver", "DUNE_CACHE_ROOT": "/shared/cache",
-        })
+        environment = self.setup.local_environment(
+            {
+                "HOME": "/home/example",
+                "PATH": "/shared/bin:/usr/bin",
+                "OPAMROOT": "/shared/opam",
+                "OPAMSWITCH": "shared",
+                "OCAMLPATH": "/shared/lib",
+                "CAML_LD_LIBRARY_PATH": "/shared/stubs",
+                "OPAMEXTERNALSOLVER": "untrusted-solver",
+                "DUNE_CACHE_ROOT": "/shared/cache",
+            }
+        )
         self.assertEqual(environment["OPAMROOT"], str(self.setup.ROOT / ".local/opam"))
         self.assertEqual(environment["OPAMSWITCH"], str(self.setup.ROOT))
         self.assertEqual(environment["HOME"], "/home/example")
@@ -63,7 +74,9 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn("OCAMLPATH", environment)
         self.assertNotIn("CAML_LD_LIBRARY_PATH", environment)
         self.assertNotIn("OPAMEXTERNALSOLVER", environment)
-        self.assertEqual(environment["DUNE_CACHE_ROOT"], str(self.setup.ROOT / ".local/dune-cache"))
+        self.assertEqual(
+            environment["DUNE_CACHE_ROOT"], str(self.setup.ROOT / ".local/dune-cache")
+        )
 
 
 if __name__ == "__main__":

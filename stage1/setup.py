@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stage-1-only bootstrap. Never uses or updates a shared opam root."""
+
 import argparse
 import hashlib
 import json
@@ -22,7 +23,9 @@ def verify_sha256(path, expected):
     with Path(path).open("rb") as source:
         actual = hashlib.file_digest(source, "sha256").hexdigest()
     if actual != expected:
-        raise ValueError(f"checksum mismatch: {path}: expected {expected}, got {actual}")
+        raise ValueError(
+            f"checksum mismatch: {path}: expected {expected}, got {actual}"
+        )
 
 
 def validate_lock(lock):
@@ -38,7 +41,9 @@ def validate_lock(lock):
             raise ValueError(f"{name}.url must use https")
         if not re.fullmatch(r"[0-9a-f]{64}", archive["sha256"]):
             raise ValueError(f"invalid {name}.sha256")
-        if name != "duckdb" and not re.fullmatch(r"[0-9a-f]{40}", archive.get("revision", "")):
+        if name != "duckdb" and not re.fullmatch(
+            r"[0-9a-f]{40}", archive.get("revision", "")
+        ):
             raise ValueError(f"invalid {name}.revision")
         if Path(archive["filename"]).name != archive["filename"]:
             raise ValueError(f"invalid {name}.filename")
@@ -52,14 +57,23 @@ def load_lock():
 
 def local_environment(source=None):
     source = os.environ if source is None else source
-    environment = {key: value for key, value in source.items()
-                   if not key.startswith(("OPAM", "OCAML", "CAML", "DUNE"))}
+    environment = {
+        key: value
+        for key, value in source.items()
+        if not key.startswith(("OPAM", "OCAML", "CAML", "DUNE"))
+    }
     environment.update(
-        OPAMROOT=str(ROOT / ".local/opam"), OPAMSWITCH=str(ROOT),
-        OPAMJOBS="4", OPAMYES="1", OPAMCOLOR="never", OPAMKEEPBUILDDIR="true",
-        OPAMERRLOGLEN="100", PATH="/usr/bin:/bin",
+        OPAMROOT=str(ROOT / ".local/opam"),
+        OPAMSWITCH=str(ROOT),
+        OPAMJOBS="4",
+        OPAMYES="1",
+        OPAMCOLOR="never",
+        OPAMKEEPBUILDDIR="true",
+        OPAMERRLOGLEN="100",
+        PATH="/usr/bin:/bin",
         XDG_CACHE_HOME=str(ROOT / ".local/cache"),
-        DUNE_CACHE_ROOT=str(ROOT / ".local/dune-cache"), DUNE_CACHE="disabled",
+        DUNE_CACHE_ROOT=str(ROOT / ".local/dune-cache"),
+        DUNE_CACHE="disabled",
     )
     return environment
 
@@ -73,12 +87,38 @@ def check():
     load_lock()
     if platform.machine() != "x86_64" or platform.libc_ver()[0] != "glibc":
         raise RuntimeError("stage 1 requires x86_64 Linux/glibc")
-    for tool in ("opam", "cc", "c++", "make", "autoconf", "patch", "rsync", "bwrap", "unzip", "pkg-config"):
+    for tool in (
+        "opam",
+        "cc",
+        "c++",
+        "make",
+        "autoconf",
+        "patch",
+        "rsync",
+        "bwrap",
+        "unzip",
+        "pkg-config",
+    ):
         if not shutil.which(tool, path="/usr/bin:/bin"):
             raise RuntimeError(f"missing prerequisite: {tool}")
     print("host:", platform.platform(), "libc:", platform.libc_ver(), flush=True)
     print("free disk bytes:", shutil.disk_usage(ROOT).free, flush=True)
-    run("bwrap", "--unshare-user", "--uid", "0", "--gid", "0", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "true")
+    run(
+        "bwrap",
+        "--unshare-user",
+        "--uid",
+        "0",
+        "--gid",
+        "0",
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "true",
+    )
     run("opam", "--version")
 
 
@@ -90,7 +130,10 @@ def fetch(lock):
             partial = target.with_suffix(target.suffix + ".partial")
             print("fetch", archive["url"], flush=True)
             # Sources are HTTPS-only and their bytes must match the committed SHA256.
-            with urllib.request.urlopen(archive["url"], timeout=180) as response, partial.open("wb") as output:  # noqa: S310
+            with (
+                urllib.request.urlopen(archive["url"], timeout=180) as response,
+                partial.open("wb") as output,
+            ):  # noqa: S310
                 shutil.copyfileobj(response, output)
             verify_sha256(partial, archive["sha256"])
             partial.replace(target)
@@ -118,12 +161,26 @@ def prepare(lock):
             shutil.rmtree(temporary)
     # Same immutable sources, archive transport: avoid VCS commands and movable tags.
     package_paths = [(lock["compiler_package"], "compiler")]
-    package_paths += [(name + ".1.3+ox", "eio") for name in ("eio", "eio_main", "eio_linux", "eio_posix")]
+    package_paths += [
+        (name + ".1.3+ox", "eio")
+        for name in ("eio", "eio_main", "eio_linux", "eio_posix")
+    ]
     for package, source in package_paths:
         path = REPOS / "ox/packages" / package.split(".")[0] / package / "opam"
         archive = lock["archives"][source]
-        replacement = 'url {\n  src: "' + archive["url"] + '"\n  checksum: "sha256=' + archive["sha256"] + '"\n}'
-        text, count = re.subn(r"(?m)^url \{.*?^\}", lambda _, replacement=replacement: replacement, path.read_text(), flags=re.DOTALL)
+        replacement = (
+            'url {\n  src: "'
+            + archive["url"]
+            + '"\n  checksum: "sha256='
+            + archive["sha256"]
+            + '"\n}'
+        )
+        text, count = re.subn(
+            r"(?m)^url \{.*?^\}",
+            lambda _, replacement=replacement: replacement,
+            path.read_text(),
+            flags=re.DOTALL,
+        )
         if count != 1:
             raise ValueError(f"expected one url stanza: {path}")
         path.write_text(text)
@@ -137,12 +194,28 @@ def prepare(lock):
 def install(lock):
     prepare(lock)
     if not (ROOT / ".local/opam/config").exists():
-        run("opam", "init", "--bare", "--no-setup", "--no-opamrc", "--no-git-location", "ox", REPOS / "ox")
+        run(
+            "opam",
+            "init",
+            "--bare",
+            "--no-setup",
+            "--no-opamrc",
+            "--no-git-location",
+            "ox",
+            REPOS / "ox",
+        )
         run("opam", "repository", "add", "default", REPOS / "default", "--all-switches")
     if not (ROOT / "_opam/.opam-switch/switch-config").exists():
         run("opam", "switch", "create", ROOT, "--empty", "--repos=ox,default")
     run("opam", "install", lock["compiler_package"], *lock["packages"])
-    run("opam", "switch", "export", ROOT / ".local/stage1-switch.export", "--full", "--freeze")
+    run(
+        "opam",
+        "switch",
+        "export",
+        ROOT / ".local/stage1-switch.export",
+        "--full",
+        "--freeze",
+    )
     run("opam", "exec", "--", "ocamlc", "-config")
     run("opam", "exec", "--", "dune", "--version")
 

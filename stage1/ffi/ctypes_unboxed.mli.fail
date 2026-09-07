@@ -1,0 +1,2 @@
+(* A real Ctypes.typ witness for a bits64-layout value is not supported. *)
+val unsupported : int64# Ctypes.typ

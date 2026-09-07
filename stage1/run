@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Run Dune using only the project-local compiler and dependency stack."""
+import os
+import sys
+from setup import ROOT, local_environment
+
+for tool in ("ocamlc", "dune"):
+    if not (ROOT / "_opam/bin" / tool).is_file():
+        sys.exit(f"missing local {tool}; run python3 stage1/setup.py --install")
+os.chdir(ROOT)
+environment = local_environment()
+environment["DUCKDB_STAGE1_DIR"] = str(ROOT / ".deps/duckdb")
+os.execve("/usr/bin/opam", ["opam", "exec", "--", "dune", *sys.argv[1:]], environment)
