@@ -1,0 +1,4 @@
+let run () =
+  let owner = Unique.create () in
+  Unique.close owner;
+  Unique.use owner

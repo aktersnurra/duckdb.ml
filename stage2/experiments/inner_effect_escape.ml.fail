@@ -1,0 +1,10 @@
+type _ Effect.t += Pause : unit Effect.t
+let saved : (unit, unit) Effect.Deep.continuation option ref = ref None
+let run () = Borrowed.fold "select 42::bigint" ~init:()
+  ~f:(fun view () ->
+    Effect.Deep.try_with
+      (fun () -> Effect.perform Pause; ignore (Borrowed.length view)) ()
+      { effc = fun (type a) (effect : a Effect.t) -> match effect with
+        | Pause -> Some (fun (k : (a, unit) Effect.Deep.continuation) -> saved := Some k)
+        | _ -> None };
+    Borrowed.Stop ())

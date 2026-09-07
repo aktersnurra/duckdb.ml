@@ -1,0 +1,5 @@
+let run () =
+  let owner = Unique.create () in
+  let view = borrow_ owner in
+  Unique.close owner;
+  Unique.use view

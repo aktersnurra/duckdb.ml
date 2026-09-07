@@ -1,0 +1,5 @@
+let run () =
+  let owner = Unique.create () in
+  let f () = Unique.use (borrow_ owner) in
+  f ();
+  Unique.close owner

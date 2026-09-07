@@ -1,0 +1,2 @@
+let bad () = Borrowed.fold "select 42::bigint" ~init:(fun () -> 0)
+  ~f:(fun view _ -> Borrowed.Stop (fun () -> Borrowed.length view))

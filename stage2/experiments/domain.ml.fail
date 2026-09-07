@@ -1,0 +1,4 @@
+let bad () = Borrowed.fold "select 42::bigint" ~init:()
+  ~f:(fun view () ->
+    ignore (Stdlib.Domain.join (Stdlib.Domain.Safe.spawn (fun () -> view)));
+    Borrowed.Stop ())
