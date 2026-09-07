@@ -18,6 +18,20 @@ struct response {
 };
 static atomic_int live = 0;
 static atomic_int active = 0;
+static atomic_int live_sql = 0;
+
+char *stage1_alloc_sql(size_t size) {
+    char *sql = malloc(size);
+    if (sql) atomic_fetch_add(&live_sql, 1);
+    return sql;
+}
+void stage1_free_sql(char *sql) {
+    if (sql) {
+        free(sql);
+        atomic_fetch_sub(&live_sql, 1);
+    }
+}
+int stage1_live_sql_copies(void) { return atomic_load(&live_sql); }
 
 void *stage1_query_at(const char *path, const char *sql) {
     struct response *out = calloc(1, sizeof(*out));
@@ -98,6 +112,14 @@ cleanup:
 }
 
 void *stage1_query(const char *sql) { return stage1_query_at(NULL, sql); }
+void stage1_query_into(const char *sql, void **slot) {
+    assert(slot && !*slot);
+    *slot = stage1_query(sql);
+}
+void stage1_destroy_slot(void **slot) {
+    stage1_destroy(*slot);
+    *slot = NULL;
+}
 int stage1_status(void *p) { return p ? ((struct response *)p)->status : 5; }
 const char *stage1_error(void *p) { return p ? ((struct response *)p)->error : "allocation failed"; }
 int stage1_count(void *p) { return p ? ((struct response *)p)->count : 0; }

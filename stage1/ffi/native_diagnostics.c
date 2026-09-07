@@ -7,10 +7,19 @@
 int main(void) {
     assert(strcmp(duckdb_library_version(), "v1.5.5") == 0);
     for (int i = 0; i < 100; ++i) {
-        void *r = stage1_query("SELECT i::BIGINT FROM range(5000) t(i)");
+        const char *sql = "SELECT i::BIGINT FROM range(5000) t(i)";
+        char *copy = stage1_alloc_sql(strlen(sql) + 1);
+        assert(copy && stage1_live_sql_copies() == 1);
+        strcpy(copy, sql);
+        void *r = NULL;
+        stage1_query_into(copy, &r);
+        stage1_free_sql(copy);
+        assert(stage1_live_sql_copies() == 0);
         assert(stage1_status(r) == 0 && stage1_count(r) == 5000);
         for (int j = 0; j < 5000; ++j) assert(stage1_value(r, j) == j);
-        stage1_destroy(r);
+        stage1_destroy_slot(&r);
+        assert(r == NULL);
+        stage1_destroy_slot(&r);
         r = stage1_query("invalid SQL");
         assert(stage1_status(r) == 3 && strlen(stage1_error(r)) > 0);
         stage1_destroy(r);

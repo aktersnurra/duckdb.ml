@@ -8,8 +8,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define Response(v) (*((void **)Data_custom_val(v)))
-static void finalize_response(value v) { stage1_destroy(Response(v)); Response(v) = NULL; }
+/* The rooted custom block points to a stable native owner. Only that owner,
+   never Data_custom_val, may be touched while the runtime lock is released. */
+struct response_owner { char *sql; void *response; };
+#define Owner(v) (*((struct response_owner **)Data_custom_val(v)))
+#define Response(v) (Owner(v) ? Owner(v)->response : NULL)
+static void finalize_response(value v) {
+    struct response_owner *owner = Owner(v);
+    if (owner) {
+        stage1_free_sql(owner->sql);
+        stage1_destroy(owner->response);
+        free(owner);
+        Owner(v) = NULL;
+    }
+}
 static struct custom_operations response_ops = {
     .identifier = "duckdb.stage1.response",
     .finalize = finalize_response,
@@ -24,18 +36,22 @@ CAMLprim value stage1_hand_query(value sql) {
     CAMLparam1(sql);
     CAMLlocal1(box);
     box = caml_alloc_custom(&response_ops, sizeof(void *), 0, 1);
-    Response(box) = NULL;
+    Owner(box) = NULL;
+    struct response_owner *owner = calloc(1, sizeof(*owner));
+    if (!owner) CAMLreturn(box);
+    Owner(box) = owner;
     mlsize_t length = caml_string_length(sql);
-    char *native_sql = malloc(length + 1);
-    if (!native_sql) CAMLreturn(box);
-    memcpy(native_sql, String_val(sql), length);
-    native_sql[length] = '\0';
-    /* Only native stack/allocated data are accessed in this interval. */
+    owner->sql = stage1_alloc_sql(length + 1);
+    if (!owner->sql) CAMLreturn(box);
+    memcpy(owner->sql, String_val(sql), length);
+    owner->sql[length] = '\0';
+    /* Release can raise a pending Sys.Break: the finalizer already owns SQL.
+       Root the response in native storage before the reacquisition boundary. */
     caml_enter_blocking_section();
-    void *response = stage1_query(native_sql);
-    free(native_sql);
+    owner->response = stage1_query(owner->sql);
+    stage1_free_sql(owner->sql);
+    owner->sql = NULL;
     caml_leave_blocking_section();
-    Response(box) = response;
     CAMLreturn(box);
 }
 CAMLprim value stage1_hand_destroy(value box) { finalize_response(box); return Val_unit; }

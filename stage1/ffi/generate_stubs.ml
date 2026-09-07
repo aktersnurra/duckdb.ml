@@ -18,4 +18,12 @@ let () =
     (* Warnings-as-errors apply to authored code, not generated bindings. *)
     Stdlib.Format.fprintf formatter "[@@@@@@warning \"-a\"]@.";
     Cstubs.write_ml ~concurrency:Cstubs.unlocked formatter ~prefix:"stage1_generated"
-      (module Generated_bindings.Bindings))
+      (module Generated_bindings.Bindings));
+  output Stdlib.Sys.argv.(3) (fun formatter ->
+    Stdlib.Format.fprintf formatter "#include \"native_probe.h\"@.";
+    Cstubs.write_c formatter ~prefix:"stage1_cleanup"
+      (module Generated_bindings.Cleanup));
+  output Stdlib.Sys.argv.(4) (fun formatter ->
+    Stdlib.Format.fprintf formatter "[@@@@@@warning \"-a\"]@.";
+    Cstubs.write_ml formatter ~prefix:"stage1_cleanup"
+      (module Generated_bindings.Cleanup))
