@@ -13,13 +13,24 @@ compile unique.mli
 for f in positive unique_positive local_only effect_counterexample; do compile "$f.ml"; done
 for f in return store capture domain owner_transition owner_reuse unique_destroy unique_reuse unique_closure inner_effect_escape; do
   cp "$f.ml.fail" "$f.ml"
-  if compile "$f.ml" > "$f.out" 2>&1; then echo "UNEXPECTED ACCEPTANCE: $f"; exit 1; fi
+  if compile "$f.ml" >"$f.out" 2>&1; then
+    echo "UNEXPECTED ACCEPTANCE: $f"
+    exit 1
+  fi
   case "$f" in
-    return|store|capture|inner_effect_escape|domain) grep -q 'local' "$f.out"; grep -q 'global\|escapes' "$f.out";;
-    owner_*) grep -q 'Borrowed.view' "$f.out"; grep -q 'Borrowed_ffi.owner' "$f.out";;
-    unique_destroy) grep -q 'being borrowed' "$f.out";;
-    unique_reuse|unique_closure) grep -Eq 'used|unique' "$f.out";;
+  return | store | capture | inner_effect_escape | domain)
+    grep -q 'local' "$f.out"
+    grep -q 'global\|escapes' "$f.out"
+    ;;
+  owner_*)
+    grep -q 'Borrowed.view' "$f.out"
+    grep -q 'Borrowed_ffi.owner' "$f.out"
+    ;;
+  unique_destroy) grep -q 'being borrowed' "$f.out" ;;
+  unique_reuse) grep -Fq 'already been used as unique' "$f.out" ;;
+  unique_closure) grep -Fq 'already been borrowed in a closure that might be called later' "$f.out" ;;
   esac
-  echo "=== expected rejection: $f ==="; cat "$f.out"
+  echo "=== expected rejection: $f ==="
+  cat "$f.out"
 done
 echo 'modes: positive controls and 10 intended rejections passed'
