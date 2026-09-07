@@ -67,6 +67,7 @@ def local_environment(source=None):
         OPAMSWITCH=str(ROOT),
         OPAMJOBS="4",
         OPAMYES="1",
+        OPAMNODEPEXTS="true",
         OPAMCOLOR="never",
         OPAMKEEPBUILDDIR="true",
         OPAMERRLOGLEN="100",
@@ -131,9 +132,9 @@ def fetch(lock):
             print("fetch", archive["url"], flush=True)
             # Sources are HTTPS-only and their bytes must match the committed SHA256.
             with (
-                urllib.request.urlopen(archive["url"], timeout=180) as response,
+                urllib.request.urlopen(archive["url"], timeout=180) as response,  # noqa: S310
                 partial.open("wb") as output,
-            ):  # noqa: S310
+            ):
                 shutil.copyfileobj(response, output)
             verify_sha256(partial, archive["sha256"])
             partial.replace(target)

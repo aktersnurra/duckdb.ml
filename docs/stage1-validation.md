@@ -1,6 +1,6 @@
-# Stage 1 validation checkpoint
+# Stage 1 validation and FFI decision
 
-Date: 2026-09-07 (UTC). Stage 1 is **not complete** at this checkpoint.
+Date: 2026-09-07 (UTC). **Stage-1 checks pass; ready for independent review.** This is a private compatibility experiment, not a safe/public DuckDB library. Stages 2–5 remain unimplemented.
 
 ## Upstream inspection and pins
 
@@ -19,7 +19,7 @@ Sources inspected on 2026-09-07:
 - [Ctypes package](https://github.com/oxcaml/opam-repository/blob/bb4555262936283daf5cbc82423509d4e7069b15/packages/ctypes/ctypes.0.24.0%2Box/opam): `0.24.0+ox`, MIT, upstream 0.24.0 plus pinned `bigarray.patch`. [Dune package](https://github.com/oxcaml/opam-repository/blob/bb4555262936283daf5cbc82423509d4e7069b15/packages/dune/dune.3.22.2%2Box/opam): `3.22.2+ox`, upstream source hash `df26745e52be99ecdb2ff994feab1eacd858b226` plus pinned OxCaml patch.
 - [DuckDB release v1.5.5](https://github.com/duckdb/duckdb/releases/tag/v1.5.5): project-local glibc `libduckdb-linux-amd64.zip`, SHA256 `1fb8ce388157d84a25abe685a8a2520bf00c00321821968e4bb398fd766e7abb`, matches GitHub release asset digest and locally downloaded bytes. Use matching header/library, not host packages. DuckDB is MIT licensed; no project license is selected here.
 
-The compiler source also uses a commit-addressed archive instead of the release tag URL: OxCaml metadata itself warns that release tags can move. All compiler patches and bootstrap checksums remain those of the pinned opam snapshot. Transitive package versions come from immutable repository snapshots; an installed full/frozen switch export is required before calling the complete dependency solution validated.
+The compiler source also uses a commit-addressed archive instead of the release tag URL: OxCaml metadata itself warns that release tags can move. All compiler patches and bootstrap checksums remain those of the pinned opam snapshot. Transitive package versions come from immutable repository snapshots. The completed full/frozen solution is `.local/stage1-switch.export` (SHA256 `23e6a58b350ec1ede83bb962c5a1e27fb9d67a6be4cdadcec9d7230075c6c1ad`); package names/versions are in `.local/logs/installed-packages.txt`. Source checksums and bootstrap recipes remain in the pinned snapshots.
 
 ## Existing OCaml bindings: inspect, do not adopt
 
@@ -36,7 +36,7 @@ Pinned [DuckDB 1.5.5 public header](https://github.com/duckdb/duckdb/blob/v1.5.5
 - `duckdb_result_get_chunk`, `duckdb_result_chunk_count` and legacy cell accessors are deprecated in this header; use sequential `duckdb_fetch_chunk` in new probes.
 - Copy SQL and extract all native handles while holding the runtime lock. Retain native-owned allocations across unlocked calls, then reacquire before accessing any OCaml heap object. Destruction and fetching may block too.
 
-## Test evidence so far
+## Bootstrap evidence
 
 Commands from repository root:
 
@@ -53,4 +53,78 @@ python3 stage1/setup.py --install > .local/logs/setup.log 2>&1
 - `--check`: exit 0, reports glibc 2.43/opam 2.5.1 and passes sandbox check.
 - `--fetch`: exit 0; all five pinned archives verified. Raw logs remain ignored under `.local/logs/`.
 
-Scheduler compilation/execution, DuckDB query, cleanup diagnostics, lock-release comparison and unboxed accessors have **not yet passed**. The FFI decision is deferred until both compiled experiments are available. No public package, ownership API, zero-copy guarantee or performance claim exists at this checkpoint.
+`--install` completed, including the frozen export and compiler/Dune version commands. Compiler output: `5.2.0+ox`, `flambda2: true`, `runtime5: true`, `multidomain: true`, `ox: true`; installed compiler metadata records release `5.2.0minus-39`, commit `2515546fea38e21e8143cc41db663bd56efc8d06`. Dune's binary prints `3.22.2` (package `3.22.2+ox`). `opam lint` on the derived compiler recipe: **Passed**.
+
+## Runtime and negative-test evidence
+
+OCaml/Dune commands below use the exact local switch through `stage1/run`; Python and native-loader checks use the host tools (exit 0 unless an expected failure is explicitly listed):
+
+| Command | Observed result |
+| --- | --- |
+| `stage1/run exec stage1/async_probe.exe` | `async: worker=42 heartbeat=ok` |
+| `stage1/run exec stage1/eio_probe.exe` | `eio: worker=42 heartbeat=ok` |
+| `stage1/run runtest --force` | Both scheduler cram tests, FFI tests, compile-negative control and native diagnostics passed |
+| `python3 -m unittest discover -s stage1 -p 'test_*.py' -v` | 8 tests, OK |
+| `stage1/run clean && stage1/run build @all` | Clean rebuild passes; only the two documented vendor macro warnings |
+| `ldd _build/default/stage1/ffi/ffi_tests.exe` | `libduckdb.so` resolves to this project's `.deps/duckdb/libduckdb.so` |
+
+Scheduler probes use `Async.In_thread.run` and `Eio_unix.run_in_systhread` in **separate executables**. Each timer asserts an atomic flag is still set by the running worker, not merely that a deferred result has not been delivered. Full Async and Eio dependency stacks compiled, not just scheduler interfaces.
+
+TDD checkpoints: scheduler tests first failed with `No rule found for stage1/async_probe.exe` and `eio_probe.exe`. FFI tests first failed with `No implementations provided` for `Handwritten_probe` and `Generated_probe`. These were followed by green runs. An initial BIGINT-minimum SQL fixture failed because DuckDB cast the positive magnitude before unary negation; the fixture was corrected to a quoted BIGINT cast, without weakening the boundary assertion. The bootstrap HTTPS check's distinct assertion-red is recorded above.
+
+Self-review added an explicit `OPAMNODEPEXTS=true` guard: a new test first failed with `None != 'true'`, then all **8** tests passed. This prevents future opam runs from automatically attempting host package installation; the actual initial build had not invoked sudo or a system package manager. A dry-run of the exact pinned `opam install` request under the final isolated environment reports every requested package already installed (exit 0). No compiler/dependency rebuild or pin change was made.
+
+Final `runtest` output (raw log `.local/logs/final-runtest.txt`; clean-build log `.local/logs/final-clean-build.txt`):
+
+```text
+ctypes: boxed witness accepted; native int64# witness rejected as expected
+held-lock negative control: lock-control=ok
+handwritten: lock-control=ok
+generated: lock-control=ok
+handwritten boxed: query/errors/chunks/cleanup=ok
+handwritten native int64#: query/errors/chunks/cleanup=ok
+generated int64_t: query/errors/chunks/cleanup=ok
+handwritten: gc-stress=ok
+generated: gc-stress=ok
+native: DuckDB v1.5.5, 100 query/error/open-failure cycles, ASan/UBSan/LSan=ok
+```
+
+Assertions cover `[|0L;1L;2L|]`, empty results, 5,000 rows crossing chunk boundaries, both signed BIGINT extrema, invalid SQL followed by valid queries, rejected NULL/wrong type/multiple columns, and embedded-NUL rejection. Both wrappers run dynamically allocated long SQL while another OCaml thread allocates and calls full GC/compaction. Native diagnostics additionally repeat failed opens under `/proc/duckdb-stage1-missing/database` and assert no retained helper responses after every cycle.
+
+Dune compiles the native diagnostic executable with `-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Wall -Wextra -Werror`, then runs with `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and `UBSAN_OPTIONS=halt_on_error=1`. No sanitizer errors/leaks were reported. This instruments the shared helper, **not the prebuilt DuckDB engine or the entire OCaml runtime**. Connect failure and allocation exhaustion were not fault-injected.
+
+The extracted library SHA256 is `fc23f12e376c47be520f75221288281906e7942e8fd6f6ce4849198ba60d0405`; the matching header hash is above. The native test asserts `duckdb_library_version() = "v1.5.5"`.
+
+## FFI comparison and decision
+
+**Choose handwritten stubs for the next prototype**, based on explicit native ownership/lock boundaries and the demonstrated native `int64#` accessor, **not** a speed or allocation claim. Ctypes-generated stubs are viable for ordinary boxed access and passed the same runtime tests.
+
+The supervisor approved a shared private `stage1/ffi/native_probe.c` helper so both real wrappers exercise identical DuckDB lifecycle/query/cleanup code. It uses only public C APIs, compiles with `DUCKDB_API_NO_DEPRECATED`, returns owned numeric copies, destroys all chunks/results (including failed query results), disconnects/closes and frees open errors before returning. This comparison isolates marshalling/locking/accessors; it does **not** prove broad direct-C-API binding coverage.
+
+| Capability | Handwritten | Ctypes-generated |
+| --- | --- | --- |
+| SQL lifetime | Copies OCaml bytes into `malloc` storage before unlocking; frees native copy before reacquiring | `CArray.of_string` makes NUL-terminated native storage; owner is kept live after the unlocked call with `Sys.opaque_identity` |
+| Embedded NUL | Rejected as `Embedded_nul`, never silently truncated | Same rejection |
+| Long call | Releases/reacquires around the complete native query/lifecycle; no OCaml heap access while released | Actual generated `stage1_query` stub extracts `CTYPES_ADDR_OF_FATPTR` **before** release, calls native code, reacquires **before** `CTYPES_FROM_PTR` |
+| Runtime evidence | Heartbeat/GC progresses during native sleep | Same; held-lock control observes zero in-flight heartbeats |
+| Numeric accessor | `stage1_hand_value_unboxed` returns C `int64_t` directly to an OxCaml `int64#` external, tested at extrema | Generated `int64_t` binding reacquires the lock and calls `caml_copy_int64`; its OCaml return is boxed `int64` |
+| Native bits64 witness | Compiled/running | `int64# Ctypes.typ` rejected: `layout ... bits64 ... must be a value layout`; same compiler accepts boxed `int64 Ctypes.typ` |
+
+Generated files are reproducible under `_build/default/stage1/ffi/`. The generator uses `Cstubs.unlocked` for both C and ML; the ordering was inspected, not inferred from that option. Generated C also releases around fast getters, so this is not a proposed final per-cell scheduling design. Vendor `ocaml_integers.h` emits `Int8_val`/`Int16_val` macro-redefinition warnings with this compiler; generated/vendor code is not subject to authored-code warnings-as-errors. No vendored source was patched to suppress them.
+
+The unboxed handwritten query wrapper ultimately **boxes into an owned OCaml array**; it is not zero-copy or allocation-free. The Ctypes result-pointer marshalling boundary under an OCaml out-of-memory exception is not proven leak-safe. Native error text in this helper is bounded to 511 bytes. These limitations prohibit treating the probes as a public safe API.
+
+## Diagnostics, recovery and scope limits
+
+- Ambient `ocamllsp` is `1.21.0` from the shared `freight-vcaml` switch, not a matching project-local server. It reports `Compiler version mismatch`, `unknown flag -extension-universe`, and cannot parse valid `int64#` externals. **OCaml LSP validation is unavailable, not passed.** The supervisor explicitly approved relying on the pinned compiler/Dune tests without modifying shared/editor settings or changing valid OxCaml code. Initial missing-module/config diagnostics were separately checked against successful local Dune builds.
+- `clangd 22.1.6 --check` passes `native_probe.c` and `native_diagnostics.c` using `.local/compile_commands.json`. Its full handwritten-stub check fails inside the `SwapBinaryOperands` **refactoring self-test** on OCaml macros (26 overlapping-replacement errors); there are no source diagnostic errors. The explicit diagnostic-only check `clangd --check=stage1/ffi/handwritten_stubs.c --compile-commands-dir=.local --tweaks=` passes. `clang -std=c11 -Wall -Wextra -Werror -fsyntax-only -I.deps/duckdb -I_opam/lib/ocaml stage1/ffi/native_probe.c stage1/ffi/handwritten_stubs.c stage1/ffi/native_diagnostics.c` also passes. Raw original and diagnostic-only logs are retained; the full refactoring check is not claimed to pass.
+- The original worker timed out after 30 minutes while detached bootstrap PIDs 3027/3481 continued. Recovery verified both had exited successfully, read the completed log/export, and did **not** start another install or modify active build inputs.
+- With supervisor approval, only the already-installed, inactive compiler build tree `/home/aktersnurra/projects/duckdb.ml/_opam/.opam-switch/build/oxcaml-compiler.5.2.0minus39` was removed. Resolved path and active process working directories were checked first. Installed compiler, pinned sources and downloads were retained. Diagnostics/config logs were archived to `.local/logs/completed-compiler-diagnostics.tar.gz` (SHA256 `c96dd73ee50c67054ca71237b80bf8d891b20604fea00e1471b98dbe4eec8733`). Recovered **6,426,169,344 bytes**; free space increased from **5,488,545,792** to **11,914,715,136 bytes**. Final free disk is approximately 8 GiB. No other successful build tree was removed.
+- Shared `5.2.0+ox` package listing is byte-identical before/after. No shared switches, global configuration, bookmarks or remotes were changed; no sudo, raw Git commands, publishing or external agents were used.
+- Ownership, borrowed views, static lifetime guarantees, public core, adapters/pools/cancellation and Parquet are **not implemented**. Next is stage 2's ownership/invalidation prototype, with its own compiled positive/negative evidence before freezing any interface.
+
+## Review checkpoint
+
+Code implementation revision: `ff008140789f8bf06d7ac6d297f73c9a7e16a626`, following plan `d2b28a25` and bootstrap `2168f850`. The final documentation revision and exact reviewed commit are recorded in the runtime handoff and ignored `.local/stage1-reviewed-commit.txt` (avoids a self-referential commit hash in this file).
+
+Review package: `.local/stage1-review.diff`, produced with `jj diff --git --from 24850d1b --to <reviewed-commit>`. It covers the complete stage-1 changes from the approved-spec baseline, not merely the last working change. Self-review found no implementation blocker; optional editor diagnostics and the explicitly bounded prototype guarantees above remain limitations.

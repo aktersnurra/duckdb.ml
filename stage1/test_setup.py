@@ -54,6 +54,10 @@ class SetupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "https"):
             self.setup.validate_lock(lock)
 
+    def test_environment_disables_system_dependency_installation(self):
+        environment = self.setup.local_environment({"OPAMNODEPEXTS": "false"})
+        self.assertEqual(environment.get("OPAMNODEPEXTS"), "true")
+
     def test_environment_ignores_shared_switch(self):
         environment = self.setup.local_environment(
             {
