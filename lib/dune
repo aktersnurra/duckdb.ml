@@ -1,0 +1,6 @@
+(env (dev (flags (:standard -extension-universe beta))
+          (c_flags (:standard -Werror)))
+     (stage3a-sanitize
+      (flags (:standard -extension-universe beta))
+      (c_flags (:standard -Werror -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer))
+      (link_flags (:standard -cclib -fsanitize=address,undefined))))

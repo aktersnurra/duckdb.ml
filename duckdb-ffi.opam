@@ -1,0 +1,9 @@
+opam-version: "2.0"
+synopsis: "Unsafe DuckDB C bridge for the pinned OxCaml toolchain"
+description: "Handwritten native resource owners. Requires the pinned DuckDB 1.5.5 header and shared library; see docs/native-dependency.md. This is not the safe API."
+depends: [
+  "oxcaml-compiler" {= "5.2.0minus39"}
+  "dune" {= "3.22.2+ox"}
+]
+build: [["dune" "build" "-p" name "-j" jobs]]
+install: [["dune" "install" "--prefix" prefix name]]

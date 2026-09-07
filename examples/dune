@@ -1,0 +1,1 @@
+(executable (name synchronous) (libraries base duckdb))

@@ -10,4 +10,7 @@ for tool in ("ocamlc", "dune"):
 os.chdir(ROOT)
 environment = local_environment()
 environment["DUCKDB_STAGE1_DIR"] = str(ROOT / ".deps/duckdb")
+environment["DUCKDB_INCLUDE_DIR"] = str(ROOT / ".deps/duckdb")
+for variable in ("LIBRARY_PATH", "LD_LIBRARY_PATH"):
+    environment[variable] = str(ROOT / ".deps/duckdb") + os.pathsep + environment.get(variable, "")
 os.execve("/usr/bin/opam", ["opam", "exec", "--", "dune", *sys.argv[1:]], environment)

@@ -1,0 +1,7 @@
+(library
+ (name duckdb_ffi)
+ (public_name duckdb-ffi)
+ (foreign_stubs (language c) (names resource_stubs)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (c_library_flags -lduckdb))
