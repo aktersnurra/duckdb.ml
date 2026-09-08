@@ -1,0 +1,27 @@
+(env (dev (flags (:standard -extension-universe beta)) (c_flags (:standard -Werror)))
+ (stage3a-sanitize
+  (flags (:standard -extension-universe beta))
+  (c_flags (:standard -Werror -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer))
+  (link_flags (:standard -cclib -fsanitize=address,undefined))))
+(library (name evidence_support) (wrapped false) (modules evidence_support)
+ (libraries base threads mtime.clock.os))
+(executable (name test_async_evidence) (modules test_async_evidence)
+ (libraries async duckdb duckdb-ffi evidence_support))
+(executable (name test_eio_evidence) (modules test_eio_evidence)
+ (libraries base eio_main duckdb duckdb-ffi evidence_support))
+(executable (name test_interrupt_evidence) (modules test_interrupt_evidence)
+ (libraries base threads duckdb-ffi evidence_support)
+ (foreign_stubs (language c) (names interrupt_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=duckdb_execute_prepared
+  -cclib -Wl,--wrap=duckdb_interrupt -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=duckdb_query))
+(rule (alias runtest)
+ (action (progn
+  (run timeout 60 ./%{exe:test_async_evidence.exe})
+  (run timeout 60 ./%{exe:test_eio_evidence.exe})
+  (run timeout 60 ./%{exe:test_interrupt_evidence.exe}))))
+(rule (alias runtest)
+ (deps check_modes.sh ../lib/duckdb/duckdb.mli (glob_files compile/*))
+ (action (run bash %{dep:check_modes.sh} %{ocamlc})))

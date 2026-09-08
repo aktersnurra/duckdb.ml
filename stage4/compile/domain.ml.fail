@@ -1,0 +1,2 @@
+let reject (connection : Duckdb.connection) =
+  Domain.Safe.spawn (fun () -> connection)

@@ -1,0 +1,4 @@
+let escape result =
+  Duckdb.fold_chunks result ~init:() ~f:(fun chunk () ->
+    let _length = Eio_unix.run_in_systhread (fun () -> Duckdb.chunk_length chunk) in
+    Ok (Duckdb.Stop ()))
