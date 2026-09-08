@@ -1,0 +1,3 @@
+let escape result = Duckdb.fold_chunks result ~init:0 ~f:(fun chunk _ ->
+  let x = Effect.Deep.try_with (fun () -> Duckdb.chunk_length chunk) () { effc = fun _ -> None } in
+  Ok (Duckdb.Stop x))

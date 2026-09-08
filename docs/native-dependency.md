@@ -52,7 +52,19 @@ bytecode stubs need the native library at runtime.
 FFI consumer, then builds the safe package against that **installed** FFI with
 its source package excluded. Another external consumer runs against a newly
 extracted temporary native prefix. It checks `META` dependency boundaries and
-ELF loader paths. It does not run `opam install`, change the local switch, or
+ELF loader paths, the prepared/typed example, and an external compile rejection
+of private resource admission operations. The safe package uses Dune
+`private_modules`: internal CMIs are not on the public consumer search path.
+
+**Pinned Dune build-directory limitation:** use the default `_build` or a
+source-relative **direct-child** build directory when installing a package with
+private modules. An external absolute build directory triggers an internal
+`Obj_dir.External.encode` exception in this exact Dune. The smoke test therefore
+uses an ignored root `.install-smoke.XXXXXX` directory for the safe package and
+cleans it on exit; it does not edit generated metadata or expose private modules.
+See the [stage-3b reproducer evidence](stage3b-validation.md).
+
+The smoke test does not run `opam install`, change the local switch, or
 install either scheduler. Both `.opam` files use these demonstrated Dune build
 and installation workflows; opam solver/installation execution is untested in
 this slice.

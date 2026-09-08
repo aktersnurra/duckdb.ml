@@ -1,0 +1,2 @@
+let retained = ref None
+let escape result = Duckdb.fold_chunks result ~init:() ~f:(fun chunk () -> retained := Some chunk; Ok (Duckdb.Stop ()))

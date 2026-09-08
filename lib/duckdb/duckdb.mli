@@ -1,11 +1,54 @@
+module Scalar : sig
+
+(** Native values: dates are signed days since 1970-01-01; timestamps are signed
+    ticks since that epoch. Timestamp_* are timezone-free; Timestamp_tz is a UTC
+    instant in microseconds (no original timezone retained). Native infinity
+    sentinels are preserved. No calendar or float-time conversion is performed. *)
+type _ t =
+  | Bool : bool t | Int8 : int t | Int16 : int t | Int32 : int32 t | Int64 : int64 t
+  | Float32 : float t | Float64 : float t | String : string t | Blob : string t
+  | Date : int32 t | Timestamp_s : int64 t | Timestamp_ms : int64 t
+  | Timestamp_us : int64 t | Timestamp_ns : int64 t | Timestamp_tz : int64 t
+
+type _ field = Required : 'a t -> 'a field | Nullable : 'a t -> 'a option field
+
+type error =
+  | Range of { expected : string; value : string }
+  | Type_mismatch of { index : int; expected : string; actual : int }
+  | Null of { column : int; row : int }
+  | Index of { index : int; length : int }
+  | Column_count of { expected : int; actual : int }
+  | Unbound_parameter of int
+
+val name : 'a t -> string
+
+(** Int8/16 bounds and lossless Float32 conversion are checked before binding.
+    Float32 accepts NaN, infinities and signed zero. Finite values must roundtrip
+    exactly through binary32; use [round_float32] for explicit rounding. *)
+val validate : 'a t -> 'a -> (unit, error) result
+val round_float32 : float -> float
+end
+module Row : sig
+
+(** An owned decoder describes every result column in order. Schema types are
+    checked before fetching (even for an empty result). Required fields reject
+    NULL per row; DuckDB arbitrary-SQL metadata does not prove non-nullability. *)
+type _ t =
+  | Empty : unit t
+  | Column : 'a Scalar.field * 'b t -> ('a * 'b) t
+  | Map : 'a t * ('a -> 'b) -> 'b t
+end
+
 (** Synchronous resources. No scheduler is started. Handles may move between
     system threads, but are not portable/domain-safe. Busy operations fail fast.
     Scoped callbacks cannot send effects to an outer handler. *)
 type error = Invalid_configuration of string | Embedded_nul | Closed
   | Busy | Live_children | Native_error of string | Unsupported_statement
+  | Data_error of Scalar.error
   | Effects_not_allowed | Rollback_failed of error * error
 exception Rollback_exception of exn * error
 exception Cleanup_exception of error * exn
+
 (** A result error and exceptional cleanup are retained together. Ordinary
     primary and cleanup exceptions are paired as [Base.Exn.Finally]. *)
 
@@ -51,3 +94,44 @@ val with_connection : database -> f:(connection -> ('a, error) result) -> ('a, e
     transaction semantics apply: external effects such as COPY output files
     are not rolled back. Failed/exceptional rollback discards the connection. *)
 val with_transaction : connection -> f:(transaction -> ('a, error) result) -> ('a, error) result
+
+(** Prepared statements retain their parent. Bindings persist across execution;
+    [reset] clears all of them. SQL policy is identical to [execute]. Manual
+    parent close rejects live children; scopes drain and close them. A statement
+    prepared through a transaction is revoked/closed before its settlement. *)
+type prepared
+type query_result
+type chunk
+type 'a step = Continue of 'a | Stop of 'a
+val prepare : connection -> string -> (prepared, error) result
+val prepare_transaction : transaction -> string -> (prepared, error) result
+val close_prepared : prepared -> (unit, error) result
+val parameter_count : prepared -> (int, error) result
+
+(** One-based parameter indices; known engine parameter types must match exactly.
+    Unresolved ANY/INVALID parameters accept the supplied witness. Rebinding is
+    allowed; NULL is supplied as [Nullable witness, None]. Index/type/range errors
+    leave previous bindings unchanged; native bind failure/interruption marks
+    that parameter unbound. Reset failure/interruption marks all unbound. *)
+val bind : prepared -> int -> 'a Scalar.field -> 'a -> (unit, error) result
+val reset : prepared -> (unit, error) result
+
+(** All parameters must be bound. The result exclusively leases the connection
+    until closed; reset/reexecute/prepared close return Live_children. *)
+val execute_prepared : prepared -> (query_result, error) result
+val close_result : query_result -> (unit, error) result
+val with_prepared : connection -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result
+val with_prepared_transaction : transaction -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result
+
+(** After admission, consumes/closes the result on every exit. Busy admission
+    rejects without consuming it. The callback is synchronous, local,
+    and guarded against outward effects. No owner transition is exposed through
+    a chunk. Aliases attempting mutation/fetch/close during a callback get Busy.
+    Required NULL fields fail on access, not on empty-result schema validation. *)
+val fold_chunks : query_result -> init:'a -> f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result
+val chunk_length : chunk @ local -> int
+
+(** Zero-based column and row indices, checked before reading. Each access
+    validates the exact engine type; returned strings/blobs/scalars are owned. *)
+val column : chunk @ local -> column:int -> row:int -> 'a Scalar.field -> ('a, error) result
+val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result

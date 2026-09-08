@@ -1,5 +1,5 @@
 #define DUCKDB_API_NO_DEPRECATED
-#include <duckdb.h>
+#include "query_native.h"
 #include <caml/alloc.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
@@ -23,7 +23,8 @@ typedef struct database_owner {
     int status;
     char message[512];
 } database_owner;
-typedef struct connection_owner {
+struct connection_owner {
+    _Atomic unsigned references;
     database_owner *parent;
     duckdb_connection connection;
     char *sql;
@@ -32,7 +33,7 @@ typedef struct connection_owner {
     duckdb_result result;
     int has_result, status;
     char message[512];
-} connection_owner;
+};
 #define Database(v) (*((database_owner **)Data_custom_val(v)))
 #define Connection(v) (*((connection_owner **)Data_custom_val(v)))
 static _Atomic int live, fallback;
@@ -68,7 +69,7 @@ static void connection_clear(connection_owner *owner) {
     if (owner->connection) { duckdb_disconnect(&owner->connection); released(); }
 }
 static void connection_delete(connection_owner *owner) {
-    if (!owner) return;
+    if (!owner || atomic_fetch_sub(&owner->references, 1) != 1) return;
     connection_clear(owner); database_unref(owner->parent); free(owner); released();
 }
 static void finalize_database(value v) {
@@ -102,6 +103,7 @@ CAMLprim value ml_duckdb_connection_owner(value parent) {
     Connection(v) = NULL;
     connection_owner *owner = calloc(1, sizeof(*owner));
     if (!owner) caml_raise_out_of_memory();
+    atomic_init(&owner->references, 1);
     owner->parent = Database(parent);
     atomic_fetch_add(&owner->parent->references, 1);
     Connection(v) = owner; acquired();
@@ -163,7 +165,7 @@ CAMLprim value ml_duckdb_connect(value v) {
     caml_process_pending_actions();
     CAMLreturn(Val_unit);
 }
-static int allowed_statement(duckdb_statement_type type) {
+int duckdb_ml_allowed_statement(duckdb_statement_type type) {
     /* A conservative allowlist: unknown future engine statements cannot bypass
        the transaction lease. PREPARE/EXECUTE/CALL/PRAGMA may hide control SQL. */
     switch (type) {
@@ -206,7 +208,7 @@ CAMLprim value ml_duckdb_execute(value v, value sql, value control) {
                 owner->status = 1;
                 message(owner->message, owner->prepared ? duckdb_prepare_error(owner->prepared)
                                                        : "DuckDB could not allocate prepared statement");
-            } else if (!allowed_statement(duckdb_prepared_statement_type(owner->prepared))) owner->status = 2;
+            } else if (!duckdb_ml_allowed_statement(duckdb_prepared_statement_type(owner->prepared))) owner->status = 2;
             else {
                 owner->has_result = 1; acquired();
                 if (duckdb_execute_prepared(owner->prepared, &owner->result) != DuckDBSuccess) {
@@ -259,3 +261,13 @@ CAMLprim value ml_duckdb_connection_message(value v) {
 CAMLprim value ml_duckdb_interrupt(value v) { duckdb_interrupt(Connection(v)->connection); return Val_unit; }
 CAMLprim value ml_duckdb_live_resources(value unit) { (void)unit; return Val_int(atomic_load(&live)); }
 CAMLprim value ml_duckdb_fallback_reclaims(value unit) { (void)unit; return Val_int(atomic_load(&fallback)); }
+
+connection_owner *duckdb_ml_connection_ref(value v) {
+    connection_owner *owner = Connection(v);
+    atomic_fetch_add(&owner->references, 1); return owner;
+}
+void duckdb_ml_connection_unref(connection_owner *owner) { connection_delete(owner); }
+duckdb_connection duckdb_ml_connection_handle(connection_owner *owner) { return owner->connection; }
+void duckdb_ml_acquired(void) { acquired(); }
+void duckdb_ml_released(void) { released(); }
+void duckdb_ml_fallback(void) { atomic_fetch_add(&fallback, 1); }

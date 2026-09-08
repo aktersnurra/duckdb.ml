@@ -33,3 +33,34 @@ val finish_connection_close : connection -> unit
 val interrupt : connection -> unit
 val live_resources : unit -> int
 val fallback_reclaims : unit -> int
+
+(** Unsafe prepared/result/chunk owner. Retains a native connection shell, not
+    permission to use a closed connection. Caller exclusively serializes the
+    entire child tree. All statuses/messages require a live owner. *)
+type prepared
+val prepared_owner : connection -> prepared
+val prepare : prepared -> string -> unit
+val prepared_status : prepared -> int
+val prepared_message : prepared -> string
+val parameter_count : prepared -> int
+val parameter_type : prepared -> int -> int
+val bind_null : prepared -> int -> unit
+val bind_int64 : prepared -> int -> int -> int64 -> unit
+val bind_float : prepared -> int -> int -> float -> unit
+val bind_string : prepared -> int -> int -> string -> unit
+val reset : prepared -> unit
+val execute_prepared : prepared -> unit
+val fetch : prepared -> int
+val close_result : prepared -> unit
+val finish_result_close : prepared -> unit
+val close_prepared : prepared -> unit
+val finish_prepared_close : prepared -> unit
+val clear_prepared_input : prepared -> unit
+val column_count : prepared @ local -> int
+val column_type : prepared @ local -> int -> int
+val chunk_length : prepared @ local -> int
+val chunk_valid : prepared @ local -> int -> int -> bool
+val chunk_int64 : prepared @ local -> int -> int -> int64#
+val box_int64 : int64# -> int64
+val chunk_float : prepared @ local -> int -> int -> float
+val chunk_string : prepared @ local -> int -> int -> string

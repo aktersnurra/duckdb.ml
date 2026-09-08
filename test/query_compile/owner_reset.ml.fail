@@ -1,0 +1,1 @@
+let escape result = Duckdb.fold_chunks result ~init:() ~f:(fun chunk () -> Duckdb.reset chunk |> fun _ -> Ok (Duckdb.Stop ()))

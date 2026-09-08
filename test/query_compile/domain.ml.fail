@@ -1,0 +1,3 @@
+let escape result = Duckdb.fold_chunks result ~init:() ~f:(fun chunk () ->
+  let worker = Domain.Safe.spawn (fun () -> chunk) in
+  let _ = Domain.join worker in Ok (Duckdb.Stop ()))
