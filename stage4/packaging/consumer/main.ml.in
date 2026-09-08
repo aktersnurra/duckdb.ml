@@ -1,0 +1,50 @@
+open! Base
+module C = Packaging_core
+module B = C.Bridge
+let ok = function Ok value -> value | Error _ -> failwith "unexpected fixture error"
+let closed = function Error C.Closed -> () | _ -> failwith "expected revocation"
+let cancelled = function Error C.Cancelled -> () | _ -> failwith "expected latch"
+exception Callback_failure
+let run () =
+  let escaped = ref None in
+  ok (C.with_connection ~f:(fun owner ->
+    let request = B.create () in
+    let alias = request in
+    assert (match B.settlement request with Pending -> true | Settled -> false);
+    let value = B.run request owner ~f:(fun facade ->
+      escaped := Some facade;
+      ok (C.check facade);
+      assert (match C.check owner with Error Busy -> true | _ -> false);
+      assert (match B.run request owner ~f:(fun _ -> Ok ()) with Error Busy -> true | _ -> false);
+      Ok "owned") |> ok in
+    assert (String.equal value "owned");
+    closed (C.check (Option.value_exn !escaped));
+    closed (B.cancel alias);
+    closed (B.run request owner ~f:(fun _ -> Ok ()));
+    assert (match B.settlement alias with Settled -> true | Pending -> false);
+    ok (C.check owner);
+    let before = B.create () in
+    ok (B.cancel before); ok (B.cancel before);
+    cancelled (B.run before owner ~f:(fun _ -> failwith "cancelled work ran"));
+    let caught = B.create () in
+    cancelled (B.run caught owner ~f:(fun facade ->
+      (* System-thread handoff shape; join before accessing simulated state. *)
+      let notified = ref None in
+      let delivery = Thread.create (fun () -> notified := Some (B.cancel caught)) () in
+      Thread.join delivery;
+      ok (Option.value_exn !notified);
+      cancelled (C.check facade);
+      (* Deliberately drop the failure; the request's latch must survive. *)
+      Ok ()));
+    closed (B.cancel caught);
+    let raised = B.create () in
+    (match B.run raised owner ~f:(fun facade ->
+       escaped := Some facade; raise Callback_failure) with
+     | exception Callback_failure -> ()
+     | _ -> failwith "callback exception lost");
+    closed (C.check (Option.value_exn !escaped));
+    closed (B.cancel raised);
+    Ok ()));
+  closed (C.check (Option.value_exn !escaped));
+  Stdlib.print_endline "packaging fixture: owned access, single use, alias revocation, pre-entry/caught latch, exceptional settlement=ok (SIMULATED)"
+let () = run ()

@@ -1,0 +1,19 @@
+(** NON-PRODUCTION packaging/type fixture. No engine, threads or lifetime proof. *)
+type error = Closed | Busy | Cancelled
+type connection
+val with_connection : f:(connection -> ('a, error) result) -> ('a, error) result
+
+(** Simulated admission, not SQL. *)
+val check : connection -> (unit, error) result
+module Bridge : sig
+  type request
+  type settlement = Pending | Settled
+  val create : unit -> request
+
+  (** Acknowledgement only; repeated cancellation before settlement succeeds. *)
+  val cancel : request -> (unit, error) result
+  val settlement : request -> settlement
+
+  (** Single use. Callback facade aliases are revoked before settlement. *)
+  val run : request -> connection -> f:(connection -> ('a, error) result) -> ('a, error) result
+end

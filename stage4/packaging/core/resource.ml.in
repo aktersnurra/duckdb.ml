@@ -1,0 +1,44 @@
+open! Base
+(* Sequential simulation ONLY. No native handles, mutexes, engine or scheduler. *)
+type error = Closed | Busy | Cancelled
+type phase = Fresh | Running | Finished
+type request = { mutable phase : phase; mutable cancelled : bool }
+type owner = { mutable open_ : bool; mutable leased : bool }
+type connection = { owner : owner; request : request option }
+let check c =
+  if not c.owner.open_ then Error Closed
+  else match c.request with
+    | Some { phase = Finished; _ } -> Error Closed
+    | Some { cancelled = true; _ } -> Error Cancelled
+    | Some _ -> Ok ()
+    | None -> if c.owner.leased then Error Busy else Ok ()
+let with_connection ~f =
+  let owner = { open_ = true; leased = false } in
+  Exn.protect ~finally:(fun () -> owner.open_ <- false)
+    ~f:(fun () -> f { owner; request = None })
+module Bridge = struct
+  type nonrec request = request
+  type settlement = Pending | Settled
+  let create () = { phase = Fresh; cancelled = false }
+  let cancel request = match request.phase with
+    | Finished -> Error Closed
+    | Fresh | Running -> request.cancelled <- true; Ok ()
+  let settlement request = match request.phase with
+    | Finished -> Settled | Fresh | Running -> Pending
+  let run request c ~f = match request.phase with
+    | Finished -> Error Closed
+    | Running -> Error Busy
+    | Fresh ->
+      request.phase <- Running;
+      Exn.protect ~finally:(fun () -> request.phase <- Finished)
+        ~f:(fun () ->
+          if request.cancelled then Error Cancelled
+          else Result.bind (check c) ~f:(fun () ->
+            if c.owner.leased then Error Busy else (
+              c.owner.leased <- true;
+              Exn.protect ~finally:(fun () -> c.owner.leased <- false)
+                ~f:(fun () ->
+                  match f { owner = c.owner; request = Some request } with
+                  | Ok _ when request.cancelled -> Error Cancelled
+                  | result -> result))))
+end

@@ -1,0 +1,13 @@
+(** PRIVATE, simulated Resource. No native representation exists here. *)
+type error = Closed | Busy | Cancelled
+type connection
+val with_connection : f:(connection -> ('a, error) result) -> ('a, error) result
+val check : connection -> (unit, error) result
+module Bridge : sig
+  type request
+  type settlement = Pending | Settled
+  val create : unit -> request
+  val cancel : request -> (unit, error) result
+  val settlement : request -> settlement
+  val run : request -> connection -> f:(connection -> ('a, error) result) -> ('a, error) result
+end
