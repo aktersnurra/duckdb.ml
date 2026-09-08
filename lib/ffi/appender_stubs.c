@@ -111,6 +111,15 @@ CAMLprim value ml_duckdb_create_appender(value v, value schema, value table) {
     if (!p->status) chunk = duckdb_fetch_chunk(result);
     if (!p->status && (!chunk || duckdb_data_chunk_get_size(chunk) == 0)) error(p, "Table not found in current database");
     if (!p->status) {
+        /* A full first chunk can match the physical count even with generated
+           columns. Require exhaustion before accepting its positional metadata. */
+        duckdb_data_chunk extra = duckdb_fetch_chunk(result);
+        if (extra) {
+            error(p, "Generated-column or very wide tables are not supported by appender");
+            duckdb_destroy_data_chunk(&extra);
+        } else if (duckdb_result_error(&result)) error(p, duckdb_result_error(&result));
+    }
+    if (!p->status) {
         idx_t n = duckdb_data_chunk_get_size(chunk);
         duckdb_string_t *names = duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 0));
         uint32_t len = duckdb_string_t_length(names[0]);

@@ -21,8 +21,61 @@ let scalar : type a. connection -> a Scalar.t -> a list -> (a -> a -> bool) -> u
   assert (List.equal (Option.equal equal) actual expected)
 let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b)
 type _ Stdlib.Effect.t += Pause : unit Stdlib.Effect.t
+let metadata_boundaries c =
+  (* The pinned engine's metadata chunks contain up to 2048 rows. A generated
+     column first used to shift nullability when 2048 physical columns followed. *)
+  let create table physical ~generated =
+    let columns = List.init physical ~f:(fun i ->
+      Stdlib.Printf.sprintf "c%d BIGINT%s" i (if i = 0 then " NOT NULL" else "")) in
+    let columns = if generated then "g BIGINT GENERATED ALWAYS AS (c0+1)" :: columns else columns in
+    ok (execute c ("CREATE TABLE " ^ table ^ "(" ^ String.concat ~sep:"," columns ^ ")")) in
+  let valid_row physical = Cell (Required Int64,42L) ::
+    List.init (physical - 1) ~f:(fun _ -> Cell (Nullable Int64,None)) in
+  let baseline = Duckdb_ffi.live_resources () in
+  let clean () =
+    assert (Duckdb_ffi.live_resources () = baseline);
+    assert (Duckdb_ffi.fallback_reclaims () = 0) in
+  List.iter [2;2048] ~f:(fun physical ->
+    let table = "metadata_plain_" ^ Int.to_string physical in
+    create table physical ~generated:false;
+    ok (with_appender c table ~f:(fun a -> append_rows a [valid_row physical]));
+    assert (Int64.equal (count c table) 1L);
+    assert (match rows c ("SELECT c0,c1 FROM " ^ table)
+      Row.(Column (Required Int64,Column (Nullable Int64,Empty))) with
+      | [(42L,(None,()))] -> true | _ -> false);
+    let result = with_appender c table ~f:(fun a ->
+      ok (append_rows a [valid_row physical]);
+      let null_row = List.init physical ~f:(fun _ -> Cell (Nullable Int64,None)) in
+      let first = error (append_rows a [null_row]) in
+      assert (match first with Data_error (Scalar.Null {column=0;row=0}) -> true | _ -> false);
+      assert (phys_equal first (error (flush_appender a)));
+      assert (phys_equal first (error (close_appender a)));
+      ok (close_appender a); Ok ()) in
+    ignore (error result);
+    assert (Int64.equal (count c table) 1L); clean ());
+  ok (execute c "CREATE TABLE metadata_marker(x BIGINT)");
+  List.iter ["metadata_generated_boundary",2048,true;
+             "metadata_generated_small",2,true;
+             "metadata_oversized",2049,false;
+             "metadata_three_chunks",4097,false] ~f:(fun (table,physical,generated) ->
+    create table physical ~generated;
+    let first = ref None in
+    let result = with_transaction c ~f:(fun tx ->
+      ok (execute_transaction tx "INSERT INTO metadata_marker VALUES (1)");
+      let e = error (with_appender_transaction tx table ~f:(fun _ ->
+        failwith ("metadata schema accepted before exhaustion: " ^ table))) in
+      assert (match e with Native_error s -> String.equal s
+        "Generated-column or very wide tables are not supported by appender" | _ -> false);
+      first := Some e;
+      (* Ignoring failed creation must still poison settlement and undo prior SQL. *)
+      Ok ()) in
+    assert (phys_equal (error result) (Option.value_exn !first));
+    assert (Int64.equal (count c "metadata_marker") 0L);
+    assert (Int64.equal (count c table) 0L); clean ());
+  Stdlib.print_endline "appender metadata: single/exact-chunk acceptance, generated/oversized rejection, poisoning and cleanup passed"
 let () =
   ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
+    metadata_boundaries c;
     scalar c Bool [false;true] Bool.equal;
     scalar c Int8 [-128;127] Int.equal; scalar c Int16 [-32768;32767] Int.equal;
     scalar c Int32 [Int32.min_value;Int32.max_value] Int32.equal;

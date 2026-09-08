@@ -1,8 +1,9 @@
 # Stage 3c: appender ingestion and typed local Parquet
 
 Validated 2026-09-08 on the existing x86-64 Linux/glibc toolchain, from reviewed
-`2892e0f5584c582faacfaff3603ec4ec9086f16b`. **Implementation checks pass;
-independent review required.** This completes this synchronous slice, not the
+`2892e0f5584c582faacfaff3603ec4ec9086f16b`. **Independent review's P1
+metadata-truncation finding is fixed; focused rereview and parent verification pass.**
+This completes implementation of this synchronous slice, not the
 adapters, cancellation, benchmarks, publication or overall project.
 
 Plan: [stage3c execution plan](superpowers/plans/2026-09-08-stage3c-ingestion-parquet.md),
@@ -305,5 +306,114 @@ was validation of the fully resolved Parquet path, as recorded above. Fresh
 `resume-build.txt`, `resume-runtest.txt`, `resume-install.txt`,
 `resume-example.txt` and `resume-sanitize-parquet.txt` confirm the completed
 revision after that change. Existing repetition/native-source/signal evidence
-remains identified separately rather than claimed as newly rerun. Independent
-review has not yet occurred.
+remains identified separately rather than claimed as newly rerun. That resume
+preceded the independent review and focused P1 correction recorded below.
+
+## P1 follow-up: require appender metadata exhaustion
+
+The independent review of `2892e0f5` → `c8a09343` blocked acceptance on one P1:
+checking only the first metadata chunk's row count against physical appender
+columns can accept generated columns and misalign NOT NULL metadata. The
+parent's public-C reproduction, rerun unchanged against the pinned v1.5.5 engine,
+reports `first_chunk=2048`, `second_chunk=1`, `physical_columns=2048` for a generated
+column first followed by 2048 BIGINT columns (`c0 NOT NULL`). Appending NULL to
+physical c0 and ending the row succeed; close fails NOT NULL. This is not
+committed-invalid-data evidence.
+
+The fix against `c8a0934373b5b052ae11e4a98a73efcc00245c1b` changes only
+`lib/ffi/appender_stubs.c`, `test/test_appender.ml`, and this document. Before
+creating an appender or accepting positional metadata, the binding now fetches
+one more chunk, rejects and destroys it if present, and checks fetch errors when
+exhausted. The original logical/physical count comparison remains necessary and
+unchanged. The first chunk, result and prepared statement retain their existing
+unconditional destruction; unread later chunks belong to the destroyed result.
+Rejected creation follows existing native-shell destruction and transaction
+poisoning, with no accepted child or row mutation. No public API changes.
+
+Test-first evidence under `.local/logs/stage3c/metadata-fix/`:
+
+- `red-compile.txt`: initial test helper used unavailable `Tuple2`; replaced with
+  a direct row pattern before the behavioral red run. This compile error is not
+  the regression evidence.
+- `red.txt`: pinned-compiler safe-API run exits **2**, raising
+  `metadata schema accepted before exhaustion: metadata_generated_boundary`.
+  The 2- and 2048-column ordinary-table controls passed before this failure.
+- `green.txt`: the same executable exits **0** after the nine-line C correction.
+  Both ordinary controls ingest `(42,NULL,...)`, retain correct NOT NULL checks,
+  return the identical first error on flush/close, tolerate repeated close, and
+  roll back the preceding buffered row on validation failure.
+- Generated-first tables with 2 and 2048 physical columns, and ordinary tables
+  with 2049 and 4097 columns, reject before their scope callback runs. Ignoring
+  failed creation still returns the original error at settlement and rolls back
+  prior SQL to a marker table. Each case restores live binding-resource counts
+  to its baseline with zero fallback reclaims, without requesting GC; the full
+  test ends with zero live binding resources and zero fallback reclaims.
+- `build.txt` and `runtest.txt`: fresh full build and forced Stage1/2/3a/3b/3c
+  suites exit **0**, including prior native diagnostic and negative-compile
+  controls, ten appender DDL races, and all 21 Stage3c signal modes.
+- `sanitize-test_appender.txt`, `sanitize-test_appender_concurrency.txt`,
+  `sanitize-test_parquet.txt`, and the 21 `sanitize-<mode>.txt` files: authored-C
+  ASan/UBSan runs all exit **0**, with **detect_leaks=0**. Native C warnings-as-errors
+  passes (`clang.txt`); diagnostic-only clangd reports **0 errors** (`clangd.txt`).
+- `native-repro.txt` confirms the original engine-level chunk geometry and
+  deferred NOT NULL failure. It deliberately bypasses the fixed safe API, so
+  its count-only guard still accepts; `red.txt`/`green.txt` test the binding fix.
+
+Exact verification commands (repository root; same existing local dependencies):
+
+```sh
+# Run once before the C fix (red), then after (green):
+stage1/run exec test/test_appender.exe
+stage1/run build @all
+stage1/run runtest --force
+for executable in test_appender test_appender_concurrency test_parquet; do
+  ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    timeout 120 stage1/run exec --profile stage3a-sanitize \
+    --build-dir "$PWD/.local/build-stage3c-sanitize" "test/$executable.exe"
+done
+for mode in create-enter create-leave append-enter append-leave flush-enter flush-leave close-enter close-leave discard-enter discard-leave callback commit-enter commit-leave export-copy-enter export-copy-leave export-publish-enter export-publish-leave export-remove-enter export-remove-leave export-fail-remove-enter export-fail-remove-leave; do
+  ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+    timeout 30 stage1/run exec --profile stage3a-sanitize \
+    --build-dir "$PWD/.local/build-stage3c-sanitize" test/test_stage3c_signals.exe -- "$mode"
+done
+clang -std=c11 -Wall -Wextra -Werror -fsyntax-only \
+  -I.deps/duckdb -I_opam/lib/ocaml lib/ffi/appender_stubs.c
+clangd --check=lib/ffi/appender_stubs.c --compile-commands-dir=.local/stage3c --tweaks=
+cc -Wall -Wextra -Werror -I.deps/duckdb .local/stage3c/wide_metadata_review.c \
+  -L.deps/duckdb -lduckdb -o .local/stage3c/wide_metadata_fix_probe
+LD_LIBRARY_PATH="$PWD/.deps/duckdb" .local/stage3c/wide_metadata_fix_probe
+stage1/run exec -- ocamlc -version
+stage1/run exec -- dune --version
+jj --version
+cc --version
+clang --version
+sha256sum .deps/duckdb/duckdb.h .deps/duckdb/libduckdb.so
+sha256sum --check .local/logs/stage3c/metadata-fix/preserved-before.sha256
+jj diff --from c8a0934373b5b052ae11e4a98a73efcc00245c1b --git --color=never \
+  lib/ffi/appender_stubs.c test/test_appender.ml docs/stage3c-validation.md \
+  > .local/stage3c/metadata-fix.diff
+```
+
+`pins.txt` rechecks compiler **5.2.0+ox**, Dune **3.22.2**, jj **0.42.0**, GCC
+**16.1.1 20260625**, clang/clangd **22.1.6**, and unchanged header/library hashes
+listed above. The inherited pinned compiler source revision remains unchanged.
+Hash checks preserve all six unrelated formatting paths and generated `.pi/tasks`
+state byte-for-byte. The focused diff excludes them; no commit or staging was
+performed by the fix worker.
+
+**Acceptance:** Independent focused rereview `7012acff` found the P1 resolved,
+with spec and quality verdicts OK and no new findings in the fix's affected code.
+The parent inspected the focused diff and freshly reran `stage1/run build @all`
+and `stage1/run runtest --force`, both exit **0** (`parent-build.txt` and
+`parent-runtest.txt` in the same log directory). Stage3c's review gate is accepted;
+Stage4 remains unimplemented. The reviewed fix diff SHA256 before this acceptance
+note was `5c40363d71186df93d9dd6aae3a4a8ecbe75cb12f2e8ae06d07cccd7e63abe2d`.
+
+Metadata chunk destruction is additionally source-inspected, not claimed from
+binding-shell counters alone: those counters do not enumerate temporary engine
+metadata chunks. ASan/UBSan with leaks disabled is not a leak detector. The prior
+unsuppressed whole-process LSan failure remains a failure, was not rerun here,
+and no leak-free-process guarantee is added. Ambient OCaml LSP remains
+incompatible/unavailable; actual pinned compiler results are authoritative.
+Previously recorded interruption/OOM/foreign-runtime limits remain unchanged;
+no Stage4, publication, performance, or broader safety claim is added.
