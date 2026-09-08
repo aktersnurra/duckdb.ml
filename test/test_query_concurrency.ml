@@ -129,3 +129,46 @@ let () =
         for _ = 1 to 20 do let _ = String.make 100000 'g' in Stdlib.Gc.compact () done);
       Ok ()));
   clean (); Stdlib.print_endline "query: native-owned dynamic SQL/string lengths survive unlocked concurrent compaction=ok"
+
+let () =
+  List.iter [3; 5; 1; 6] ~f:(fun point ->
+    List.iter [false; true] ~f:(fun explicit ->
+      ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
+        D.with_connection db ~f:(fun ddl ->
+          ok (D.execute c "CREATE TABLE t(x BIGINT)");
+          let run prepare = prepare ~f:(fun p ->
+            ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 9007199254740993L);
+            arm point;
+            let worker = start D.execute_prepared p in
+            Exn.protect ~finally:(fun () -> release ()) ~f:(fun () ->
+              wait (fun () -> entered () = point);
+              (* Disarm only the DDL's passage through the same wrapped symbol. *)
+              arm 0;
+              ok (D.execute ddl "ALTER TABLE t ALTER x TYPE DOUBLE"));
+            let result = join worker in
+            (match point, explicit, result with
+             | 3, false, Error (D.Data_error D.Scalar.Parameter_schema_changed) -> ()
+             | 6, true, Ok r -> ok (D.close_result r)
+             | 6, false, Error (D.Rollback_failed (D.Native_error primary, D.Native_error _)) ->
+               assert (String.is_substring primary ~substring:"Failed to commit: Transaction conflict")
+             | _, _, Error (D.Native_error message) ->
+               assert (String.is_substring message ~substring:"Transaction conflict")
+             | _ -> failwith "schema race did not reject at the intended boundary");
+            Ok ()) in
+          let result = if explicit then D.with_transaction c ~f:(fun tx ->
+            run (D.with_prepared_transaction tx "INSERT INTO t VALUES (?)"))
+            else run (D.with_prepared c "INSERT INTO t VALUES (?)") in
+          if point = 6 && explicit then (
+            match result with
+            | Error (D.Rollback_failed (D.Native_error primary, D.Native_error _)) ->
+              assert (String.is_substring primary ~substring:"Failed to commit: Transaction conflict")
+            | _ -> failwith "expected outer commit conflict and rollback failure")
+          else ok result;
+          if point = 6 then (
+            match D.execute c "SELECT 1" with Error D.Closed -> () | _ -> failwith "failed settlement did not discard")
+          else ok (D.execute c "SELECT 1");
+          ok (D.execute ddl "SELECT CASE WHEN count(*)=0 THEN 1 ELSE error('rounded insert') END FROM t");
+          ok (D.execute ddl "INSERT INTO t VALUES (42)");
+          Ok ()))));
+      clean ();
+      Stdlib.Printf.printf "query: schema race point=%d explicit=%b snapshot/conflict/no-insert/cleanup=ok\n%!" point explicit))

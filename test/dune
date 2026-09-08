@@ -59,6 +59,7 @@
  (link_flags :standard -cclib -Wl,--wrap=duckdb_execute_prepared -cclib -Wl,--wrap=duckdb_fetch_chunk
              -cclib -Wl,--wrap=duckdb_result_error -cclib -Wl,--wrap=duckdb_bind_int64
              -cclib -Wl,--wrap=duckdb_extract_statements -cclib -Wl,--wrap=duckdb_bind_varchar_length
+             -cclib -Wl,--wrap=duckdb_prepare_extracted_statement
              -cclib -Wl,--wrap=caml_ml_condition_wait))
 (executable (name test_query_signals) (modules test_query_signals)
  (libraries base duckdb duckdb-ffi)
@@ -93,3 +94,14 @@
   (run timeout 30 ./%{exe:test_query_signals.exe} bind-float-leave)
   (run timeout 30 ./%{exe:test_query_signals.exe} bind-null-enter)
   (run timeout 30 ./%{exe:test_query_signals.exe} bind-null-leave))))
+
+(test (name test_query_schema) (modules test_query_schema) (libraries base threads duckdb duckdb-ffi))
+(test (name test_query_schema_signals) (modules test_query_schema_signals)
+ (libraries base duckdb duckdb-ffi)
+ (foreign_stubs (language c) (names schema_signal_stubs)
+  (extra_deps signal_stubs.c)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=caml_enter_blocking_section
+             -cclib -Wl,--wrap=caml_leave_blocking_section
+             -cclib -Wl,--wrap=duckdb_query))

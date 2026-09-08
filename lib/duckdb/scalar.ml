@@ -14,6 +14,7 @@ type error =
   | Index of { index : int; length : int }
   | Column_count of { expected : int; actual : int }
   | Unbound_parameter of int
+  | Parameter_schema_changed
 
 
 let name : type a. a t -> string = function

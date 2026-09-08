@@ -19,6 +19,7 @@ type error =
   | Index of { index : int; length : int }
   | Column_count of { expected : int; actual : int }
   | Unbound_parameter of int
+  | Parameter_schema_changed
 
 val name : 'a t -> string
 
@@ -117,7 +118,15 @@ val bind : prepared -> int -> 'a Scalar.field -> 'a -> (unit, error) result
 val reset : prepared -> (unit, error) result
 
 (** All parameters must be bound. The result exclusively leases the connection
-    until closed; reset/reexecute/prepared close return Live_children. *)
+    until closed; reset/reexecute/prepared close return Live_children.
+    Before execution, freshly inferred parameter types must equal those at
+    preparation, otherwise Data_error Parameter_schema_changed is returned.
+    Reset does not update that schema; prepare anew to accept a changed schema.
+    Validation and execution share a DuckDB transaction snapshot. Outside an
+    explicit transaction, an internal transaction is settled before returning
+    the materialized result; no hidden transaction spans result callbacks.
+    Failed rollback discards the connection. Interruption does not prove that
+    writes did not commit. Explicit SQL casts/expressions retain SQL semantics. *)
 val execute_prepared : prepared -> (query_result, error) result
 val close_result : query_result -> (unit, error) result
 val with_prepared : connection -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result

@@ -14,7 +14,9 @@ static void pause_at(int point) {
 duckdb_state real_execute(duckdb_prepared_statement, duckdb_result *) __asm__("__real_duckdb_execute_prepared");
 duckdb_state wrapped_execute(duckdb_prepared_statement, duckdb_result *) __asm__("__wrap_duckdb_execute_prepared");
 duckdb_state wrapped_execute(duckdb_prepared_statement p, duckdb_result *r) {
-    pause_at(1); return real_execute(p, r);
+    pause_at(1);
+    duckdb_state state = real_execute(p, r);
+    pause_at(6); return state;
 }
 duckdb_data_chunk real_fetch(duckdb_result) __asm__("__real_duckdb_fetch_chunk");
 duckdb_data_chunk wrapped_fetch(duckdb_result) __asm__("__wrap_duckdb_fetch_chunk");
@@ -56,4 +58,10 @@ duckdb_state real_bind_text(duckdb_prepared_statement, idx_t, const char *, idx_
 duckdb_state wrapped_bind_text(duckdb_prepared_statement, idx_t, const char *, idx_t) __asm__("__wrap_duckdb_bind_varchar_length");
 duckdb_state wrapped_bind_text(duckdb_prepared_statement p, idx_t i, const char *text, idx_t length) {
     pause_at(4); return real_bind_text(p, i, text, length);
+}
+duckdb_state real_prepare_extracted(duckdb_connection, duckdb_extracted_statements, idx_t, duckdb_prepared_statement *) __asm__("__real_duckdb_prepare_extracted_statement");
+duckdb_state wrapped_prepare_extracted(duckdb_connection, duckdb_extracted_statements, idx_t, duckdb_prepared_statement *) __asm__("__wrap_duckdb_prepare_extracted_statement");
+duckdb_state wrapped_prepare_extracted(duckdb_connection c, duckdb_extracted_statements e, idx_t i, duckdb_prepared_statement *p) {
+    duckdb_state state = real_prepare_extracted(c, e, i, p);
+    pause_at(5); return state;
 }

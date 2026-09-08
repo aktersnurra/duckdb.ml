@@ -22,8 +22,8 @@ New abstract `prepared`, `query_result` and local `chunk` capabilities:
 - `fold_chunks`, range/type-checked `column`, `chunk_length`, and `fold_rows`.
   An admitted fold consumes/closes the result on exhaustion, Stop, error,
   exception or effect denial. Busy admission does **not** consume it.
-- `Data_error` wraps named range, type/schema, NULL, index, column-count and
-  unbound-parameter errors. Schema diagnostics contain the expected type name,
+- `Data_error` wraps named range, type/schema, NULL, index, column-count,
+  unbound-parameter and changed-parameter-schema errors. Schema diagnostics contain the expected type name,
   actual DuckDB public type ID and index. NULL errors identify zero-based column
   and chunk-relative row. Native errors retain the existing 511-byte text limit.
 
@@ -33,7 +33,8 @@ New abstract `prepared`, `query_result` and local `chunk` capabilities:
 | Bind | One-based index; all parameters must be bound before execute; rebind permitted |
 | Known parameter type | Exact engine type required; no implicit integer/float/temporal coercion |
 | Unresolved parameter | INVALID/ANY at prepare accepts the supplied witness; reset/rebind can change it |
-| Binding persistence | Successful execution retains bindings; reset clears all |
+| Binding persistence | Successful execution retains bindings; reset clears all, but does not refresh the original parameter schema |
+| Execution-time schema | Fresh preparation must match the original inferred parameter schema in the same transaction snapshot as execution; mismatch returns Parameter_schema_changed |
 | Invalid index/type/range | Previous binding unchanged (validation precedes mutation) |
 | Native failed/interrupted bind | Affected parameter marked unbound; engine may retain its old binding but it cannot be executed through this API |
 | Failed/interrupted reset | All parameters marked unbound |
@@ -299,6 +300,172 @@ Header/library SHA256 remain
 No dependency reinstall, raw Git, sudo, global/shared/editor change or remote
 publication occurred. The five pre-existing formatting changes are preserved
 and excluded from implementation commits. No files were staged (jj workflow).
+
+## Stage 3b review correction: stale prepared parameter schema
+
+The independent review of `d5dbb18f` demonstrated a precision bug: prepare an
+INSERT into BIGINT, ALTER the column to DOUBLE, bind `9007199254740993L`, then
+execute the retained statement. DuckDB rebound it and successfully stored
+`9007199254740992`. The original `.local/logs/reprepare-repro.txt` remains intact.
+This correction addresses that finding only; it does not broaden the SQL
+allowlist, add adapters, or claim general SQL-expression precision checking.
+
+### Bounded correction and transaction semantics
+
+- `Query` retains the original SQL and inferred parameter-type array. Each
+  admitted execution freshly prepares that SQL on the same connection and
+  compares **all** parameter types/counts before executing the original bound
+  statement. Mismatch returns `Data_error Scalar.Parameter_schema_changed`;
+  failed fresh preparation returns its existing native/policy error. The
+  temporary prepared owner is scoped and closed on every tested exit.
+- Validation does not change/rebind the original native values or binding
+  witnesses. Existing exact binding checks and INVALID/ANY witness behavior
+  remain. A change from unresolved to concrete inference is conservatively a
+  schema-change rejection too. Reset clears bindings, not the saved schema;
+  prepare a new statement to accept a changed schema. Unchanged-schema retained
+  binding/rebind/reset/NULL/temporal tests still pass.
+- Private `Resource.with_child_snapshot` runs under the **existing exclusive
+  child admission**. A transaction-owned child uses its existing transaction:
+  no nested BEGIN, early COMMIT, new token, or change in outer rollback ownership.
+  Otherwise it owns a minimal BEGIN → fresh validation → materialized execution
+  → COMMIT transaction. This intentionally replaces prepared-query autocommit
+  with an explicit internal transaction; no hidden transaction survives into
+  caller result traversal/callbacks. Results remain valid after COMMIT.
+- Error/exception/Break attempts rollback. Primary errors/exceptions and
+  rollback failures use the existing `Rollback_failed`, `Rollback_exception`,
+  `Cleanup_exception` and `Base.Exn.Finally` rules. Failed/exceptional rollback
+  discards the exclusively admitted connection and its children. A failed
+  COMMIT can already have ended the transaction; its subsequent rollback error
+  is retained rather than hidden. A post-COMMIT Break can follow a committed
+  write, as the new observer-connection test demonstrates.
+- No production FFI changes, metadata mutex spanning native work/callbacks,
+  database-wide serialization, binding retry/coercion, or new ownership promise.
+  The existing native SQL copying, retained shells, pending-action processing,
+  local borrowed views, no-escape barrier and close/drain rules are unchanged.
+  Fresh validation uses the existing scoped error/cleanup preservation, including
+  a schema error followed by Break during temporary-owner close.
+- This is exact **parameter binding/inference** protection, not an analysis of
+  arbitrary SQL casts or expressions. Explicit SQL conversions, external file
+  schema changes, and COPY's nontransactional external effects retain engine
+  semantics. Extra preparation and transaction-control calls have a cost;
+  no performance claim or benchmark follows from this correctness fix.
+
+### Why validation and execution share a schema snapshot
+
+Read-only engine-source inspection used immutable DuckDB revision
+`d8cdaa33fda8df955cc76ef58a280f68f4cd43fa` (v1.5.5). The actual pinned library
+reports `source_id=d8cdaa33fd`. Source downloads live only in ignored
+`.local/stage3b-schema/`; `source-hashes.txt` and
+`immutable-source-verification.txt` record their checksums/identity under
+`.local/logs/stage3b-schema/`. No engine code was copied into the binding or built.
+
+- `src/main/client_context.cpp:757–770,1236–1272`: fresh preparation runs via
+  `RunFunctionInTransactionInternal`; an existing explicit transaction is not
+  started/committed again. `224–235,609–630` show execution using the active
+  transaction and rebinding against that context when necessary.
+- `src/transaction/meta_transaction.cpp:55–77` caches the per-database transaction;
+  `duck_transaction_manager.cpp:88–96,594–596` fixes its start timestamp/catalog
+  version. `src/catalog/catalog_set.cpp:507–536` chooses catalog entries visible
+  to that transaction, not another connection's later commit.
+  `src/catalog/duck_catalog.cpp:178–182` returns the active transaction's catalog
+  version; `src/main/prepared_statement_data.cpp:24–78` checks that identity for
+  retained plans. Thus destroying the temporary prepared object is not the end
+  of the validation snapshot. Retained-plan execution sees the same catalog.
+- `src/main/capi/prepared-c.cpp:424–436` executes with streaming disabled;
+  `src/main/materialized_query_result.cpp:8–14,85–103` owns the collection and
+  fetches from it. Existing scalar/multichunk and installed consumers exercise
+  result fetching after the new internal COMMIT.
+- Merely asking the old object for parameter types after `pending_prepared` is
+  not a fix: `client_context.cpp:609–630` rebinds a local shared pointer while
+  `prepared-c.cpp:160–174` reads the old object's data. The correction does not
+  rely on that stale metadata seam.
+
+Eight handshake tests cover DDL on another connection before fresh preparation,
+after fresh preparation, immediately before native execution, and after native
+execution/before commit, under both internal and explicit transactions. DDL
+before an internal snapshot produces `Parameter_schema_changed`; DDL after a
+snapshot is established produces an engine transaction conflict (at execution
+or commit), never a rounded insert. Explicit transactions already established
+their snapshot during original preparation. Late commit conflicts preserve
+both settlement errors and discard the connection. Every case checks zero rows
+from the independent connection and successful subsequent use of a clean
+connection. Worker exceptions propagate through join; no sleep-only race oracle.
+
+### Red/green and final checks for this correction
+
+All raw logs below are in `.local/logs/stage3b-schema/`. All project commands
+continue to use the unchanged local `stage1/run` pins.
+
+| Check | Evidence |
+| --- | --- |
+| Test before fix: `stage1/run exec test/test_query_schema.exe` | `red.txt`, exit 2: stale schema executed successfully |
+| Six before-bind/after-bind/retained-reuse cases, same/other connection | `green-schema.txt`, exit 0; exact schema error, no rounded rows, reset/close/newly prepared Float64 and clean connection reuse |
+| Explicit transaction and statement policy | Same log: original rollback restores rows and BIGINT schema; SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/COPY/MERGE succeed. SQL ANALYZE remains rejected because this engine classifies it as VACUUM, outside the unchanged allowlist |
+| Remove only the new snapshot wrapper, keep fresh validation | `no-snapshot-mutation-red.txt`, exit 2 at post-prepare concurrent ALTER; restored `snapshot-restored.txt`, exit 0. A refresh alone demonstrably races |
+| Native snapshot probes | `snapshot.txt`, `after-execute.txt`, exit 0: pinned source_id, BIGINT snapshot, concurrent ALTER, execution/commit conflicts, zero rows |
+| Eight final DDL races | `races-green.txt`, exit 0, including post-execution commit conflict/discard |
+| Original external reproduction, unchanged source | `original-repro-rejected.txt`, exit 2 at its old success assertion (`execute insert: error`), no rounded value printed |
+| 14 new single-Sys.Break boundaries + four control-failure cases | `signals-green.txt`, exit 0; exact live/injection/handler counts, outcome preservation, committed-vs-rolled-back observer visibility, discard/reuse, zero resources and zero fallback without GC |
+| Standalone sanitizer build fixture | New included signal helper needed explicit Dune `extra_deps`; fixed instead of relying on a previous @all build. All four final sanitizer runs pass |
+| Exact compiler/test refinements | Fixed a new test parenthesis error; explicit transaction pre-validation race correctly expects its already-established snapshot; a query replacing rollback in an aborted transaction reports the engine's actual aborted-transaction error, preserved with the primary |
+
+Final commands (exit 0 except the deliberate original-reproduction assertion
+and recorded red/mutation runs):
+
+```sh
+stage1/run build @all
+stage1/run runtest --force
+bash test/install_smoke.sh
+# Ten repetitions of each, using --no-build and a 30-second outer timeout:
+timeout 30 stage1/run exec --no-build test/test_query_schema.exe
+timeout 30 stage1/run exec --no-build test/test_query_concurrency.exe
+timeout 30 stage1/run exec --no-build test/test_query_schema_signals.exe
+# Each of test_query, test_query_schema, test_query_concurrency,
+# test_query_schema_signals, with the existing authored-C sanitizer profile:
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  timeout 120 stage1/run exec --profile stage3a-sanitize \
+  --build-dir "$PWD/.local/build-stage3b-sanitize" test/test_query_schema.exe
+clang -std=c11 -Wall -Wextra -Werror -fsyntax-only \
+  -I.deps/duckdb -I_opam/lib/ocaml lib/ffi/resource_stubs.c \
+  lib/ffi/prepared_stubs.c lib/ffi/typed_stubs.c \
+  test/query_hooks.c test/query_signal_stubs.c test/schema_signal_stubs.c
+# Each of the two changed/new test-only C files:
+clangd --check=test/schema_signal_stubs.c --compile-commands-dir=.local --tweaks=
+# Ignored native probes; repeat with after-execute in place of snapshot:
+cc -Wall -Wextra -Werror -I.deps/duckdb .local/stage3b-schema/snapshot.c \
+  -L.deps/duckdb -lduckdb -o .local/stage3b-schema/snapshot
+LD_LIBRARY_PATH="$PWD/.deps/duckdb" .local/stage3b-schema/snapshot
+# Unchanged original external reproduction (expected exit 2, not a pass):
+stage1/run exec --no-build -- /usr/bin/env \
+  OCAMLPATH="$PWD/_build/install/default/lib:$PWD/_opam/lib" \
+  LIBRARY_PATH="$PWD/.deps/duckdb" LD_LIBRARY_PATH="$PWD/.deps/duckdb" \
+  "$PWD/_opam/bin/dune" exec --root "$PWD/.local/reprepare-repro" ./main.exe
+```
+
+`final-build.txt`, `final-runtest.txt`, `final-install.txt`, `repeated.txt`,
+`sanitize-*.txt`, `clang.txt` and the two `clangd-*.txt` logs retain the output.
+Full stage1/2/3a/3b tests, all prior local-mode fixtures and 25 prior query signal
+cases pass. Repetitions include **80 DDL races, 140 new signal cases and 40
+control-fault cases**. Both diagnostic-only clangd checks report **0 errors**.
+The separately installed consumers still confirm private Resource is unbound,
+scheduler-free dependencies and relocated library loading. This remains a
+Dune install smoke, **not** an actual opam installation.
+
+All prior limitations remain: authored-C ASan/UBSan with leak detection disabled
+is not whole-process LSan success or instrumentation of the engine/runtime.
+Ambient OCaml LSP remains **unavailable**, despite repeated incompatible local/
+extension diagnostics; the exact pinned compiler passes. No shared/editor
+configuration or valid OxCaml syntax was altered to appease it. No arbitrary/
+repeated asynchronous interruption, OOM, external-SQL-effect rollback, portable
+handle, cancellation, publication-metadata or license guarantee was added.
+`pins.txt` rechecks compiler `5.2.0+ox`, Dune `3.22.2`, jj `0.42.0` and the unchanged
+header/library hashes recorded above. No dependency reinstall or publication.
+
+At this fix's start there were **six** formatting-only paths (the original five
+plus `test/check_query_modes.sh`). Their complete diff is byte-identical to
+`.local/stage3b-schema/preserved-formatting.diff`; all are excluded from the fix
+commit. The runtime handoff identifies the new immutable commit and refreshed
+`.local/stage3b-review.diff` from `cb310c66`. Independent re-review is required.
 
 ## Stage 3c contract and review checkpoint
 

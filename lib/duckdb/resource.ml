@@ -314,3 +314,35 @@ let with_transaction c ~f =
         | Ok (Ok ()) -> restore ()
         | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:restore)
 )
+
+let with_child_snapshot (child : child) work =
+  match child.transaction with
+  | Some _ -> work ()
+  | None ->
+    let c = child.connection in
+    (* child_operation already owns exclusive admission. No public token or
+       callback can use this internal transaction; materialization precedes COMMIT. *)
+    let outcome =
+      try Ok (Stdlib.Sys.with_async_exns (fun () ->
+        Result.bind (raw_execute c "BEGIN TRANSACTION" true) ~f:(fun () ->
+          Result.bind (work ()) ~f:(fun value ->
+            Result.map (raw_execute c "COMMIT" true) ~f:(fun () -> value)))))
+      with exn -> Error exn in
+    match outcome with
+    | Ok (Ok value) -> Ok value
+    | Ok (Error _) | Error _ ->
+      let rolled_back =
+        try Ok (complete_cleanup (fun () -> raw_execute c "ROLLBACK" true))
+        with exn -> Error exn in
+      let restore () = match outcome, rolled_back with
+        | Ok (Error primary), Ok (Ok ()) -> Error primary
+        | Error primary, Ok (Ok ()) -> raise primary
+        | Ok (Error primary), Ok (Error secondary) -> Error (Rollback_failed (primary, secondary))
+        | Error primary, Ok (Error secondary) -> raise (Rollback_exception (primary, secondary))
+        | Ok (Error primary), Error secondary -> raise (Cleanup_exception (primary, secondary))
+        | Error primary, Error secondary -> raise (Exn.Finally (primary, secondary))
+        | Ok (Ok _), _ -> assert false in
+      match rolled_back with
+      | Ok (Ok ()) -> restore ()
+      | Ok (Error _) | Error _ ->
+        Exn.protect ~finally:(fun () -> complete_cleanup (fun () -> destroy_connection c)) ~f:restore

@@ -40,7 +40,9 @@ let () =
                 (match D.parameter_count p with Error D.Closed -> () | _ -> failwith "interrupted close did not revoke prepared");
                 ok (D.execute c "select 1"); raise Stdlib.Sys.Break)
             else (
-              inject "execute";
+              (* BEGIN, fresh prepare, fresh close, then the original execute. *)
+              if String.equal mode "execute-enter" then arm 4 0;
+              if String.equal mode "execute-leave" then arm 0 4;
               let r = ok (D.execute_prepared p) in
               if String.is_prefix mode ~prefix:"result-close" then (
                 inject "result-close";

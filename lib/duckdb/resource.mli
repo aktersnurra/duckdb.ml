@@ -67,3 +67,8 @@ val release_result : child -> unit
 val native_connection : connection -> Duckdb_ffi.connection
 val scope : (unit -> ('a, error) result) -> (unit -> unit) -> ('a, error) result
 val force_close_child : child -> unit
+
+(* Called only inside an admitted child operation. Reuses the token's transaction,
+   otherwise settles an internal snapshot before returning. Failed rollback
+   destroys the exclusively admitted connection and its children. *)
+val with_child_snapshot : child -> (unit -> ('a, error) result) -> ('a, error) result

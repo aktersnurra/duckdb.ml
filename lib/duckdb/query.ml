@@ -2,7 +2,8 @@ open! Base
 open Resource
 module F = Duckdb_ffi
 module S = Scalar
-type prepared = { native : F.prepared; child : child; parameter_types : int array;
+type prepared = { native : F.prepared; child : child; connection : connection; sql : string;
+                  parameter_types : int array;
                   bound : bool array; mutable result : query_result option }
 and query_result = { prepared : prepared; mutable closed : bool }
 type chunk = Borrowed_chunk.t
@@ -35,7 +36,7 @@ let prepare_on c tx sql =
               (match p.result with None -> () | Some r -> r.closed <- true);
               p.result <- None; release_result p.child)
             ~f:(fun () -> native_close native)) in
-        let p = { native; child; parameter_types; bound = Array.create ~len:(Array.length parameter_types) false; result = None } in
+        let p = { native; child; connection = c; sql; parameter_types; bound = Array.create ~len:(Array.length parameter_types) false; result = None } in
         result_ref := Some p;
         Ok p)) with
     | Ok p -> Ok p
@@ -91,15 +92,26 @@ let bind : type a. prepared -> int -> a S.field -> a -> (unit, error) result = f
                 (match value with None -> F.bind_null p.native index | Some x -> bind_value p index typ x);
                 Result.map (status p.native) ~f:(fun () -> p.bound.(index - 1) <- true)))) in
       match field with S.Required typ -> apply typ (Some value) | S.Nullable typ -> apply typ value)
+let validate_parameter_schema p =
+  let fresh = F.prepared_owner (native_connection p.connection) in
+  scope (fun () ->
+    F.prepare fresh p.sql;
+    Result.bind (status fresh) ~f:(fun () ->
+      let count = Array.length p.parameter_types in
+      if F.parameter_count fresh <> count ||
+         not (Array.for_alli p.parameter_types ~f:(fun i typ -> F.parameter_type fresh (i + 1) = typ))
+      then Error (Data_error S.Parameter_schema_changed)
+      else Ok ())) (fun () -> native_close fresh)
 let execute_prepared p = without_result p (fun () ->
   match Array.findi p.bound ~f:(fun _ bound -> not bound) with
   | Some (i, _) -> Error (Data_error (S.Unbound_parameter (i + 1)))
   | None ->
     match Stdlib.Sys.with_async_exns (fun () ->
-      F.execute_prepared p.native;
-      Result.map (status p.native) ~f:(fun () ->
+      Result.bind (with_child_snapshot p.child (fun () ->
+        Result.bind (validate_parameter_schema p) ~f:(fun () ->
+          F.execute_prepared p.native; status p.native))) ~f:(fun () ->
         let r = { prepared = p; closed = false } in
-        p.result <- Some r; reserve_result p.child; r)) with
+        p.result <- Some r; reserve_result p.child; Ok r)) with
     | Ok r -> Ok r
     | Error e -> native_close_result p.native; Error e
     | exception exn -> Exn.protect ~finally:(fun () -> native_close_result p.native) ~f:(fun () -> raise exn))
