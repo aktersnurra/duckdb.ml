@@ -119,3 +119,14 @@ CAMLprim value ml_duckdb_column_type(value v, value index) {
     return Val_int(duckdb_column_type(&Prepared(v)->result, Long_val(index)));
 }
 CAMLprim value ml_duckdb_chunk_length(value v) { return Val_long(duckdb_data_chunk_get_size(Prepared(v)->chunk)); }
+CAMLprim value ml_duckdb_prepared_kind(value v) {
+    return Val_int(duckdb_prepared_statement_type(Prepared(v)->prepared));
+}
+CAMLprim value ml_duckdb_prepared_column_types(value v) {
+    CAMLparam1(v); CAMLlocal1(types); prepared_owner *p = Prepared(v);
+    idx_t count = duckdb_prepared_statement_column_count(p->prepared);
+    types = caml_alloc(count, 0);
+    for (idx_t i = 0; i < count; ++i)
+        Store_field(types, i, Val_int(duckdb_prepared_statement_column_type(p->prepared, i)));
+    CAMLreturn(types);
+}

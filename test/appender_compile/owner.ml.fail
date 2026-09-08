@@ -1,0 +1,1 @@
+let close (a : Duckdb.appender) = Duckdb.close_connection a

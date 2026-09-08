@@ -64,3 +64,36 @@ val chunk_int64 : prepared @ local -> int -> int -> int64#
 val box_int64 : int64# -> int64
 val chunk_float : prepared @ local -> int -> int -> float
 val chunk_string : prepared @ local -> int -> int -> string
+
+(** Unsafe transaction-owned appender. Input cells are (type id, is-null,
+    integer bits, floating value, bytes). Whole batches are copied before unlock.
+    Caller validates shape, types, NULL and ranges and owns transaction rollback. *)
+type appender
+type append_cell = int * bool * int64 * float * string
+val appender_owner : connection -> appender
+val create_appender : appender -> string -> string -> unit
+val appender_status : appender -> int
+val appender_message : appender -> string
+val appender_types : appender -> int array
+val appender_nullable : appender -> bool array
+val append_rows : appender -> append_cell array array -> unit
+val clear_appender_input : appender -> unit
+val flush_appender : appender -> unit
+val close_appender : appender -> bool -> unit
+val finish_appender_close : appender -> unit
+val appender_is_closed : appender -> bool
+
+val prepared_kind : prepared -> int
+val prepared_column_types : prepared -> int array
+
+(** Local no-replace hard-link publication; returns errno (0 on success).
+    Inputs are copied before releasing the runtime lock. One publish/remove per
+    work owner; finish is idempotent. Remove treats ENOENT as success for cleanup
+    retry, but reports other errno values. *)
+type local_file_work
+val local_file_work : unit -> local_file_work
+val publish_local_file : local_file_work -> string -> string -> int
+val remove_local_file : local_file_work -> string -> int
+val finish_local_file_work : local_file_work -> unit
+val file_error_message : int -> string
+val file_exists_error : int -> bool

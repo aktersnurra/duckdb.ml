@@ -2,7 +2,7 @@
  (name duckdb_ffi)
  (public_name duckdb-ffi)
  (flags (:standard -extension-universe beta))
- (foreign_stubs (language c) (names resource_stubs prepared_stubs typed_stubs)
+ (foreign_stubs (language c) (names resource_stubs prepared_stubs typed_stubs appender_stubs local_file_stubs)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra)))
  (c_library_flags -lduckdb))

@@ -151,3 +151,6 @@ let fold_rows r decoder ~init ~f =
             | Error e -> Error e | Ok (Stop acc) -> Ok (Stop acc)
             | Ok (Continue acc) -> loop (row + 1) acc) in
       loop 0 acc [@nontail])
+let select_schema p = without_result p (fun () ->
+  if F.prepared_kind p.native <> 1 || Array.length p.bound <> 0 then Error Unsupported_statement
+  else Ok (F.prepared_column_types p.native))

@@ -1,0 +1,1 @@
+let close (c : Duckdb.chunk @ local) = Duckdb.close_appender c

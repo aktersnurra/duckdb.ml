@@ -1,4 +1,4 @@
 (library (name duckdb) (public_name duckdb)
  (flags (:standard -extension-universe beta))
- (private_modules resource query borrowed_chunk scalar row)
+ (private_modules resource query borrowed_chunk scalar row appender parquet)
  (libraries base threads duckdb-ffi))

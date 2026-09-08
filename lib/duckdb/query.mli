@@ -40,3 +40,6 @@ val chunk_length : chunk @ local -> int
     validates the exact engine type; returned strings/blobs/scalars are owned. *)
 val column : chunk @ local -> column:int -> row:int -> 'a Scalar.field -> ('a, error) result
 val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
+
+(* Private, engine-prepared SELECT metadata; no execution or result lease. *)
+val select_schema : prepared -> (int array, error) result

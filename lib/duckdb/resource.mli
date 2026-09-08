@@ -4,6 +4,7 @@
 type error = Invalid_configuration of string | Embedded_nul | Closed
   | Busy | Live_children | Native_error of string | Unsupported_statement
   | Data_error of Scalar.error
+  | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
   | Effects_not_allowed | Rollback_failed of error * error
 exception Rollback_exception of exn * error
 exception Cleanup_exception of error * exn
@@ -54,7 +55,7 @@ val with_connection : database -> f:(connection -> ('a, error) result) -> ('a, e
 val with_transaction : connection -> f:(transaction -> ('a, error) result) -> ('a, error) result
 
 
-(* Private child admission seam. Only Query can turn this into public owners. *)
+(* Private child admission seam. Query and Appender turn this into public owners. *)
 type child
 val transaction_connection : transaction -> connection
 val with_admission : connection -> transaction option -> (unit -> ('a, error) result) -> ('a, error) result
@@ -72,3 +73,6 @@ val force_close_child : child -> unit
    otherwise settles an internal snapshot before returning. Failed rollback
    destroys the exclusively admitted connection and its children. *)
 val with_child_snapshot : child -> (unit -> ('a, error) result) -> ('a, error) result
+
+(* First appender failure prevents transaction commit even if ignored. *)
+val poison_transaction : transaction -> error -> unit

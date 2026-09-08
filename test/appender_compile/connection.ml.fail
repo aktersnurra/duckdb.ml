@@ -1,0 +1,1 @@
+let create (c : Duckdb.connection) = Duckdb.open_appender c "table"

@@ -46,3 +46,27 @@ external chunk_int64 : prepared @ local -> int -> int -> int64#
 external box_int64 : int64# -> int64 = "%box_int64"
 external chunk_float : prepared @ local -> int -> int -> float = "ml_duckdb_chunk_float"
 external chunk_string : prepared @ local -> int -> int -> string = "ml_duckdb_chunk_string"
+
+type appender
+type append_cell = int * bool * int64 * float * string
+external appender_owner : connection -> appender = "ml_duckdb_appender_owner"
+external create_appender : appender -> string -> string -> unit = "ml_duckdb_create_appender"
+external appender_status : appender -> int = "ml_duckdb_appender_status" [@@noalloc]
+external appender_message : appender -> string = "ml_duckdb_appender_message"
+external appender_types : appender -> int array = "ml_duckdb_appender_types"
+external appender_nullable : appender -> bool array = "ml_duckdb_appender_nullable"
+external append_rows : appender -> append_cell array array -> unit = "ml_duckdb_append_rows"
+external clear_appender_input : appender -> unit = "ml_duckdb_clear_appender_input" [@@noalloc]
+external flush_appender : appender -> unit = "ml_duckdb_flush_appender"
+external close_appender : appender -> bool -> unit = "ml_duckdb_close_appender"
+external finish_appender_close : appender -> unit = "ml_duckdb_finish_appender_close" [@@noalloc]
+external appender_is_closed : appender -> bool = "ml_duckdb_appender_is_closed" [@@noalloc]
+external prepared_kind : prepared -> int = "ml_duckdb_prepared_kind" [@@noalloc]
+external prepared_column_types : prepared -> int array = "ml_duckdb_prepared_column_types"
+type local_file_work
+external local_file_work : unit -> local_file_work = "ml_duckdb_local_file_work"
+external publish_local_file : local_file_work -> string -> string -> int = "ml_duckdb_publish_local_file"
+external remove_local_file : local_file_work -> string -> int = "ml_duckdb_remove_local_file"
+external finish_local_file_work : local_file_work -> unit = "ml_duckdb_finish_local_file_work" [@@noalloc]
+external file_error_message : int -> string = "ml_duckdb_file_error_message"
+external file_exists_error : int -> bool = "ml_duckdb_file_exists_error" [@@noalloc]

@@ -105,3 +105,57 @@
  (link_flags :standard -cclib -Wl,--wrap=caml_enter_blocking_section
              -cclib -Wl,--wrap=caml_leave_blocking_section
              -cclib -Wl,--wrap=duckdb_query))
+
+(test
+ (name test_appender)
+ (modules test_appender)
+ (libraries duckdb duckdb-ffi base threads)
+ (flags (:standard -extension-universe beta)))
+
+(test (name test_parquet) (modules test_parquet) (libraries duckdb duckdb-ffi base))
+
+(test (name test_appender_concurrency) (modules test_appender_concurrency)
+ (libraries duckdb duckdb-ffi base threads)
+ (foreign_stubs (language c) (names appender_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=duckdb_appender_create_ext
+  -cclib -Wl,--wrap=duckdb_append_value -cclib -Wl,--wrap=duckdb_appender_flush
+  -cclib -Wl,--wrap=duckdb_appender_close -cclib -Wl,--wrap=duckdb_query
+  -cclib -Wl,--wrap=caml_ml_condition_wait))
+
+(executable (name test_stage3c_signals) (modules test_stage3c_signals)
+ (libraries duckdb duckdb-ffi base)
+ (foreign_stubs (language c) (names stage3c_signal_stubs)
+  (extra_deps signal_stubs.c)
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=caml_enter_blocking_section
+  -cclib -Wl,--wrap=caml_leave_blocking_section
+  -cclib -Wl,--wrap=ml_duckdb_execute_prepared
+  -cclib -Wl,--wrap=ml_duckdb_publish_local_file
+  -cclib -Wl,--wrap=ml_duckdb_remove_local_file))
+(rule (alias runtest) (action (progn
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} create-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} create-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} append-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} append-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} flush-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} flush-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} close-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} close-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} discard-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} discard-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} callback)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} commit-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} commit-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-copy-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-copy-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-publish-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-publish-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-remove-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-remove-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-fail-remove-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} export-fail-remove-leave))))
+(rule (alias runtest)
+ (deps check_appender_interfaces.sh ../lib/duckdb/duckdb.mli (glob_files appender_compile/*))
+ (action (run bash %{dep:check_appender_interfaces.sh} %{ocamlc})))

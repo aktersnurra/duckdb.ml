@@ -3,6 +3,7 @@ module F = Duckdb_ffi
 type error = Invalid_configuration of string | Embedded_nul | Closed
   | Busy | Live_children | Native_error of string | Unsupported_statement
   | Data_error of Scalar.error
+  | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
   | Effects_not_allowed | Rollback_failed of error * error
 exception Rollback_exception of exn * error
 exception Cleanup_exception of error * exn
@@ -28,7 +29,7 @@ type database = { native_database : F.database; database_gate : gate; mutable ch
 and connection = { native_connection : F.connection; parent : database; connection_gate : gate;
                    mutable lease : transaction option; mutable prepared_children : child list;
                    mutable result_owner : child option }
-and transaction = { connection : connection; mutable active : bool }
+and transaction = { connection : connection; mutable active : bool; mutable failure : error option }
 and child = { connection : connection; transaction : transaction option;
               mutable child_state : state; cleanup : unit -> unit }
 let gate () = { mutex = Stdlib.Mutex.create (); changed = Condition.create (); state = Open; busy = false }
@@ -95,6 +96,8 @@ let unregister c = locked c.parent.database_gate (fun () ->
   c.parent.children <- List.filter c.parent.children ~f:(fun child -> not (phys_equal child c)))
 let transaction_connection tx = tx.connection
 let native_connection c = c.native_connection
+let poison_transaction tx error = locked tx.connection.connection_gate (fun () ->
+  if Option.is_none tx.failure then tx.failure <- Some error)
 let with_admission c tx work =
   let admission = locked c.connection_gate (fun () ->
     if Option.exists tx ~f:(fun tx -> not tx.active) then Error Closed
@@ -267,7 +270,7 @@ let with_database config ~f =
 let with_connection db ~f =
   Result.bind (connect db) ~f:(fun c -> scope (fun () -> f c) (fun () -> force_close_connection c))
 let with_transaction c ~f =
-  let tx = { connection = c; active = true } in
+  let tx = { connection = c; active = true; failure = None } in
   let admission = locked c.connection_gate (fun () ->
     Result.bind (available c.connection_gate) ~f:(fun () ->
       if c.connection_gate.busy || Option.is_some c.lease || Option.is_some c.result_owner then Error Busy
@@ -292,9 +295,10 @@ let with_transaction c ~f =
           | Ok () ->
             let result = without_escaping_effects (fun () -> f tx) in
             revoke_and_drain ();
-            match result with
-            | Error error -> Error error
-            | Ok value -> Result.map (raw_execute c "COMMIT" true) ~f:(fun () -> value)))
+            match result, tx.failure with
+            | Error error, _ -> Error error
+            | Ok _, Some error -> Error error
+            | Ok value, None -> Result.map (raw_execute c "COMMIT" true) ~f:(fun () -> value)))
         with exn -> Error exn
       in
       match outcome with
