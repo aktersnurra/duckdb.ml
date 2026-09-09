@@ -1,0 +1,119 @@
+---
+name: Ubuntu CI
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ubuntu-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Pinned OxCaml validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          df -h /
+
+      - name: Install bootstrap prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            autoconf \
+            bubblewrap \
+            build-essential \
+            opam \
+            patch \
+            pkg-config \
+            rsync \
+            unzip
+
+      - name: Restore pinned OxCaml toolchain
+        id: toolchain-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            _opam
+            .local/opam
+          key: ${{ runner.os }}-ox-${{ hashFiles('tools/toolchain.lock.json') }}
+
+      - name: Bootstrap pinned toolchain and DuckDB
+        run: |
+          python3 tools/bootstrap.py --check
+          python3 tools/bootstrap.py --fetch
+          python3 tools/bootstrap.py --install
+
+      - name: Build and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .local/ci-logs
+
+          ./tools/run build @all \
+            2>&1 | tee .local/ci-logs/build.log
+          python3 -m unittest \
+            test.soak.test_run_soak \
+            bench.test_benchmark_summary \
+            tools.test_bootstrap \
+            2>&1 | tee .local/ci-logs/python-tests.log
+          ./tools/run runtest --force \
+            2>&1 | tee .local/ci-logs/runtest.log
+
+          ./tools/run exec --no-build examples/synchronous.exe \
+            2>&1 | tee .local/ci-logs/example-synchronous.log
+          ./tools/run exec --no-build examples/asynchronous.exe \
+            2>&1 | tee .local/ci-logs/example-asynchronous.log
+          ./tools/run exec --no-build examples/eio.exe \
+            2>&1 | tee .local/ci-logs/example-eio.log
+
+          bash test/install_adapters_smoke.sh \
+            2>&1 | tee .local/ci-logs/package-smoke.log
+          ./tools/run exec --no-build test/soak/test_soak_support.exe \
+            2>&1 | tee .local/ci-logs/soak-support.log
+          python3 test/soak/run_model_soak.py \
+            --seed 104729 \
+            --episodes 8 \
+            --output .local/ci-logs/model-soak.log
+          python3 test/soak/run_soak.py \
+            --seed 104729 \
+            --repetitions 1 \
+            --output .local/ci-logs/selector-soak.log
+          python3 bench/run_benchmarks.py \
+            --correctness-only \
+            --rows 1000 \
+            --warmups 0 \
+            --samples 1 \
+            --output-dir .local/ci-logs/benchmark
+          opam lint \
+            duckdb-ffi.opam \
+            duckdb.opam \
+            duckdb-async.opam \
+            duckdb-eio.opam \
+            2>&1 | tee .local/ci-logs/opam-lint.log
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ubuntu-ci-logs-${{ github.run_id }}
+          path: |
+            .local/ci-logs
+            _build/log
+          if-no-files-found: ignore
+          retention-days: 7

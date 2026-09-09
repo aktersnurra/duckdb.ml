@@ -1,5 +1,7 @@
 # duckdb.ml
 
+[![Ubuntu CI](https://github.com/aktersnurra/duckdb.ml/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/aktersnurra/duckdb.ml/actions/workflows/ubuntu.yml)
+
 `duckdb.ml` is an OxCaml binding for DuckDB.  It provides a safe synchronous
 API plus separately installable `duckdb-async` and `duckdb-eio` adapters.
 
