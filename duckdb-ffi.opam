@@ -1,6 +1,12 @@
 opam-version: "2.0"
 synopsis: "Unsafe DuckDB C bridge for the pinned OxCaml toolchain"
 description: "Handwritten native resource owners. Requires the pinned DuckDB 1.5.5 header and shared library; see docs/native-dependency.md. This is not the safe API."
+maintainer: "Gustaf Rydholm <gustaf.rydholm@gmail.com>"
+authors: ["Gustaf Rydholm"]
+license: "MIT"
+homepage: "https://github.com/aktersnurra/duckdb.ml"
+bug-reports: "https://github.com/aktersnurra/duckdb.ml/issues"
+dev-repo: "git+https://github.com/aktersnurra/duckdb.ml.git"
 depends: [
   "oxcaml-compiler" {= "5.2.0minus39"}
   "dune" {= "3.22.2+ox"}

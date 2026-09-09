@@ -1,6 +1,12 @@
 opam-version: "2.0"
 synopsis: "Safe synchronous DuckDB resources for pinned OxCaml"
 description: "Typed prepared queries, scoped chunks, transaction-owned appender ingestion and local Parquet read/export. Scoped cleanup and exclusive transactions; no scheduler startup or Async/Eio dependency."
+maintainer: "Gustaf Rydholm <gustaf.rydholm@gmail.com>"
+authors: ["Gustaf Rydholm"]
+license: "MIT"
+homepage: "https://github.com/aktersnurra/duckdb.ml"
+bug-reports: "https://github.com/aktersnurra/duckdb.ml/issues"
+dev-repo: "git+https://github.com/aktersnurra/duckdb.ml.git"
 depends: [
   "oxcaml-compiler" {= "5.2.0minus39"}
   "dune" {= "3.22.2+ox"}

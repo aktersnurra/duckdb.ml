@@ -1,4 +1,10 @@
 opam-version: "2.0"
 synopsis: "Bounded Eio DuckDB requests for pinned OxCaml"
+maintainer: "Gustaf Rydholm <gustaf.rydholm@gmail.com>"
+authors: ["Gustaf Rydholm"]
+license: "MIT"
+homepage: "https://github.com/aktersnurra/duckdb.ml"
+bug-reports: "https://github.com/aktersnurra/duckdb.ml/issues"
+dev-repo: "git+https://github.com/aktersnurra/duckdb.ml.git"
 depends: [ "ocaml" {= "5.2.0+ox"} "dune" {>= "3.20"} "base" "eio" {= "1.3+ox"} "duckdb" ]
 build: [ ["dune" "build" "-p" name] ]
