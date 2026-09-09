@@ -35,7 +35,12 @@ let typed_requests () =
       complete (ok (A.parquet_export pool ~query:"SELECT i FROM typed ORDER BY i" ~destination:path)) >>= fun result -> ok result;
       complete (ok (A.parquet_fold_rows pool [path] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values)))))
       >>| fun result ->
-      require "worker-local Parquet read/export" (equal_rows (List.rev (ok result)) [1L, (); 2L, (); 3L, ()])))
+      require "worker-local Parquet read/export" (equal_rows (List.rev (ok result)) [1L, (); 2L, (); 3L, ()]))
+    >>= fun () ->
+    close pool >>= fun () ->
+    require "typed post-shutdown admission rejected"
+      (match A.query pool "SELECT 1::BIGINT" rows with Error A.Pool_shutdown -> true | _ -> false);
+    return ())
 let wide_rows =
   Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int8,
     Column (Duckdb.Scalar.Nullable Duckdb.Scalar.String,

@@ -25,13 +25,13 @@ for copied in sorted(producer.rglob('*')):
     print(hashlib.sha256(copied.read_bytes()).hexdigest(), relative)
 PY
 local_dune() {
-  stage1/run exec --no-build -- /usr/bin/env \
+  tools/run exec --no-build -- /usr/bin/env \
     OCAMLPATH="$prefix/lib:$root/_opam/lib" \
     LIBRARY_PATH="$root/.deps/duckdb" LD_LIBRARY_PATH="$root/.deps/duckdb" \
     "$root/_opam/bin/dune" "$@"
 }
 producer_build() {
-  stage1/run exec --no-build -- /usr/bin/env \
+  tools/run exec --no-build -- /usr/bin/env \
     OCAMLPATH="$prefix/lib:$root/_opam/lib" \
     LIBRARY_PATH="$root/.deps/duckdb" LD_LIBRARY_PATH="$root/.deps/duckdb" \
     bash -c 'cd "$1"; shift; exec "$@"' bash "$producer" "$root/_opam/bin/dune" build "$@"

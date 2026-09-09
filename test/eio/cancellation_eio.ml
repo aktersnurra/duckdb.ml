@@ -162,8 +162,10 @@ let foreign_return_then_reuse clock =
       until clock "A foreign return reached before adapter terminal" (fun () -> counter 18 = 1);
       check "foreign return releases runtime and A completion remains pending"
         (counter 6 = 0 && not (Eio.Promise.is_resolved a));
-      Eio.Cancel.cancel (Eio.Promise.await context) Requested;
-      check "terminal cancellation cannot return before held worker boundary"
+      let caller = Eio.Promise.await context in
+      Eio.Cancel.cancel caller Requested;
+      Eio.Cancel.cancel caller Requested;
+      check "repeated terminal cancellation cannot return before held worker boundary"
         (not (Eio.Promise.is_resolved a));
       hold_cleanup 18 false;
       check "foreign-return cancellation preserves caller identity" (Eio.Promise.await_exn a);
@@ -257,8 +259,13 @@ let run_if_selected env selector =
   match List.find (selectors env) ~f:(fun (name, _) -> String.equal selector name) with
   | None -> false
   | Some (name, test) ->
+    let live = Duckdb_ffi.live_resources () in
+    let fallback = Duckdb_ffi.fallback_reclaims () in
     Stdlib.Printf.printf "cancellation backend=%s\n%!" (Eio.Stdenv.backend_id env);
-    test (); Stdlib.Printf.printf "cancellation %s: PASS\n%!" name;
+    test ();
+    if Duckdb_ffi.live_resources () <> live || Duckdb_ffi.fallback_reclaims () <> fallback then
+      failwith "cancellation resource baseline not restored";
+    Stdlib.Printf.printf "cancellation %s: PASS live=%d fallback=%d\n%!" name live fallback;
     true
 
 let run env =

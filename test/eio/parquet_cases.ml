@@ -177,7 +177,13 @@ let run env =
     "export_boundaries", (fun () -> export_boundaries clock); "export_errors", export_errors;
     "read_boundaries", (fun () -> read_boundaries clock)] in
   let run_selector (name, test) =
-    test (); Stdlib.Printf.printf "parquet_cases %s: PASS generated=%b\n%!" name P.enabled in
+    let live = Duckdb_ffi.live_resources () in
+    let fallback = Duckdb_ffi.fallback_reclaims () in
+    test ();
+    if Duckdb_ffi.live_resources () <> live || Duckdb_ffi.fallback_reclaims () <> fallback then
+      failwith "parquet resource baseline not restored";
+    Stdlib.Printf.printf "parquet_cases %s: PASS generated=%b live=%d fallback=%d\n%!"
+      name P.enabled live fallback in
   match Array.to_list (Sys.get_argv ()) with
   | [_] -> List.iter selectors ~f:run_selector
   | [_; selector] ->

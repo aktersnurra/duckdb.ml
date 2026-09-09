@@ -3,7 +3,7 @@
 Initial supported target: x86-64 Linux/glibc, exact OxCaml compiler
 `2515546fea38e21e8143cc41db663bd56efc8d06` (opam `5.2.0minus39`), Dune
 `3.22.2+ox`, Base `v0.18~preview.130.106+341`. These are **not** upstream OCaml
-packages. See [stage 1](stage1-validation.md) for the toolchain bootstrap.
+packages. Bootstrap instructions are in [development](development.md).
 
 `duckdb-ffi` requires the matching DuckDB **v1.5.5** header and shared library.
 Neither package bundles the engine or installs native/system packages. The FFI
@@ -18,7 +18,7 @@ python3 tools/setup_duckdb.py --prefix "$PWD/.deps/duckdb"
 # Offline: add --archive /path/to/libduckdb-linux-amd64.zip
 ```
 
-The script uses the immutable URL and SHA256 in `stage1/toolchain.lock.json`:
+The script uses the immutable URL and SHA256 in `tools/toolchain.lock.json`:
 `1fb8ce388157d84a25abe685a8a2520bf00c00321821968e4bb398fd766e7abb`.
 It verifies bytes before extracting only `duckdb.h` and `libduckdb.so`.
 Expected extracted SHA256:
@@ -40,7 +40,7 @@ dune build -p duckdb
 dune install --prefix /your/temporary/prefix duckdb
 ```
 
-Development uses `stage1/run` instead of ambient Dune: it selects only the
+Development uses `tools/run` instead of ambient Dune: it selects only the
 existing project-local switch and prepends the project native link/loader path.
 Installed archives contain `-lduckdb`, **not** a developer absolute rpath. Deploy
 `libduckdb.so` separately and configure your application loader environment or
@@ -64,7 +64,7 @@ private modules. An external absolute build directory triggers an internal
 `Obj_dir.External.encode` exception in this exact Dune. The smoke test therefore
 uses an ignored root `.install-smoke.XXXXXX` directory for the safe package and
 cleans it on exit; it does not edit generated metadata or expose private modules.
-See the [stage-3b reproducer evidence](stage3b-validation.md).
+See the [Dune limitation in [validation](validation.md).
 
 The smoke test does not run `opam install`, change the local switch, or
 install either scheduler. Both `.opam` files use these demonstrated Dune build

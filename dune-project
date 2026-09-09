@@ -1,5 +1,5 @@
 (lang dune 3.20)
-(name duckdb_stage1)
+(name duckdb_ml)
 (cram enable)
 (package (name duckdb-ffi) (synopsis "Unsafe DuckDB native bridge for pinned OxCaml"))
 (package (name duckdb) (synopsis "Synchronous DuckDB resources for pinned OxCaml"))

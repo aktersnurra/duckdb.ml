@@ -11,13 +11,13 @@ trap 'rm -rf "$tmp" "$safe_work"' EXIT
 prefix="$tmp/prefix"
 python3 tools/setup_duckdb.py --prefix "$tmp/native" --archive .local/upstream/libduckdb-linux-amd64.zip
 # Install FFI first; the safe package must not be present as an accidental source dependency.
-stage1/run build -p duckdb-ffi --build-dir "$tmp/ffi-build"
-stage1/run install --build-dir "$tmp/ffi-build" --prefix "$prefix" duckdb-ffi
+tools/run build -p duckdb-ffi --build-dir "$tmp/ffi-build"
+tools/run install --build-dir "$tmp/ffi-build" --prefix "$prefix" duckdb-ffi
 test ! -d "$prefix/lib/duckdb"
 test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb-ffi/META")" = ""
 local_dune() {
   # Deliberately set consumer variables AFTER the isolated runner's opam exec.
-  stage1/run exec --no-build -- /usr/bin/env \
+  tools/run exec --no-build -- /usr/bin/env \
     OCAMLPATH="$prefix/lib:$root/_opam/lib" \
     LIBRARY_PATH="$tmp/native" LD_LIBRARY_PATH="$tmp/native" \
     "$root/_opam/bin/dune" "$@"

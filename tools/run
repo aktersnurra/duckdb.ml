@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Run Dune using only the project-local compiler and dependency stack."""
+import os
+import sys
+from bootstrap import ROOT, local_environment
+
+for tool in ("ocamlc", "dune"):
+    if not (ROOT / "_opam/bin" / tool).is_file():
+        sys.exit(f"missing local {tool}; run python3 tools/bootstrap.py --install")
+os.chdir(ROOT)
+environment = local_environment()
+environment["DUCKDB_NATIVE_DIR"] = str(ROOT / ".deps/duckdb")
+environment["DUCKDB_INCLUDE_DIR"] = str(ROOT / ".deps/duckdb")
+for variable in ("LIBRARY_PATH", "LD_LIBRARY_PATH"):
+    environment[variable] = str(ROOT / ".deps/duckdb") + os.pathsep + environment.get(variable, "")
+os.execve("/usr/bin/opam", ["opam", "exec", "--", "dune", *sys.argv[1:]], environment)

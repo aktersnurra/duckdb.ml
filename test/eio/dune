@@ -5,7 +5,7 @@
  (libraries base eio_main duckdb duckdb-eio))
 
 (executable (name foundation_eio) (modules foundation_eio cancellation_eio typed_hooks typed_cases typed_probe) 
- (libraries base eio_main duckdb duckdb-eio)
+ (libraries base eio_main duckdb duckdb-eio duckdb-ffi)
  (foreign_stubs (language c) (names foundation_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra -Werror)))
@@ -41,7 +41,7 @@
 
 
 (executable (name parquet_eio) (modules parquet_eio parquet_cases parquet_hooks typed_probe)
- (libraries base unix eio_main duckdb duckdb-eio)
+ (libraries base unix eio_main duckdb duckdb-eio duckdb-ffi)
  (foreign_stubs (language c) (names parquet_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra -Werror)))

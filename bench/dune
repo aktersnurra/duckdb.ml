@@ -1,0 +1,2 @@
+(executable (name benchmark_processing) (modules benchmark_processing)
+ (libraries base duckdb duckdb-ffi mtime.clock.os))

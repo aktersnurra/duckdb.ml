@@ -13,7 +13,7 @@
  (deps generate.py adapter_source.ml owner_source.ml probe_source.ml)
  (action (run python3 %{dep:generate.py})))
 (executable (name query_ingest) (modules query_ingest duckdb_eio worker_owner typed_cases typed_hooks typed_probe)
- (libraries base eio_main duckdb)
+ (libraries base eio_main duckdb duckdb-ffi)
  (foreign_stubs (language c) (names foundation_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra -Werror)))

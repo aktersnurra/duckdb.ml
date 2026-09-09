@@ -1,0 +1,6 @@
+(library (name soak_support) (wrapped false) (modules soak_support) (libraries base))
+(executable (name test_soak_support) (modules test_soak_support) (libraries base soak_support))
+(executable (name soak_async) (modules soak_async)
+ (libraries core async duckdb duckdb-async duckdb-ffi soak_support))
+(executable (name soak_eio) (modules soak_eio)
+ (libraries base eio_main duckdb duckdb-eio duckdb-ffi soak_support))

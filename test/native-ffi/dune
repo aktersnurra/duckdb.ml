@@ -1,0 +1,94 @@
+(library
+ (name generated_description)
+ (wrapped false)
+ (modules generated_bindings)
+ (libraries ctypes.stubs))
+
+(executable
+ (name generate_stubs)
+ (modules generate_stubs)
+ (libraries base ctypes.stubs generated_description))
+
+(rule
+ (targets generated_stubs.c generated_functions.ml generated_cleanup_stubs.c generated_cleanup_functions.ml)
+ (action
+  (run ./generate_stubs.exe generated_stubs.c generated_functions.ml
+   generated_cleanup_stubs.c generated_cleanup_functions.ml)))
+
+(library
+ (name stage1_ffi)
+ (wrapped false)
+ (modules probe_error handwritten_probe generated_probe generated_functions generated_cleanup_functions)
+ (flags (:standard -extension-universe beta))
+ (libraries base ctypes.stubs generated_description)
+ (foreign_stubs
+  (language c)
+  (names native_probe handwritten_stubs)
+  (include_dirs %{env:DUCKDB_NATIVE_DIR=../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (foreign_stubs
+  (language c)
+  (names generated_stubs generated_cleanup_stubs)
+  (flags (:standard -Wno-error)))
+ (c_library_flags
+  -L%{env:DUCKDB_NATIVE_DIR=../../.deps/duckdb}
+  -Wl,-rpath,%{env:DUCKDB_NATIVE_DIR=../../.deps/duckdb} -lduckdb))
+
+(env (dev (c_flags (:standard -Werror))))
+
+(rule
+ (targets native_diagnostics.exe)
+ (deps native_probe.c native_probe.h native_diagnostics.c)
+ (action
+  (run %{cc} -std=c11 -g -O1 -Wall -Wextra -Werror
+   -fsanitize=address,undefined -fno-omit-frame-pointer
+   -I%{env:DUCKDB_NATIVE_DIR=../../.deps/duckdb}
+   native_probe.c native_diagnostics.c
+   -L%{env:DUCKDB_NATIVE_DIR=../../.deps/duckdb}
+   -Wl,-rpath,%{env:DUCKDB_NATIVE_DIR=../../.deps/duckdb}
+   -lduckdb -o %{targets})))
+
+(rule
+ (alias runtest)
+ (action
+  (setenv ASAN_OPTIONS detect_leaks=1:halt_on_error=1
+   (setenv UBSAN_OPTIONS halt_on_error=1
+    (run ./native_diagnostics.exe)))))
+
+(rule
+ (alias runtest)
+ (deps check_unboxed.sh ctypes_unboxed.mli.fail)
+ (action
+  (run bash %{dep:check_unboxed.sh} %{ocamlc}
+   %{lib:ctypes:ctypes.cmi} %{dep:ctypes_unboxed.mli.fail})))
+
+(test
+ (name ffi_tests)
+ (modules ffi_tests)
+ (libraries base threads stage1_ffi)
+ (modes exe))
+
+(executable
+ (name signal_tests)
+ (modules signal_tests)
+ (libraries base stage1_ffi)
+ (foreign_stubs
+  (language c)
+  (names signal_test_stubs)
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags
+  -cclib -Wl,--wrap=caml_enter_blocking_section
+  -cclib -Wl,--wrap=caml_leave_blocking_section
+  -cclib -Wl,--wrap=stage1_cleanup_1_stage1_destroy_slot
+  -cclib -Wl,-u,stage1_cleanup_1_stage1_destroy_slot))
+
+(rule
+ (alias runtest)
+ (action
+  (progn
+   (run timeout 30 ./%{exe:signal_tests.exe} hand-enter)
+   (run timeout 30 ./%{exe:signal_tests.exe} hand-leave)
+   (run timeout 30 ./%{exe:signal_tests.exe} generated-cleanup)
+   (run timeout 30 ./%{exe:signal_tests.exe} generated-leave)
+   (run timeout 30 ./%{exe:signal_tests.exe} generated-enter)
+   (run timeout 30 ./%{exe:signal_tests.exe} generated-decode))))

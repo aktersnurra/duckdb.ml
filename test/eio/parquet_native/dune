@@ -13,7 +13,7 @@
  (deps generate.py adapter_source.ml owner_source.ml probe_source.ml)
  (action (run python3 %{dep:generate.py})))
 (executable (name parquet_native) (modules parquet_native duckdb_eio worker_owner parquet_cases parquet_hooks typed_probe)
- (libraries base unix eio_main duckdb)
+ (libraries base unix eio_main duckdb duckdb-ffi)
  (foreign_stubs (language c) (names parquet_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra -Werror)))

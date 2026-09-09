@@ -86,7 +86,7 @@ def run(selector, path):
     command = [
         "timeout",
         "90",
-        "stage1/run",
+        "tools/run",
         "exec",
         "test/eio/parquet_native/parquet_native.exe",
         "--",

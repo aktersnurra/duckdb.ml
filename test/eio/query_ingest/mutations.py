@@ -62,7 +62,7 @@ def run(selector, path):
     command = [
         "timeout",
         "90",
-        "stage1/run",
+        "tools/run",
         "exec",
         "test/eio/query_ingest/query_ingest.exe",
         "--",

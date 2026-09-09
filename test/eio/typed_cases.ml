@@ -67,7 +67,9 @@ let typed_values_and_failures () =
     check "fold callback exception reraised" raised;
     callback_tls "exception" before 1;
     check "subsequent request after callback cleanup" (Result.is_ok (E.execute p "SELECT 1"));
-    unwrap (E.shutdown p))
+    unwrap (E.shutdown p);
+    check "typed post-shutdown admission rejected"
+      (match E.query p "SELECT 1::BIGINT" rows with Error E.Pool_shutdown -> true | _ -> false))
 let ingest_semantics () =
   H.reset ();
   Eio.Switch.run (fun sw ->
@@ -209,8 +211,14 @@ let run_if_selected env selector =
   | Some (name, test) ->
     (* Standalone generated target also uses the foundation wrapper: disable its
        connect-fault fixture before creating the first pool. *)
+    let live = Duckdb_ffi.live_resources () in
+    let fallback = Duckdb_ffi.fallback_reclaims () in
     H.initialize (-1);
-    test (); Stdlib.Printf.printf "typed_cases %s: PASS generated=%b\n%!" name P.enabled;
+    test ();
+    if Duckdb_ffi.live_resources () <> live || Duckdb_ffi.fallback_reclaims () <> fallback then
+      failwith "typed resource baseline not restored";
+    Stdlib.Printf.printf "typed_cases %s: PASS generated=%b live=%d fallback=%d\n%!"
+      name P.enabled live fallback;
     true
 
 let run env =

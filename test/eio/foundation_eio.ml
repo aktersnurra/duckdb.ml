@@ -457,8 +457,13 @@ let run_foundation_if_selected env selector =
   match List.find (foundation_selectors env) ~f:(fun (name, _) -> String.equal selector name) with
   | None -> false
   | Some (name, test) ->
+    let live = Duckdb_ffi.live_resources () in
+    let fallback = Duckdb_ffi.fallback_reclaims () in
     Stdlib.Printf.printf "foundation backend=%s\n%!" (Eio.Stdenv.backend_id env);
-    test (); Stdlib.Printf.printf "foundation %s: PASS\n%!" name;
+    test ();
+    if Duckdb_ffi.live_resources () <> live || Duckdb_ffi.fallback_reclaims () <> fallback then
+      failwith "foundation resource baseline not restored";
+    Stdlib.Printf.printf "foundation %s: PASS live=%d fallback=%d\n%!" name live fallback;
     true
 
 let () =

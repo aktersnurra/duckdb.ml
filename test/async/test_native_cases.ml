@@ -51,7 +51,9 @@ let cancel_at_return () = with_pool (fun p ->
   native_hold Execute_return;
   let r = ok (A.execute p "select 42") in
   heartbeat (complete r) Execute_return >>= fun () ->
-  ignore (ok (A.cancel r)); native_release Execute_return;
+  require "first terminal cancellation requested" (match A.cancel r with Ok A.Requested -> true | _ -> false);
+  require "repeated terminal cancellation acknowledged" (match A.cancel r with Ok A.Requested -> true | _ -> false);
+  native_release Execute_return;
   complete r >>| fun result ->
   require "foreign return cancellation wins" (cancelled result);
   require "terminal cancel cannot change result" (match A.cancel r with Ok A.Already_finished -> true | _ -> false))

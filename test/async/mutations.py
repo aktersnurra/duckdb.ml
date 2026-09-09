@@ -123,11 +123,11 @@ try:
             + "test_duckdb_async.exe"
         )
         try:
-            command(name + "-build", ["stage1/run", "build", target])
+            command(name + "-build", ["tools/run", "build", target])
             args = [
                 "timeout",
                 "120",
-                "stage1/run",
+                "tools/run",
                 "exec",
                 "--no-build",
                 target,
@@ -139,7 +139,7 @@ try:
             command(name + "-red", args, expected=1, assertion=assertion)
         finally:
             source.write_bytes(original)
-        command(name + "-restored-build", ["stage1/run", "build", target])
+        command(name + "-restored-build", ["tools/run", "build", target])
         command(name + "-restored-green", args)
         records.append(
             {
@@ -160,13 +160,13 @@ try:
                 before, "Awaiting_entry -> if false then false else"
             )
         )
-        command("dispatch-gate-redundancy-build", ["stage1/run", "build", target])
+        command("dispatch-gate-redundancy-build", ["tools/run", "build", target])
         command(
             "dispatch-gate-redundancy-green",
             [
                 "timeout",
                 "120",
-                "stage1/run",
+                "tools/run",
                 "exec",
                 "--no-build",
                 target,
@@ -177,13 +177,13 @@ try:
         )
     finally:
         source.write_bytes(original)
-    command("dispatch-gate-restored-build", ["stage1/run", "build", target])
+    command("dispatch-gate-restored-build", ["tools/run", "build", target])
     command(
         "dispatch-gate-restored-green",
         [
             "timeout",
             "120",
-            "stage1/run",
+            "tools/run",
             "exec",
             "--no-build",
             target,

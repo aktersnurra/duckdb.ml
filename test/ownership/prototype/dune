@@ -1,0 +1,70 @@
+(env (dev (flags (:standard -extension-universe beta -alert -do_not_spawn_domains))
+          (c_flags (:standard -Werror))))
+(rule
+ (alias runtest)
+ (deps check_modes.sh borrowed.mli borrowed_ffi.mli (glob_files experiments/*))
+ (action (run bash %{dep:check_modes.sh} %{ocamlc})))
+(library
+ (name stage2_private)
+ (wrapped false)
+ (modules borrowed borrowed_ffi)
+ (flags (:standard -extension-universe beta))
+ (libraries base)
+ (foreign_stubs
+  (language c)
+  (names native_borrow borrowed_stubs)
+  (include_dirs %{env:DUCKDB_NATIVE_DIR=../../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (c_library_flags
+  -L%{env:DUCKDB_NATIVE_DIR=../../../.deps/duckdb}
+  -Wl,-rpath,%{env:DUCKDB_NATIVE_DIR=../../../.deps/duckdb} -lduckdb))
+(test
+ (name borrowed_tests)
+ (modules borrowed_tests)
+ (libraries base threads stage2_private)
+ (modes exe))
+(test
+ (name effect_tests)
+ (modules effect_tests)
+ (libraries base stage2_private)
+ (modes exe))
+(executable
+ (name signal_tests)
+ (modules signal_tests)
+ (libraries base stage2_private)
+ (foreign_stubs (language c) (names signal_test_stubs)
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags
+  -cclib -Wl,--wrap=caml_enter_blocking_section
+  -cclib -Wl,--wrap=caml_leave_blocking_section
+  -cclib -Wl,--wrap=stage2_ffi_close
+  -cclib -Wl,-u,stage2_ffi_close))
+(rule
+ (alias runtest)
+ (action (progn
+  (run timeout 30 ./%{exe:signal_tests.exe} query-enter)
+  (run timeout 30 ./%{exe:signal_tests.exe} query-leave)
+  (run timeout 30 ./%{exe:signal_tests.exe} fetch-enter)
+  (run timeout 30 ./%{exe:signal_tests.exe} fetch-leave)
+  (run timeout 30 ./%{exe:signal_tests.exe} advance-enter)
+  (run timeout 30 ./%{exe:signal_tests.exe} advance-leave)
+  (run timeout 30 ./%{exe:signal_tests.exe} cleanup)
+  (run timeout 30 ./%{exe:signal_tests.exe} cleanup-exn)
+  (run timeout 30 ./%{exe:signal_tests.exe} callback))))
+(rule
+ (targets native_diagnostics.exe)
+ (deps native_borrow.c native_borrow.h native_diagnostics.c)
+ (action
+  (run %{cc} -std=c11 -g -O1 -Wall -Wextra -Werror
+   -fsanitize=address,undefined -fno-omit-frame-pointer
+   -I%{env:DUCKDB_NATIVE_DIR=../../../.deps/duckdb}
+   native_borrow.c native_diagnostics.c
+   -L%{env:DUCKDB_NATIVE_DIR=../../../.deps/duckdb}
+   -Wl,-rpath,%{env:DUCKDB_NATIVE_DIR=../../../.deps/duckdb}
+   -lduckdb -o %{targets})))
+(rule
+ (alias runtest)
+ (action
+  (setenv ASAN_OPTIONS detect_leaks=1:halt_on_error=1
+   (setenv UBSAN_OPTIONS halt_on_error=1
+    (run timeout 90 ./%{exe:native_diagnostics.exe})))))

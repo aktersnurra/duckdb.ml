@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -30,19 +31,22 @@ def main():
         "--archive", type=Path, help="use an already downloaded pinned archive"
     )
     args = parser.parse_args()
-    pin = json.loads((ROOT / "stage1/toolchain.lock.json").read_text())["archives"][
+    pin = json.loads((ROOT / "tools/toolchain.lock.json").read_text())["archives"][
         "duckdb"
     ]
     with tempfile.TemporaryDirectory(prefix="duckdb-native-") as temporary:
         archive = args.archive
         if archive is None:
             archive = Path(temporary) / "duckdb.zip"
-            if not pin["url"].startswith("https://"):
+            parsed_url = urllib.parse.urlparse(pin["url"])
+            if parsed_url.scheme != "https" or not parsed_url.netloc:
                 raise ValueError("native dependency URL must use HTTPS")
+            request = urllib.request.Request(pin["url"], method="GET")
+            https_only = urllib.request.build_opener(urllib.request.HTTPSHandler())
             with (
-                urllib.request.urlopen(pin["url"], timeout=180) as source,
+                https_only.open(request, timeout=180) as source,
                 archive.open("wb") as target,
-            ):  # noqa: S310 - HTTPS guard and pinned SHA256 above
+            ):
                 shutil.copyfileobj(source, target)
         install_archive(archive, args.prefix, pin["sha256"])
     print("DuckDB v1.5.5: verified and extracted", args.prefix)
