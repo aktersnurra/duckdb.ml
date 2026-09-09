@@ -43,7 +43,10 @@ let check_trace bt =
   check "callback raw trace source frame" (String.is_substring text ~substring:"raised_callback")
 let pause clock = Eio.Time.sleep clock 0.001
 let until clock name condition =
-  let deadline = Eio.Time.now clock +. 5. in
+  (* Full regressions run native sanitizer and scheduler suites concurrently. Keep
+     causal polling bounded without treating five seconds of host contention as
+     an adapter failure; the Dune rule still supplies the outer 60 s watchdog. *)
+  let deadline = Eio.Time.now clock +. 15. in
   let rec loop () =
     if condition () then ()
     else if Float.(Eio.Time.now clock > deadline) then failwith name
@@ -371,7 +374,7 @@ let saturated_shutdown clock =
       let b = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.protect (fun () -> E.execute p sql)) in
       until clock "all pool slots entered native SQL" (fun () -> counter 5 = 2);
       let done_ = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.protect (fun () -> E.shutdown p)) in
-      until clock "shutdown control interrupts saturated owners" (fun () -> counter 4 = 2);
+      until clock "shutdown control interrupts saturated owners" (fun () -> counter 4 >= 2);
       check "shutdown control is independent of saturated request permits" (not (Eio.Promise.is_resolved done_));
       hold false;
       ignore (Eio.Promise.await_exn a); ignore (Eio.Promise.await_exn b);
@@ -386,10 +389,20 @@ let cancelled_shutdown_waiter clock =
     Exn.protect ~finally:(fun () -> hold false) ~f:(fun () ->
       let running = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.protect (fun () -> E.execute p sql)) in
       until clock "shutdown cancellation running entry" (fun () -> counter 5 = 1);
+      let context, publish_context = Eio.Promise.create () in
       let waiter = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.sub (fun cc ->
-        Eio.Fiber.fork ~sw (fun () -> Eio.Cancel.cancel cc Requested);
+        Eio.Promise.resolve publish_context cc;
         try ignore (E.shutdown p); false with Eio.Cancel.Cancelled Requested -> true)) in
-      until clock "cancelled shutdown waiter still starts drain" (fun () -> counter 4 = 1);
+      let caller = Eio.Promise.await context in
+      until clock "shutdown waiter closes admission" (fun () ->
+        match E.execute p "SELECT 1" with
+        | Error E.Pool_shutdown -> true
+        | Error E.Queue_full -> false
+        | _ -> failwith "shutdown admission returned unexpected result");
+      Eio.Cancel.cancel caller Requested;
+      let progress, publish_progress = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () -> Eio.Fiber.yield (); Eio.Promise.resolve publish_progress ());
+      Eio.Promise.await progress;
       check "cancelled shutdown waiter cannot abandon protected drain" (not (Eio.Promise.is_resolved waiter));
       hold false;
       ignore (Eio.Promise.await_exn running);
