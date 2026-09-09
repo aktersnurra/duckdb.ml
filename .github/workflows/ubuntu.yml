@@ -38,11 +38,22 @@ jobs:
             autoconf \
             bubblewrap \
             build-essential \
-            opam \
             patch \
             pkg-config \
             rsync \
             unzip
+
+      - name: Install pinned opam
+        run: |
+          curl --fail --location --retry 3 \
+            --output /tmp/opam \
+            https://github.com/ocaml/opam/releases/download/2.5.2/opam-2.5.2-x86_64-linux
+          printf '%s%s  /tmp/opam\n' \
+            edfca2630c373b44b7ee1c2f81cd8dcf \
+            67468d0db57d6c02158de553ac63dbd4 \
+            | sha256sum --check --strict
+          sudo install --mode 0755 /tmp/opam /usr/bin/opam
+          opam --version
 
       - name: Enable Bubblewrap user namespaces
         run: |
@@ -57,7 +68,7 @@ jobs:
             _opam
             .local/opam
             .local/upstream
-          key: ${{ runner.os }}-ox-${{ hashFiles('tools/toolchain.lock.json') }}
+          key: ox-2.5.2-${{ hashFiles('tools/toolchain.lock.json') }}
 
       - name: Bootstrap pinned toolchain and DuckDB
         run: |
