@@ -1,0 +1,1 @@
+let bad pool = Duckdb_async.transaction pool ~f:(fun _ -> Async.Deferred.return (Ok 42))

@@ -1,0 +1,13 @@
+opam-version: "2.0"
+synopsis: "Bounded Async DuckDB requests for pinned OxCaml"
+description: "Optional Async SQL requests and whole synchronous transactions with explicit cancellation and shutdown. Reserves N+1 system threads for N connections; no Eio dependency."
+depends: [
+  "oxcaml-compiler" {= "5.2.0minus39"}
+  "dune" {= "3.22.2+ox"}
+  "base" {= "v0.18~preview.130.106+341"}
+  "core" {= "v0.18~preview.130.106+341"}
+  "async" {= "v0.18~preview.130.106+341"}
+  "duckdb" {= version}
+]
+build: [["dune" "build" "-p" name "-j" jobs]]
+install: [["dune" "install" "--prefix" prefix name]]

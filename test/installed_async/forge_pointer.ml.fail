@@ -1,0 +1,1 @@
+let forged = Duckdb.Bridge.run (Duckdb.Bridge.create ()) Nativeint.zero ~f:(fun _ -> Ok ())

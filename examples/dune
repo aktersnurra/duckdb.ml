@@ -1,1 +1,2 @@
-(executable (name synchronous) (libraries base duckdb))
+(executable (name synchronous) (modules synchronous) (libraries base duckdb))
+(executable (name asynchronous) (modules asynchronous) (libraries core async duckdb-async duckdb))

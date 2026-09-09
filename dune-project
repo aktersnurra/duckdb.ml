@@ -3,3 +3,4 @@
 (cram enable)
 (package (name duckdb-ffi) (synopsis "Unsafe DuckDB native bridge for pinned OxCaml"))
 (package (name duckdb) (synopsis "Synchronous DuckDB resources for pinned OxCaml"))
+(package (name duckdb-async) (synopsis "Bounded Async DuckDB requests for pinned OxCaml"))

@@ -1,0 +1,4 @@
+(library (name duckdb_async) (public_name duckdb-async)
+ (flags (:standard -extension-universe beta))
+ (private_modules worker_owner)
+ (libraries base core async threads duckdb))

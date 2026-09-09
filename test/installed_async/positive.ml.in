@@ -1,0 +1,28 @@
+open! Core
+open! Async
+module A = Duckdb_async
+let require name value = if not value then failwith name
+let ok = function Ok value -> value | Error _ -> failwith "installed async failure"
+let await r = ok (A.completion (ok r))
+let test () =
+  A.create (ok (A.Limits.create ~connections:1 ~queue_capacity:1)) (ok (Duckdb.Config.create Memory)) >>= fun created ->
+  let p = ok created in
+  Monitor.protect ~finally:(fun () -> ok (A.shutdown p) >>| ok) (fun () ->
+    await (A.execute p "CREATE TABLE installed(i INTEGER)") >>= fun result -> ok result;
+    let r = ok (A.transaction p ~f:(fun tx ->
+      Result.bind (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (1)") ~f:(fun () ->
+        Result.map (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (2)") ~f:(fun () -> 42)))) in
+    require "installed completion shared" (phys_equal (ok (A.completion r)) (ok (A.completion r)));
+    ok (A.completion r) >>= fun result -> require "installed owned transaction" (ok result = 42);
+    let cancel = ok (A.execute p "SELECT 1") in ignore (ok (A.cancel cancel));
+    ok (A.completion cancel) >>= fun _ ->
+    let stop = ok (A.shutdown p) in
+    require "installed shutdown shared" (phys_equal stop (ok (A.shutdown p)));
+    stop >>| ok)
+let run () =
+  require "adapter module initialization starts no scheduler/controller" (Array.length (Stdlib.Sys.readdir "/proc/self/task") = 1);
+  don't_wait_for (Monitor.try_with test >>= function
+    | Ok () -> Stdlib.print_endline "installed duckdb-async SQL transaction cancel shutdown: passed"; Shutdown.exit 0
+    | Error exn -> Stdlib.prerr_endline (Exn.to_string exn); Shutdown.exit 1);
+  never_returns (Scheduler.go ())
+let () = run ()

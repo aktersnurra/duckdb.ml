@@ -1,0 +1,1 @@
+let bad (pool : Duckdb_async.t) = Domain.Safe.spawn (fun () -> pool)

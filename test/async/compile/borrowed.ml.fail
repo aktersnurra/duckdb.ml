@@ -1,0 +1,4 @@
+let escape result =
+  Duckdb.fold_chunks result ~init:() ~f:(fun chunk () ->
+    let _ = Async.In_thread.run (fun () -> Duckdb.chunk_length chunk) in
+    Ok (Duckdb.Stop ()))
