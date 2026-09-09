@@ -62,6 +62,34 @@ val execute : t -> string -> (unit request, error) result
     compile but is not awaited and does not extend the transaction lifetime. *)
 val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.error) result) -> ('a request, error) result
 
+(** Materializes owned rows on the leased worker. The decoder and SQL are
+    evaluated entirely in one offload; no result/chunk owner crosses Async. *)
+val query : t -> string -> 'row Duckdb.Row.t -> ('row list request, error) result
+
+(** Folds owned decoded rows synchronously on the leased worker. The callback
+    must not access Async or retain adapter/core owners. [Stop] is successful
+    early termination and returns its accumulator. *)
+val fold_rows : t -> string -> 'row Duckdb.Row.t -> init:'a ->
+  f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) ->
+  ('a request, error) result
+
+(** Runs a complete explicit transaction and appender lifecycle on one worker.
+    Every batch is validated and appended by the core appender. [flush] requests
+    an additional explicit flush after all batches; automatic core flushes still
+    occur as required by its batch policy. No appender owner escapes. *)
+val ingest : t -> schema:string option -> table:string ->
+  batches:Duckdb.cell list list list -> flush:bool -> (unit request, error) result
+
+(** Reads exact local filenames in order and folds owned decoded rows on one
+    worker. Paths are constructed/resolved only after worker entry. *)
+val parquet_fold_rows : t -> string list -> 'row Duckdb.Row.t -> init:'a ->
+  f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) ->
+  ('a request, error) result
+
+(** Exports through DuckDB's owned temporary/publication protocol on one worker.
+    The destination string is converted to a local path only on that worker. *)
+val parquet_export : t -> query:string -> destination:string -> (unit request, error) result
+
 (** The same request-owned Deferred on every call. Settles once after Bridge
     return/controller retirement and pool accounting/required maintenance, before
     any exceptional notification to the submitting monitor. Dropping a Deferred

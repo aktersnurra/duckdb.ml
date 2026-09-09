@@ -1,4 +1,4 @@
-(executable (name test_duckdb_async) (modules test_duckdb_async test_support test_native_cases test_instrumented_cases test_failure_cases)
+(executable (name test_duckdb_async) (modules test_duckdb_async test_support test_native_cases test_instrumented_cases test_failure_cases test_typed_cases)
  (libraries core async duckdb duckdb-async duckdb-ffi)
  (foreign_stubs (language c) (names async_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
@@ -18,10 +18,14 @@
   -cclib -Wl,--wrap=duckdb_close
   -cclib -Wl,--wrap=duckdb_appender_clear
   -cclib -Wl,--wrap=duckdb_appender_destroy
+  -cclib -Wl,--wrap=duckdb_appender_end_row
+  -cclib -Wl,--wrap=duckdb_appender_flush
   -cclib -Wl,--wrap=duckdb_fetch_chunk
   -cclib -Wl,--wrap=duckdb_interrupt
   -cclib -Wl,--wrap=caml_thread_join
   -cclib -Wl,--wrap=ml_duckdb_native_request_deliver
+  -cclib -Wl,--wrap=ml_duckdb_publish_local_file_admitted
+  -cclib -Wl,--wrap=ml_duckdb_remove_local_file
   -cclib -Wl,--wrap=ml_duckdb_clear_work
   -cclib -Wl,--wrap=ml_duckdb_finish_result_close
   -cclib -Wl,--wrap=ml_duckdb_finish_prepared_close

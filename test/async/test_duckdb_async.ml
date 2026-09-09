@@ -169,7 +169,7 @@ let callback_effect_denied () =
     let r = ok (A.transaction p ~f:(fun _ -> Stdlib.Effect.perform Callback_pause; Ok ())) in
     complete r >>| fun result ->
     require "core outward effect barrier preserved" (match result with Error (A.Expected (A.Core Duckdb.Effects_not_allowed)) -> true | _ -> false))
-let cases = cases @ ["callback_effect_denied", callback_effect_denied] @ Test_native_cases.cases @ Test_failure_cases.cases
+let cases = cases @ ["callback_effect_denied", callback_effect_denied] @ Test_native_cases.cases @ Test_failure_cases.cases @ Test_typed_cases.cases
 let run () =
   Stdlib.Printexc.record_backtrace true;
   let negative = Array.exists (Sys.get_argv ()) ~f:(fun x -> String.equal x "--fail-heartbeat" || String.equal x "--held-lock-negative") in

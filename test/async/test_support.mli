@@ -2,7 +2,12 @@ val require : string -> bool -> unit
 val ok : ('a, 'e) result -> 'a
 val wait_scheduler : (unit -> bool) -> unit Async.Deferred.t
 val wait_worker : bool Stdlib.Atomic.t -> unit
-external reset : int -> unit = "stage4c_reset" [@@noalloc]
+val reset : int -> unit
+val observe_callback_cleanup : bool -> unit
+val callback_cleanup_observations : unit -> int
+val callback_cleanup_is_clear : unit -> bool
+val observe_explicit_flush : unit -> unit
+val explicit_flush_observations : unit -> int
 external opens : unit -> int = "stage4c_opens" [@@noalloc]
 external connects : unit -> int = "stage4c_connects" [@@noalloc]
 external disconnects : unit -> int = "stage4c_disconnects" [@@noalloc]
@@ -28,7 +33,11 @@ val dispatch_count : unit -> int
 (** Native gates run only at existing unlocked engine boundaries. *)
 type seam = Open | Connect | Execute | Execute_return | Rollback | Result
   | Prepared | Extracted | Chunk | Appender_clear | Appender_destroy
-  | Disconnect | Database_close | Fetch | Commit | Commit_return
+  | Disconnect | Database_close | Fetch | Commit | Commit_return | Prepared_return
+  | Appender_end_row | Appender_flush
+val hold_publication : bool -> unit
+val publication_entries : unit -> int
+val temporary_unlinks : unit -> int
 val seam_id : seam -> int
 val native_hold : seam -> unit
 val native_release : seam -> unit
@@ -40,6 +49,13 @@ external native_errors : unit -> int = "stage4c_native_errors" [@@noalloc]
 external joins : unit -> int = "stage4c_joins" [@@noalloc]
 external locked_calls : unit -> int = "stage4c_locked_calls" [@@noalloc]
 external commits : unit -> int = "stage4c_commits" [@@noalloc]
+external appender_end_rows : unit -> int = "stage4c_appender_end_rows" [@@noalloc]
+external appender_end_row_errors : unit -> int = "stage4c_appender_end_row_errors" [@@noalloc]
+external select_appender_end_row : int -> unit = "stage4c_select_appender_end_row" [@@noalloc]
+external appender_flushes : unit -> int = "stage4c_appender_flushes" [@@noalloc]
+external metadata_changes : unit -> int = "stage4c_metadata_changes" [@@noalloc]
+external select_parquet_first : bool -> unit = "stage4c_select_parquet_first" [@@noalloc]
+external parquet_second_exec : unit -> int = "stage4c_parquet_second_exec" [@@noalloc]
 external hold_selected : bool -> unit = "stage4c_hold_selected" [@@noalloc]
 external selected_seen : unit -> bool = "stage4c_selected_seen" [@@noalloc]
 external distinct_interrupted : unit -> int = "stage4c_distinct_interrupted" [@@noalloc]

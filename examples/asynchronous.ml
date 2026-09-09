@@ -10,10 +10,27 @@ let example () =
   let pool = ok created in
   Monitor.protect ~finally:(fun () -> ok (A.shutdown pool) >>| ok) (fun () ->
     await (A.execute pool "CREATE TABLE example(i BIGINT)") >>= fun () ->
-    await (A.transaction pool ~f:(fun tx ->
-      Result.bind (Duckdb.execute_transaction tx "INSERT INTO example VALUES (1)") ~f:(fun () ->
-        Result.map (Duckdb.execute_transaction tx "INSERT INTO example VALUES (2)") ~f:(fun () -> "two owned rows committed"))))
-    >>| fun message -> Stdlib.print_endline message)
+    let batches =
+      [ [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L) ]
+        ; [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 2L) ]
+        ] ]
+    in
+    await (A.ingest pool ~schema:None ~table:"example" ~batches ~flush:true) >>= fun () ->
+    let row = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+    await (A.query pool "SELECT i FROM example ORDER BY i" row) >>= fun values ->
+    await (A.fold_rows pool "SELECT i FROM example ORDER BY i" row ~init:0L
+      ~f:(fun (value, ()) total -> Ok (Duckdb.Continue Int64.(total + value)))) >>= fun sum ->
+    let parquet = Stdlib.Filename.temp_file "duckdb_async_example" ".parquet" in
+    Stdlib.Sys.remove parquet;
+    Monitor.protect
+      ~finally:(fun () -> if Stdlib.Sys.file_exists parquet then Stdlib.Sys.remove parquet; return ())
+      (fun () ->
+        await (A.parquet_export pool ~query:"SELECT i FROM example ORDER BY i" ~destination:parquet) >>= fun () ->
+        await (A.parquet_fold_rows pool [parquet] row ~init:[]
+          ~f:(fun value values -> Ok (Duckdb.Continue (value :: values)))) >>= fun parquet_values ->
+        Stdlib.Printf.printf "ingested %d rows; query/fold sum=%Ld; Parquet read %d owned rows\n%!"
+          (List.length values) sum (List.length parquet_values);
+        return ()))
   >>| fun () -> Stdlib.print_endline "duckdb-async: example completed and shutdown settled"
 let run () =
   don't_wait_for (Monitor.try_with example >>= function

@@ -8,12 +8,28 @@ let test () =
   A.create (ok (A.Limits.create ~connections:1 ~queue_capacity:1)) (ok (Duckdb.Config.create Memory)) >>= fun created ->
   let p = ok created in
   Monitor.protect ~finally:(fun () -> ok (A.shutdown p) >>| ok) (fun () ->
-    await (A.execute p "CREATE TABLE installed(i INTEGER)") >>= fun result -> ok result;
+    await (A.execute p "CREATE TABLE installed(i BIGINT)") >>= fun result -> ok result;
     let r = ok (A.transaction p ~f:(fun tx ->
       Result.bind (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (1)") ~f:(fun () ->
         Result.map (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (2)") ~f:(fun () -> 42)))) in
     require "installed completion shared" (phys_equal (ok (A.completion r)) (ok (A.completion r)));
     ok (A.completion r) >>= fun result -> require "installed owned transaction" (ok result = 42);
+    let row = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+    await (A.query p "SELECT i::BIGINT FROM installed ORDER BY i" row) >>= fun decoded ->
+    require "installed owned typed query" (List.length (ok decoded) = 2);
+    let batches = [[ [Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 3L)] ]] in
+    await (A.ingest p ~schema:None ~table:"installed" ~batches ~flush:true) >>= fun result -> ok result;
+    await (A.fold_rows p "SELECT i::BIGINT FROM installed ORDER BY i" row ~init:0L
+      ~f:(fun (value, ()) total -> Ok (Duckdb.Continue Int64.(total + value)))) >>= fun total ->
+    require "installed owned fold and ingestion" (Int64.equal (ok total) 6L);
+    let path = Stdlib.Filename.temp_file "duckdb_async_installed" ".parquet" in
+    Stdlib.Sys.remove path;
+    Monitor.protect ~finally:(fun () -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path; return ()) (fun () ->
+      await (A.parquet_export p ~query:"SELECT i::BIGINT FROM installed ORDER BY i" ~destination:path) >>= fun result -> ok result;
+      await (A.parquet_fold_rows p [path] row ~init:0L
+        ~f:(fun (value, ()) total -> Ok (Duckdb.Continue Int64.(total + value)))) >>| fun sum ->
+      require "installed local Parquet" (Int64.equal (ok sum) 6L))
+    >>= fun () ->
     let cancel = ok (A.execute p "SELECT 1") in ignore (ok (A.cancel cancel));
     ok (A.completion cancel) >>= fun _ ->
     let stop = ok (A.shutdown p) in

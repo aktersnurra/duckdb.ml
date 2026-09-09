@@ -36,6 +36,11 @@ type slot_state = Idle | Leased | Needs_close | Closing | Needs_connect | Connec
 type _ operation =
   | Execute : string -> unit operation
   | Transaction : (Duckdb.transaction -> ('a, Duckdb.error) result) -> 'a operation
+  | Query : string * 'row Duckdb.Row.t -> 'row list operation
+  | Fold_rows : string * 'row Duckdb.Row.t * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
+  | Ingest : string option * string * Duckdb.cell list list list * bool -> unit operation
+  | Parquet_fold_rows : string list * 'row Duckdb.Row.t * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
+  | Parquet_export : string * string -> unit operation
 
 type t =
   { limits : Limits.t
@@ -250,7 +255,12 @@ and dispatch : type a. t -> slot -> a request -> unit = fun pool slot r ->
       else
         let run : a operation -> (a, Duckdb.error) result = function
           | Execute sql -> W.execute owner bridge sql
-          | Transaction f -> W.transaction owner bridge ~f in
+          | Transaction f -> W.transaction owner bridge ~f
+          | Query (sql, row) -> W.query owner bridge sql row
+          | Fold_rows (sql, row, init, f) -> W.fold_rows owner bridge sql row ~init ~f
+          | Ingest (schema, table, batches, flush) -> W.ingest owner bridge ~schema ~table ~batches ~flush
+          | Parquet_fold_rows (names, row, init, f) -> W.parquet_fold_rows owner bridge names row ~init ~f
+          | Parquet_export (query, destination) -> W.parquet_export owner bridge ~query ~destination in
         core (fun () -> run operation) in
     with_gate gate (fun () -> gate.execution <- Returned);
     result in
@@ -343,6 +353,11 @@ let admit pool operation =
         Ok r)
 let execute pool sql = admit pool (Execute sql)
 let transaction pool ~f = admit pool (Transaction f)
+let query pool sql row = admit pool (Query (sql, row))
+let fold_rows pool sql row ~init ~f = admit pool (Fold_rows (sql, row, init, f))
+let ingest pool ~schema ~table ~batches ~flush = admit pool (Ingest (schema, table, batches, flush))
+let parquet_fold_rows pool names row ~init ~f = admit pool (Parquet_fold_rows (names, row, init, f))
+let parquet_export pool ~query ~destination = admit pool (Parquet_export (query, destination))
 let completion r = if W.is_in_callback () then Error Reentrant_call else Ok (Ivar.read r.result)
 let cancel (r : _ request) =
   if W.is_in_callback () then Error Reentrant_call
