@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=${DUNE_SOURCEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
-out=$(mktemp -d "$root/.local/stage4e/eio-modes.XXXXXX")
+temporary_root="$root/.local/test-eio"
+mkdir -p "$temporary_root"
+out=$(mktemp -d "$temporary_root/compiler-modes.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 export OCAMLPATH="$root/_build/install/default/lib:$root/_opam/lib"
 compile() {
