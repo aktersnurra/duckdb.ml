@@ -1,13 +1,18 @@
 (copy_files ../../../lib/eio/duckdb_eio.mli)
-(copy_files ../../../lib/eio/worker_owner.ml)
 (copy_files ../../../lib/eio/worker_owner.mli)
-(rule (target lib_source.ml) (deps ../../../lib/eio/duckdb_eio.ml)
- (action (copy %{deps} %{target})))
-(rule (targets duckdb_eio.ml insertions.json)
- (deps generate.py lib_source.ml duckdb_eio.mli worker_owner.ml worker_owner.mli)
- (action (run python3 %{dep:generate.py})))
+(copy_files ../typed_cases.ml)
+(copy_files ../typed_cases.mli)
+(copy_files ../typed_hooks.ml)
+(copy_files ../typed_hooks.mli)
+(copy_files ../typed_probe.mli)
 (copy_files ../foundation_hooks.c)
-(executable (name gates) (modules gates test_support duckdb_eio worker_owner)
+(rule (target adapter_source.ml) (deps ../../../lib/eio/duckdb_eio.ml) (action (copy %{deps} %{target})))
+(rule (target owner_source.ml) (deps ../../../lib/eio/worker_owner.ml) (action (copy %{deps} %{target})))
+(rule (target probe_source.ml) (deps ../typed_probe.ml) (action (copy %{deps} %{target})))
+(rule (targets duckdb_eio.ml worker_owner.ml typed_probe.ml insertions.json)
+ (deps generate.py adapter_source.ml owner_source.ml probe_source.ml)
+ (action (run python3 %{dep:generate.py})))
+(executable (name query_ingest) (modules query_ingest duckdb_eio worker_owner typed_cases typed_hooks typed_probe)
  (libraries base eio_main duckdb)
  (foreign_stubs (language c) (names foundation_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../../.deps/duckdb})
@@ -25,13 +30,12 @@
   -cclib -Wl,--wrap=ml_duckdb_close_database
   -cclib -Wl,--wrap=duckdb_destroy_result
   -cclib -Wl,--wrap=duckdb_destroy_prepare
+  -cclib -Wl,--wrap=duckdb_appender_create_ext
+  -cclib -Wl,--wrap=duckdb_appender_destroy
   -cclib -Wl,--wrap=duckdb_appender_clear
   -cclib -Wl,--wrap=duckdb_appender_end_row
   -cclib -Wl,--wrap=duckdb_appender_flush
-  -cclib -Wl,--wrap=duckdb_appender_create_ext
-  -cclib -Wl,--wrap=duckdb_appender_destroy
   -cclib -Wl,--wrap=duckdb_destroy_data_chunk
   -cclib -Wl,--wrap=duckdb_fetch_chunk
   -cclib -Wl,--wrap=duckdb_query))
-
-(rule (alias runtest) (action (run timeout 60 ./%{exe:gates.exe})))
+(rule (alias runtest) (action (run timeout 90 ./%{exe:query_ingest.exe})))

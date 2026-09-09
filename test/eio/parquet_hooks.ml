@@ -1,0 +1,5 @@
+external select : int -> string -> string -> string -> unit = "eio_parquet_select"
+external release : unit -> unit = "eio_parquet_release"
+external counter : int -> int = "eio_parquet_counter"
+external worker_entry : unit -> unit = "eio_parquet_worker_entry"
+external fail_unlink : bool -> unit = "eio_parquet_fail_unlink"

@@ -272,6 +272,17 @@ let submit : type a. t -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, 
 
 let execute t sql = submit t ~reuse:true (fun slot request -> W.execute slot request sql)
 let transaction t ~f = submit t ~reuse:false (fun slot request -> W.transaction slot request ~f)
+(* Complete typed requests conservatively retire their slot after every outcome.
+   Their worker owners materialize all output before [submit] settles. *)
+let query t sql row = submit t ~reuse:false (fun slot request -> W.query slot request sql row)
+let fold_rows t sql row ~init ~f =
+  submit t ~reuse:false (fun slot request -> W.fold_rows slot request sql row ~init ~f)
+let ingest t ~schema ~table ~batches ~flush =
+  submit t ~reuse:false (fun slot request -> W.ingest slot request ~schema ~table ~batches ~flush)
+let parquet_fold_rows t names row ~init ~f =
+  submit t ~reuse:false (fun slot request -> W.parquet_fold_rows slot request names row ~init ~f)
+let parquet_export t ~query ~destination =
+  submit t ~reuse:false (fun slot request -> W.parquet_export slot request ~query ~destination)
 let shutdown t =
   if W.is_in_callback () then Error Reentrant_call
   else (

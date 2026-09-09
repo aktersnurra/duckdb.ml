@@ -27,14 +27,54 @@ static atomic_bool held, close_held, hold_result_destroy, hold_prepared_destroy,
 static atomic_bool select_result, select_chunk, select_disconnect;
 static _Atomic(uintptr_t) selected_result, selected_chunk;
 static atomic_int open_entered, connect_entered, opens;
+/* Typed-request-only observers. They are deliberately independent of the
+   lifecycle counters above and never expose an owner or a production hook. */
+static atomic_int typed_ingest_entries, typed_appender_end_rows, typed_appender_flushes;
+static atomic_bool typed_ingest_held;
 static atomic_bool open_held, connect_held;
 static atomic_int held_entries[21];
 static void gate(atomic_bool *holding, atomic_int *entries, int kind);
 static _Thread_local bool released;
+/* Stage4f selectors: appender identity comes only from a named fixture table;
+   result identity comes from this request's prepared execution, never BEGIN. */
+static atomic_int typed_kind, typed_row, typed_ack, typed_errors, typed_commits, typed_fetches;
+static atomic_bool typed_hold;
+static _Atomic(uintptr_t) typed_appender, typed_result;
+static void typed_gate(int kind, bool owner_matches) {
+  if (owner_matches && atomic_load(&typed_kind) == kind && atomic_load(&typed_hold) && released) {
+    atomic_fetch_add(&typed_ack, 1);
+    gate(&typed_hold, NULL, 0);
+  }
+}
+CAMLprim value eio_typed_select(value kind, value row) {
+  atomic_store(&typed_kind, Int_val(kind)); atomic_store(&typed_row, Int_val(row));
+  atomic_store(&typed_ack, 0); atomic_store(&typed_hold, true);
+  return Val_unit;
+}
+CAMLprim value eio_typed_release(value unit) {
+  (void)unit; atomic_store(&typed_hold, false); return Val_unit;
+}
+CAMLprim value eio_typed_counter(value kind) {
+  switch (Int_val(kind)) {
+    case 0: return Val_int(atomic_load(&typed_ack));
+    case 1: return Val_int(atomic_load(&typed_errors));
+    case 2: return Val_int(atomic_load(&typed_commits));
+    default: return Val_int(atomic_load(&typed_fetches));
+  }
+}
+extern duckdb_state real_appender_create_ext(duckdb_connection, const char *, const char *, const char *, duckdb_appender *) __asm__("__real_duckdb_appender_create_ext");
+duckdb_state wrap_appender_create_ext(duckdb_connection, const char *, const char *, const char *, duckdb_appender *) __asm__("__wrap_duckdb_appender_create_ext");
+duckdb_state wrap_appender_create_ext(duckdb_connection c, const char *catalog, const char *schema, const char *table, duckdb_appender *a) {
+  duckdb_state state = real_appender_create_ext(c, catalog, schema, table, a);
+  if (state == DuckDBSuccess && strncmp(table, "typed_", 6) == 0) atomic_store(&typed_appender, (uintptr_t)*a);
+  return state;
+}
 static _Thread_local unsigned disconnect_serial, database_serial;
 CAMLprim value eio_foundation_reset(value fail_at) {
   for (int i = 0; i < 21; ++i) atomic_store(&held_entries[i], 0);
   atomic_store(&opens, 0); atomic_store(&open_entered, 0); atomic_store(&connect_entered, 0);
+  atomic_store(&typed_ingest_entries, 0); atomic_store(&typed_appender_end_rows, 0);
+  atomic_store(&typed_appender_flushes, 0); atomic_store(&typed_ingest_held, false);
   atomic_store(&open_held, false); atomic_store(&connect_held, false);
   atomic_store(&connects, 0); atomic_store(&disconnects, 0);
   atomic_store(&closes, 0); atomic_store(&executions, 0);
@@ -92,6 +132,18 @@ CAMLprim value eio_foundation_hold_init(value kind, value enable) {
 CAMLprim value eio_foundation_hold(value enable) {
   atomic_store(&held, Bool_val(enable)); return Val_unit;
 }
+CAMLprim value eio_typed_reset(value unit) { (void)unit;
+  atomic_store(&typed_kind, 0); atomic_store(&typed_hold, false); atomic_store(&typed_ack, 0);
+  atomic_store(&typed_errors, 0); atomic_store(&typed_commits, 0); atomic_store(&typed_fetches, 0);
+  atomic_store(&typed_appender, 0); atomic_store(&typed_result, 0);
+  atomic_store(&typed_ingest_entries, 0); atomic_store(&typed_appender_end_rows, 0);
+  atomic_store(&typed_appender_flushes, 0); atomic_store(&typed_ingest_held, false);
+  return Val_unit;
+}
+CAMLprim value eio_typed_hold_ingest(value enable) { atomic_store(&typed_ingest_held, Bool_val(enable)); return Val_unit; }
+CAMLprim value eio_typed_ingest_entries(value unit) { (void)unit; return Val_int(atomic_load(&typed_ingest_entries)); }
+CAMLprim value eio_typed_appender_end_rows(value unit) { (void)unit; return Val_int(atomic_load(&typed_appender_end_rows)); }
+CAMLprim value eio_typed_appender_flushes(value unit) { (void)unit; return Val_int(atomic_load(&typed_appender_flushes)); }
 CAMLprim value eio_foundation_hold_database(value enable) {
   atomic_store(&close_held, Bool_val(enable)); return Val_unit;
 }
@@ -178,7 +230,9 @@ void __wrap_duckdb_close(duckdb_database *db) {
 extern duckdb_state __real_duckdb_execute_prepared(duckdb_prepared_statement, duckdb_result *);
 duckdb_state __wrap_duckdb_execute_prepared(duckdb_prepared_statement p, duckdb_result *r) {
   atomic_fetch_add(&executions, 1); gate(&held, &entered, 5);
+  typed_gate(1, true); /* This isolated selector submits exactly one prepared request. */
   duckdb_state result = __real_duckdb_execute_prepared(p, r);
+  if (result == DuckDBSuccess) atomic_store(&typed_result, (uintptr_t)r->internal_data);
   if (atomic_load(&select_result)) atomic_store(&selected_result, (uintptr_t)r);
   if (result == DuckDBSuccess) gate(&hold_foreign_return, &foreign_returns, 18);
   if (result != DuckDBSuccess) atomic_fetch_add(&native_errors, 1);
@@ -193,6 +247,7 @@ void __wrap_duckdb_destroy_result(duckdb_result *r) {
   atomic_fetch_add(&result_destroys, 1);
   uintptr_t selected = atomic_load(&selected_result);
   if (selected && (uintptr_t)r == selected) gate(&hold_result_destroy, NULL, 9);
+  typed_gate(6, r->internal_data && (uintptr_t)r->internal_data == atomic_load(&typed_result));
   __real_duckdb_destroy_result(r);
 }
 extern void __real_duckdb_destroy_data_chunk(duckdb_data_chunk *);
@@ -204,12 +259,15 @@ void __wrap_duckdb_destroy_data_chunk(duckdb_data_chunk *chunk) {
 }
 extern duckdb_data_chunk __real_duckdb_fetch_chunk(duckdb_result);
 duckdb_data_chunk __wrap_duckdb_fetch_chunk(duckdb_result result) {
+  atomic_fetch_add(&typed_fetches, 1);
+  typed_gate(2, result.internal_data && (uintptr_t)result.internal_data == atomic_load(&typed_result));
   duckdb_data_chunk chunk = __real_duckdb_fetch_chunk(result);
   if (atomic_load(&select_chunk) && chunk) atomic_store(&selected_chunk, (uintptr_t)chunk);
   return chunk;
 }
 extern duckdb_state __real_duckdb_query(duckdb_connection, const char *, duckdb_result *);
 duckdb_state __wrap_duckdb_query(duckdb_connection c, const char *sql, duckdb_result *r) {
+  if (strcmp(sql, "COMMIT") == 0) atomic_fetch_add(&typed_commits, 1);
   if (strcmp(sql, "ROLLBACK") == 0) { atomic_fetch_add(&rollbacks, 1); gate(&hold_rollback, NULL, 16); }
   return __real_duckdb_query(c, sql, r);
 }
@@ -221,7 +279,29 @@ void __wrap_duckdb_destroy_prepare(duckdb_prepared_statement *p) {
 extern duckdb_state __real_duckdb_appender_destroy(duckdb_appender *);
 duckdb_state __wrap_duckdb_appender_destroy(duckdb_appender *a) {
   atomic_fetch_add(&appender_destroys, 1); gate(&hold_appender_destroy, NULL, 11);
+  typed_gate(5, *a && (uintptr_t)*a == atomic_load(&typed_appender));
   return __real_duckdb_appender_destroy(a);
+}
+extern duckdb_state __real_duckdb_appender_clear(duckdb_appender);
+duckdb_state __wrap_duckdb_appender_clear(duckdb_appender appender) {
+  atomic_fetch_add(&typed_ingest_entries, 1);
+  gate(&typed_ingest_held, NULL, 0);
+  return __real_duckdb_appender_clear(appender);
+}
+extern duckdb_state __real_duckdb_appender_end_row(duckdb_appender);
+duckdb_state __wrap_duckdb_appender_end_row(duckdb_appender appender) {
+  int row = atomic_fetch_add(&typed_appender_end_rows, 1) + 1;
+  typed_gate(3, (uintptr_t)appender == atomic_load(&typed_appender) &&
+    (atomic_load(&typed_row) == 0 || row == atomic_load(&typed_row)));
+  duckdb_state state = __real_duckdb_appender_end_row(appender);
+  if (state != DuckDBSuccess) atomic_fetch_add(&typed_errors, 1);
+  return state;
+}
+extern duckdb_state __real_duckdb_appender_flush(duckdb_appender);
+duckdb_state __wrap_duckdb_appender_flush(duckdb_appender appender) {
+  atomic_fetch_add(&typed_appender_flushes, 1);
+  typed_gate(4, (uintptr_t)appender == atomic_load(&typed_appender));
+  return __real_duckdb_appender_flush(appender);
 }
 /* Raise only at ordinary allocating ABI, after the actual destructor returned
    and reacquired the runtime. Core finalization/guard discipline is untouched. */

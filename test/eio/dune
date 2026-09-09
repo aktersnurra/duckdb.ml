@@ -1,7 +1,10 @@
 (test (name adapter_eio) (modules adapter_eio)
  (libraries base eio_main duckdb duckdb-eio))
 
-(executable (name foundation_eio) (modules foundation_eio cancellation_eio)
+(test (name typed_eio) (modules typed_eio)
+ (libraries base eio_main duckdb duckdb-eio))
+
+(executable (name foundation_eio) (modules foundation_eio cancellation_eio typed_hooks typed_cases typed_probe) 
  (libraries base eio_main duckdb duckdb-eio)
  (foreign_stubs (language c) (names foundation_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
@@ -20,6 +23,10 @@
   -cclib -Wl,--wrap=duckdb_destroy_result
   -cclib -Wl,--wrap=duckdb_destroy_prepare
   -cclib -Wl,--wrap=duckdb_appender_destroy
+  -cclib -Wl,--wrap=duckdb_appender_create_ext
+  -cclib -Wl,--wrap=duckdb_appender_clear
+  -cclib -Wl,--wrap=duckdb_appender_end_row
+  -cclib -Wl,--wrap=duckdb_appender_flush
   -cclib -Wl,--wrap=duckdb_destroy_data_chunk
   -cclib -Wl,--wrap=duckdb_fetch_chunk
   -cclib -Wl,--wrap=duckdb_query))
@@ -32,3 +39,26 @@
        compile/forge_pool.ml.fail compile/private_worker.ml.fail compile/private_resource.ml.fail)
  (action (run bash %{dep:check_modes.sh})))
 
+
+(executable (name parquet_eio) (modules parquet_eio parquet_cases parquet_hooks typed_probe)
+ (libraries base unix eio_main duckdb duckdb-eio)
+ (foreign_stubs (language c) (names parquet_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra -Werror)))
+ (link_flags :standard
+  -cclib -Wl,--wrap=duckdb_extract_statements
+  -cclib -Wl,--wrap=duckdb_prepare_extracted_statement
+  -cclib -Wl,--wrap=duckdb_execute_prepared
+  -cclib -Wl,--wrap=duckdb_fetch_chunk
+  -cclib -Wl,--wrap=duckdb_destroy_result
+  -cclib -Wl,--wrap=duckdb_destroy_prepare
+  -cclib -Wl,--wrap=duckdb_destroy_data_chunk
+  -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=caml_enter_blocking_section
+  -cclib -Wl,--wrap=caml_leave_blocking_section
+  -cclib -Wl,--wrap=ml_duckdb_admit_local_file
+  -cclib -Wl,--wrap=link
+  -cclib -Wl,--wrap=unlink
+  -cclib -Wl,--wrap=caml_sys_getcwd
+))
+(rule (alias runtest) (action (run timeout 90 ./%{exe:parquet_eio.exe})))

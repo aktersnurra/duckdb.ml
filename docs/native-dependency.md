@@ -48,13 +48,15 @@ application-owned rpath. Moving the native directory requires updating that
 environment, not rebuilding the OCaml packages. Both native executables and
 bytecode stubs need the native library at runtime.
 
-`bash test/install_smoke.sh` builds/installs the FFI package alone, runs a separate
-FFI consumer, then builds the safe package against that **installed** FFI with
-its source package excluded. Another external consumer runs against a newly
-extracted temporary native prefix. It checks `META` dependency boundaries and
-ELF loader paths, the prepared/typed example, and an external compile rejection
-of private resource admission operations. The safe package uses Dune
-`private_modules`: internal CMIs are not on the public consumer search path.
+`bash test/install_adapters_smoke.sh` runs the four-package installation checks:
+FFI/core alone, then FFI -> core -> Async with Eio source/package absent, and
+FFI -> core -> Eio with Async source/package absent. Each adapter producer is
+hidden before its external consumer is built. The checks inspect `META` and
+`dune-package`, private-module rejection, compiler include paths, no build-root
+rpath, and relocated local DuckDB loading. They run public synchronous, Async,
+and typed Eio/Parquet examples. These are Dune staging checks, not opam solver
+or package-publication evidence. The safe package uses Dune `private_modules`:
+internal CMIs are not on the public consumer search path.
 
 **Pinned Dune build-directory limitation:** use the default `_build` or a
 source-relative **direct-child** build directory when installing a package with

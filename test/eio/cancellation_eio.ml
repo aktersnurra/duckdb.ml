@@ -242,9 +242,27 @@ let transaction_isolation_and_reentry () =
     unwrap (E.shutdown p));
   check "reentrant call made no extra native SQL" (counter 3 = 2)
 
+let selectors env =
+  let clock = Eio.Stdenv.clock env in
+  ["queue_and_admission", (fun () -> queue_and_admission clock);
+   "queued_shutdown", (fun () -> queued_shutdown clock);
+   "fifo_overflow_and_zero", (fun () -> fifo_overflow_and_zero clock);
+   "running_cancellation_then_reuse", (fun () -> running_cancellation_then_reuse clock);
+   "foreign_return_then_reuse", (fun () -> foreign_return_then_reuse clock);
+   "transaction_between_statements", (fun () -> transaction_between_statements clock);
+   "replacement_shutdown_wins", (fun () -> replacement_shutdown_wins clock);
+   "transaction_isolation_and_reentry", transaction_isolation_and_reentry]
+
+let run_if_selected env selector =
+  match List.find (selectors env) ~f:(fun (name, _) -> String.equal selector name) with
+  | None -> false
+  | Some (name, test) ->
+    Stdlib.Printf.printf "cancellation backend=%s\n%!" (Eio.Stdenv.backend_id env);
+    test (); Stdlib.Printf.printf "cancellation %s: PASS\n%!" name;
+    true
+
 let run env =
   Stdlib.Printf.printf "cancellation backend=%s\n%!" (Eio.Stdenv.backend_id env);
-  let clock = Eio.Stdenv.clock env in
-  List.iter ["queue_and_admission", (fun () -> queue_and_admission clock); "queued_shutdown", (fun () -> queued_shutdown clock); "fifo_overflow_and_zero", (fun () -> fifo_overflow_and_zero clock); "running_cancellation_then_reuse", (fun () -> running_cancellation_then_reuse clock); "foreign_return_then_reuse", (fun () -> foreign_return_then_reuse clock); "transaction_between_statements", (fun () -> transaction_between_statements clock); "replacement_shutdown_wins", (fun () -> replacement_shutdown_wins clock); "transaction_isolation_and_reentry", transaction_isolation_and_reentry] ~f:(fun (name, f) ->
+  List.iter (selectors env) ~f:(fun (name, test) ->
     if Array.length (Sys.get_argv ()) = 1 || String.equal (Sys.get_argv ()).(1) name then (
-      f (); Stdlib.Printf.printf "cancellation %s: PASS\n%!" name))
+      test (); Stdlib.Printf.printf "cancellation %s: PASS\n%!" name))

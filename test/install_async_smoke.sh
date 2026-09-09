@@ -10,6 +10,8 @@ mkdir "$producer"
 cp dune-project ./*.opam "$producer/"
 cp -R lib "$producer/lib"
 # No sibling adapter source/package participates in this producer.
+rm -rf "$producer/lib/eio"
+rm -f "$producer/duckdb-eio.opam"
 test ! -d "$producer/lib/eio"
 test ! -f "$producer/duckdb-eio.opam"
 # The pinned Dune private_dirs encoder requires a single-component relative

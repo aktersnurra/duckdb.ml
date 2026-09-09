@@ -426,35 +426,52 @@ let cancellation_cleanup clock inject_close =
     unwrap (E.shutdown p));
   inventory ~connected:2 ~disconnected:2 ~databases:1
 
+let foundation_selectors env =
+  let clock = Eio.Stdenv.clock env in
+  ["reuse_and_exception", reuse_and_exception;
+   "replacement_failure", (fun () -> replacement_failure clock);
+   "core_and_close", (fun () -> primary_and_close false);
+   "raised_and_close", (fun () -> primary_and_close true);
+   "independent_close", independent_close;
+   "partial_creation", partial_creation;
+   "already_cancelled_creator", already_cancelled_creator;
+   "cancelled_creator_open", (fun () -> cancelled_creator clock 12 false);
+   "cancelled_creator_connect", (fun () -> cancelled_creator clock 13 false);
+   "cancelled_creator_cleanup", (fun () -> cancelled_creator clock 13 true);
+   "creator_cancelled_during_cleanup", (fun () -> creator_cancelled_during_cleanup clock);
+   "automatic_close", automatic_close;
+   "parent_failure", (fun () -> parent_switch clock false);
+   "parent_cancellation", (fun () -> parent_switch clock true);
+   "cancellation_cleanup", (fun () -> cancellation_cleanup clock true);
+   "ordinary_cancellation", (fun () -> cancellation_cleanup clock false);
+   "child_cleanup_responsiveness", (fun () -> child_cleanup_responsiveness clock);
+   "saturated_shutdown", (fun () -> saturated_shutdown clock);
+   "cancelled_shutdown_waiter", (fun () -> cancelled_shutdown_waiter clock)]
+
+let run_foundation env =
+  Stdlib.Printf.printf "foundation backend=%s\n%!" (Eio.Stdenv.backend_id env);
+  List.iter (foundation_selectors env) ~f:(fun (name, test) ->
+    test (); Stdlib.Printf.printf "foundation %s: PASS\n%!" name)
+
+let run_foundation_if_selected env selector =
+  match List.find (foundation_selectors env) ~f:(fun (name, _) -> String.equal selector name) with
+  | None -> false
+  | Some (name, test) ->
+    Stdlib.Printf.printf "foundation backend=%s\n%!" (Eio.Stdenv.backend_id env);
+    test (); Stdlib.Printf.printf "foundation %s: PASS\n%!" name;
+    true
+
 let () =
   Stdlib.Printexc.record_backtrace true;
   Stdlib.Callback.Safe.register_exception "eio_foundation_close" (Close_fault 0);
-  Eio_main.run (fun env ->
-    Stdlib.Printf.printf "foundation backend=%s\n%!" (Eio.Stdenv.backend_id env);
-    let clock = Eio.Stdenv.clock env in
-    let tests = [
-      "reuse_and_exception", reuse_and_exception;
-      "replacement_failure", (fun () -> replacement_failure clock);
-      "core_and_close", (fun () -> primary_and_close false);
-      "raised_and_close", (fun () -> primary_and_close true);
-      "independent_close", independent_close;
-      "partial_creation", partial_creation;
-      "already_cancelled_creator", already_cancelled_creator;
-      "cancelled_creator_open", (fun () -> cancelled_creator clock 12 false);
-      "cancelled_creator_connect", (fun () -> cancelled_creator clock 13 false);
-      "cancelled_creator_cleanup", (fun () -> cancelled_creator clock 13 true);
-      "creator_cancelled_during_cleanup", (fun () -> creator_cancelled_during_cleanup clock);
-      "automatic_close", automatic_close;
-      "parent_failure", (fun () -> parent_switch clock false);
-      "parent_cancellation", (fun () -> parent_switch clock true);
-      "cancellation_cleanup", (fun () -> cancellation_cleanup clock true);
-      "ordinary_cancellation", (fun () -> cancellation_cleanup clock false);
-      "child_cleanup_responsiveness", (fun () -> child_cleanup_responsiveness clock);
-      "saturated_shutdown", (fun () -> saturated_shutdown clock);
-      "cancelled_shutdown_waiter", (fun () -> cancelled_shutdown_waiter clock);
-    ] in
-    List.iter tests ~f:(fun (name, test) ->
-      if Array.length (Sys.get_argv ()) = 1 || String.equal (Sys.get_argv ()).(1) name then (
-        test (); Stdlib.Printf.printf "foundation %s: PASS\n%!" name)))
-
-let () = Eio_main.run Cancellation_eio.run
+  match Array.to_list (Sys.get_argv ()) with
+  | [_] ->
+    Eio_main.run run_foundation;
+    Eio_main.run Cancellation_eio.run;
+    Eio_main.run Typed_cases.run
+  | [_; selector] ->
+    if Eio_main.run (fun env -> run_foundation_if_selected env selector) then ()
+    else if Eio_main.run (fun env -> Cancellation_eio.run_if_selected env selector) then ()
+    else if Eio_main.run (fun env -> Typed_cases.run_if_selected env selector) then ()
+    else invalid_arg ("unknown foundation_eio selector: " ^ selector)
+  | _ -> invalid_arg "foundation_eio accepts at most one selector"
