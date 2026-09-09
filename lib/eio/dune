@@ -1,0 +1,4 @@
+(library (name duckdb_eio) (public_name duckdb-eio)
+ (flags (:standard -extension-universe beta))
+ (private_modules worker_owner)
+ (libraries base threads eio eio.unix duckdb))

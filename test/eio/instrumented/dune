@@ -1,0 +1,33 @@
+(copy_files ../../../lib/eio/duckdb_eio.mli)
+(copy_files ../../../lib/eio/worker_owner.ml)
+(copy_files ../../../lib/eio/worker_owner.mli)
+(rule (target lib_source.ml) (deps ../../../lib/eio/duckdb_eio.ml)
+ (action (copy %{deps} %{target})))
+(rule (targets duckdb_eio.ml insertions.json)
+ (deps generate.py lib_source.ml duckdb_eio.mli worker_owner.ml worker_owner.mli)
+ (action (run python3 %{dep:generate.py})))
+(copy_files ../foundation_hooks.c)
+(executable (name gates) (modules gates test_support duckdb_eio worker_owner)
+ (libraries base eio_main duckdb)
+ (foreign_stubs (language c) (names foundation_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra -Werror)))
+ (link_flags :standard
+  -cclib -Wl,--wrap=duckdb_open_ext
+  -cclib -Wl,--wrap=duckdb_connect
+  -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=duckdb_close
+  -cclib -Wl,--wrap=duckdb_execute_prepared
+  -cclib -Wl,--wrap=duckdb_interrupt
+  -cclib -Wl,--wrap=caml_enter_blocking_section
+  -cclib -Wl,--wrap=caml_leave_blocking_section
+  -cclib -Wl,--wrap=ml_duckdb_close_connection
+  -cclib -Wl,--wrap=ml_duckdb_close_database
+  -cclib -Wl,--wrap=duckdb_destroy_result
+  -cclib -Wl,--wrap=duckdb_destroy_prepare
+  -cclib -Wl,--wrap=duckdb_appender_destroy
+  -cclib -Wl,--wrap=duckdb_destroy_data_chunk
+  -cclib -Wl,--wrap=duckdb_fetch_chunk
+  -cclib -Wl,--wrap=duckdb_query))
+
+(rule (alias runtest) (action (run timeout 60 ./%{exe:gates.exe})))

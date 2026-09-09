@@ -1,0 +1,25 @@
+open! Base
+
+module E = Duckdb_eio
+
+let require name value = if not value then failwith name
+let ok = function Ok value -> value | Error _ -> failwith "installed Eio failure"
+
+let run () =
+  require "adapter module initialization starts no scheduler" (Array.length (Stdlib.Sys.readdir "/proc/self/task") = 1);
+  Eio_main.run (fun _env ->
+    Eio.Switch.run (fun sw ->
+      let pool = ok (E.create ~sw (ok (E.limits ~connections:1 ~queue_capacity:1))
+        (ok (Duckdb.Config.create Duckdb.Config.Memory))) in
+      Exn.protect
+        ~finally:(fun () -> ok (E.shutdown pool))
+        ~f:(fun () ->
+          ok (E.execute pool "CREATE TABLE installed(i BIGINT)");
+          let value = ok (E.transaction pool ~f:(fun tx ->
+            Result.bind (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (1)") ~f:(fun () ->
+              Result.map (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (2)") ~f:(fun () -> 42)))) in
+          require "installed whole transaction" (value = 42);
+          ok (E.execute pool "INSERT INTO installed VALUES (3)"))));
+  Stdlib.print_endline "installed duckdb-eio SQL transaction shutdown: passed"
+
+let () = run ()

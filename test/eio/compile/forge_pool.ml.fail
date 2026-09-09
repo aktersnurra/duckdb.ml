@@ -1,0 +1,1 @@
+let bad = Duckdb_eio.execute () "SELECT 1"

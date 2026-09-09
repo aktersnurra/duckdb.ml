@@ -1,2 +1,4 @@
 (executable (name synchronous) (modules synchronous) (libraries base duckdb))
 (executable (name asynchronous) (modules asynchronous) (libraries core async duckdb-async duckdb))
+(executable (name eio) (modules eio) (libraries base eio_main duckdb-eio duckdb)
+ (flags (:standard -extension-universe beta)))

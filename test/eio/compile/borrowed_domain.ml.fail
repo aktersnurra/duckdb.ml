@@ -1,0 +1,12 @@
+let handoff pool =
+  Duckdb_eio.transaction pool ~f:(fun tx ->
+    match Duckdb.prepare_transaction tx "SELECT 1" with
+    | Error error -> Error error
+    | Ok prepared ->
+      match Duckdb.execute_prepared prepared with
+      | Error error -> Error error
+      | Ok result ->
+        Duckdb.fold_chunks result ~init:() ~f:(fun chunk () ->
+          let worker = Domain.Safe.spawn (fun () -> chunk) in
+          let _ = Domain.join worker in
+          Ok (Duckdb.Stop ())))
