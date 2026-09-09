@@ -2,7 +2,7 @@
     system threads, but are not portable/domain-safe. Busy operations fail fast.
     Scoped callbacks cannot send effects to an outer handler. *)
 type error = Invalid_configuration of string | Embedded_nul | Closed
-  | Busy | Live_children | Native_error of string | Unsupported_statement
+  | Busy | Cancelled | Live_children | Native_error of string | Unsupported_statement
   | Data_error of Scalar.error
   | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
   | Effects_not_allowed | Rollback_failed of error * error
@@ -25,6 +25,37 @@ end
 type database
 type connection
 type transaction
+
+(** Unpublished B1 intermediate slice, NOT an accepted cancellation bridge.
+    Synchronous callbacks only, under the no-outward-effect barrier. Cancellation
+    is cooperative at ML boundaries; native work may finish normally. No native
+    interrupt, scheduler, bounded shutdown or cancellation-safe reuse claim.
+    Facades/children are revoked at settlement; owned values may escape.
+    The owner is Busy throughout [run]; facade close is Busy while active and
+    Closed after revocation, never an owner disconnect. Live children cannot
+    be imported. Requests are single-use, including failed admission: overlapping
+    [run] is Busy, later [run]/[cancel] is Closed. [cancel] latches a request,
+    not its outcome; repeated cancellation before settlement succeeds. Pending
+    includes never-run requests. Cancellation replaces only an otherwise
+    successful outcome, not primary errors or exceptions. *)
+(* Private lifecycle refinement: exclusive admission precedes native allocation
+   and binding. Cancellation publication shares request synchronization with
+   binding; native detach/disposal precedes lease release or discard disconnect.
+   One owned system-thread controller services raw/Query work, Appender metadata
+   and flushing, and named BEGIN/COMMIT. Scalar/reset/file decisions admit the
+   persistent latch without delivery; rollback remains noninterruptible cleanup.
+   Recoverable ordinary rollback retains that controller with delivery excluded;
+   cancellation-driven/terminal cleanup joins before destruction or lease release.
+   Any actual native delivery makes the owner discard-only. B2 is unaccepted. *)
+module Bridge : sig
+  type request
+  type settlement = Pending | Settled
+  val create : unit -> request
+  val cancel : request -> (unit, error) result
+  val settlement : request -> settlement
+  val run : request -> connection ->
+    f:(connection -> ('a, error) result) -> ('a, error) result
+end
 val open_database : Config.t -> (database, error) result
 
 (** Repeated close succeeds; live children reject parent close. *)
@@ -60,7 +91,8 @@ type child
 val transaction_connection : transaction -> connection
 val with_admission : connection -> transaction option -> (unit -> ('a, error) result) -> ('a, error) result
 val register_child : connection -> transaction option -> cleanup:(unit -> unit) -> child
-val child_operation : child -> allow_result:bool -> (unit -> ('a, error) result) -> ('a, error) result
+(* [cleanup] bypasses only the cancellation latch, never identity/admission. *)
+val child_operation : ?cleanup:bool -> child -> allow_result:bool -> (unit -> ('a, error) result) -> ('a, error) result
 val child_is_closed : child -> bool
 val unregister_child : child -> unit
 val reserve_result : child -> unit
@@ -76,3 +108,12 @@ val with_child_snapshot : child -> (unit -> ('a, error) result) -> ('a, error) r
 
 (* First appender failure prevents transaction commit even if ignored. *)
 val poison_transaction : transaction -> error -> unit
+
+(* ML user-work boundary; cleanup must remain available after cancellation.
+   Does not arm native interruption or hold a lock across work. *)
+val checkpoint : connection -> (unit, error) result
+
+(* Only inside exclusive admission, after foreign completion. Cancellation-driven
+   cleanup retires/joins before destruction; ordinary cleanup retains the
+   same controller, with native delivery excluded throughout destruction. *)
+val admit_cleanup : connection -> unit

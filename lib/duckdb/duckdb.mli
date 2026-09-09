@@ -44,7 +44,7 @@ end
     system threads, but are not portable/domain-safe. Busy operations fail fast.
     Scoped callbacks cannot send effects to an outer handler. *)
 type error = Invalid_configuration of string | Embedded_nul | Closed
-  | Busy | Live_children | Native_error of string | Unsupported_statement
+  | Busy | Cancelled | Live_children | Native_error of string | Unsupported_statement
   | Data_error of Scalar.error
   | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
   | Effects_not_allowed | Rollback_failed of error * error
@@ -68,6 +68,35 @@ end
 type database
 type connection
 type transaction
+
+(** Unpublished Stage4b bridge, validated within the supported contract below.
+    Synchronous callbacks only, under the no-outward-effect barrier. Cancellation
+    persists across admitted native boundaries, with one independent controller
+    per admitted request. Under the supported ordinary-cancellation contract,
+    [run] settles owned work and joins that controller before returning/raising;
+    actual interrupt delivery discards the owner. No scheduler or bounded shutdown
+    promise. Ordinary cleanup and filesystem calls are noninterruptible; native
+    finalizer/signal backstops have more limited responsiveness. Cancellation can
+    suppress an unadmitted COMMIT/publication, not undo already-admitted durable
+    effects. OOM, arbitrary/repeated asynchronous exceptions, nonreturning work
+    and process failure remain outside these settlement guarantees.
+    Facades/children are revoked at settlement; owned values may escape.
+    The owner is Busy throughout [run]; facade close is Busy while active and
+    Closed after revocation, never an owner disconnect. Live children cannot
+    be imported. Requests are single-use, including failed admission: overlapping
+    [run] is Busy, later [run]/[cancel] is Closed. [cancel] latches a request,
+    not its outcome; repeated cancellation before settlement succeeds. Pending
+    includes never-run requests. Cancellation replaces only an otherwise
+    successful outcome, not primary errors or exceptions. *)
+module Bridge : sig
+  type request
+  type settlement = Pending | Settled
+  val create : unit -> request
+  val cancel : request -> (unit, error) result
+  val settlement : request -> settlement
+  val run : request -> connection ->
+    f:(connection -> ('a, error) result) -> ('a, error) result
+end
 val open_database : Config.t -> (database, error) result
 
 (** Repeated close succeeds; live children reject parent close. *)

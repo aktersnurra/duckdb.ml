@@ -43,7 +43,9 @@ let () =
               if String.equal mode "callback" then (trigger ();Stdlib.Gc.minor ());
               if String.is_prefix mode ~prefix:"discard" then (
                 inject "discard"; Error (Native_error "primary callback"))
-              else (inject "close";
+              else (
+                inject "close-flush";
+                if String.equal mode "close-enter" || String.equal mode "close-leave" then target 4 leave;
                 let result = close_appender a in inject "commit"; result))));
           Stdlib.Gc.minor ()); false
         with e when is_break e -> true in
@@ -58,9 +60,11 @@ let () =
     let expected = match mode with
       | "create-enter" -> 7 | "create-leave" -> 10
       | "append-enter" -> 12 | "append-leave" -> 10
-      | "flush-enter" | "flush-leave" | "close-enter" | "discard-enter" | "callback" -> 10
+      | "flush-enter" | "flush-leave" | "close-flush-enter" | "close-flush-leave"
+      | "close-enter" | "discard-enter" | "callback" -> 10
       | "close-leave" | "discard-leave" -> 9
-      | "commit-enter" -> 5 | "commit-leave" -> 4
+      (* Named COMMIT uses an immutable C literal, not an owned SQL copy. *)
+      | "commit-enter" -> 4 | "commit-leave" -> 4
       | "export-copy-enter" -> 6 | "export-copy-leave" -> 7
       | "export-publish-enter" | "export-publish-leave" -> 7
       | "export-remove-enter" | "export-remove-leave" | "export-fail-remove-enter" | "export-fail-remove-leave" -> 6

@@ -1,4 +1,4 @@
-# Stage4b: safe bridge execution plan (not implementation)
+# Stage4b: safe bridge execution plan (completed; unpublished)
 
 > Follow writing-plans/executing-plans, interface-first TDD, one writer and
 > independent review. No adapter package before the complete bridge gate.
@@ -6,9 +6,49 @@
 **Base:** accepted Stage4a `2978138c`, Stage4 plan `1333a3de`, published
 Stage3c/master `8bb77a2f`. The approved design and the global/Stage4b contracts in
 [the Stage4 plan](2026-09-08-stage4-adapters.md) remain authoritative.
-**Current deliverable:** non-production packaging fixture plus this plan.
-**Not delivered:** a production bridge, final production signatures, adapters,
-pooling, engine-lifetime synchronization or native cancellation responsiveness.
+**Completion (2026-09-13):** B1–B4 are accepted within the documented supported
+contract after independent whole-bridge review and fresh parent execution of all
+52 acceptance commands. See [validation](../../stage4b-validation.md) for exact
+source/evidence, approved refinements and limits. Adapter packages, pooling and
+remote publication are not included. This remains an unpublished working change.
+
+**Original planning deliverable:** non-production packaging fixture plus this
+plan; the production bridge and native responsiveness were not yet delivered.
+
+## Historical B1 execution progress (then acceptance pending)
+
+B1's real Resource owner/facade lease, ML cancellation boundaries and focused
+compiler/runtime controls are implemented in the working copy over `3db90c1d`.
+[Incremental validation](../../stage4b-validation.md) records exact reds/greens,
+mutations, native test hooks, regressions and limitations. **B1 is pending
+independent acceptance; B2 remains open. This is NOT an accepted cancellation
+bridge.** No controller, native/FFI delivery change, adapter or publication is
+included. The supervisor authorized only an additional already-unlocked
+prepared-execute test gate for deterministic real snapshot settlement evidence.
+The remaining B2–B4 contracts below are unchanged.
+
+## Owner-approved rollback refinement (2026-09-11)
+
+The owner explicitly approved preserving the same sole controller during
+**recoverable ordinary transaction or snapshot rollback**, with native delivery
+quiesced/ineligible throughout that cleanup. Successful ordinary rollback may
+return its original error/exception to a still-live Bridge callback, which may
+then issue more work. It must not create another controller, terminalize the
+request, or silently leave later work without the controller.
+
+This narrowly refines references below to joining before every ML rollback:
+**cancellation-driven rollback and terminal cleanup still require selected
+attempt retirement and controller stop/join before cleanup**. An ordinary
+rollback already admitted before cancellation may finish noninterruptibly;
+explicit race tests must prove no further user work is admitted and retirement/
+join precede subsequent terminal cleanup. Failed rollback still discards under
+the terminal protocol. No delivery is permitted during any rollback/destructor.
+
+Require explicit rollback/cancellation race tests and independent review before
+activation. The approval changes only this rollback/controller distinction; it
+does not accept B2, authorize adapters, or waive native lifetime and boundary
+gates. `test/bridge_recovery/` records existing recovery semantics; those tests
+and disposable compiler fixtures are not native delivery evidence.
 
 ## 1. Evidence and first gate
 
@@ -487,26 +527,26 @@ settlement/error/backtrace behavior. No async callback enters a core scope.
 
 Final acceptance checklist (all required):
 
-- [ ] Every Stage4a race rerun through real safe Bridge, five repetitions,
+- [x] Every Stage4a race rerun through real safe Bridge, five repetitions,
       including reset loss control and independent progress under occupied slots.
-- [ ] Alias/request/transaction/child revocation, concurrent/nested admission,
+- [x] Alias/request/transaction/child revocation, concurrent/nested admission,
       live prepared/result/appender exclusion and close-versus-delivery tested.
-- [ ] Latch survives successful native return, dropped/caught cancellation and
+- [x] Latch survives successful native return, dropped/caught cancellation and
       native failures; no later user call or COMMIT/publication when cancel wins.
-- [ ] Native delivery excluded/quiescent before each internal destructor;
+- [x] Native delivery excluded/quiescent before each internal destructor;
       all tickets retired and controllers joined before terminal ML request
       cleanup, rollback, discard, owner release or disconnect. Internal cleanup
       may retain a controller that can only skip ineligible delivery; no timeout
       authorizes recycling.
-- [ ] Rollback/cleanup failure retains all outcomes/backtraces and discards;
+- [x] Rollback/cleanup failure retains all outcomes/backtraces and discards;
       committed/published before/after race facts independently observed.
-- [ ] Installed consumer works, Resource remains private, forge/mode negatives
+- [x] Installed consumer works, Resource remains private, forge/mode negatives
       reject intended source; production dependency graph remains scheduler-free.
-- [ ] Ordinary cancellation never reaches blocking held-runtime fallback;
+- [x] Ordinary cancellation never reaches blocking held-runtime fallback;
       actual native-cleanup heartbeats and independent control progress pass.
-- [ ] Full build/forced Stage1–4 regression, C warnings-as-errors and authored-C
+- [x] Full build/forced Stage1–4 regression, C warnings-as-errors and authored-C
       ASan/UBSan pass within their limits; no claim whole-process LSan passes.
-- [ ] Independent specification and implementation review accept the complete
+- [x] Independent specification and implementation review accept the complete
       bridge and its exact final public/private signatures, not merely B1.
 
 Run B1 commands after each production slice, plus:

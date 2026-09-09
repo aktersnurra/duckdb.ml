@@ -5,7 +5,9 @@ import unittest
 import zipfile
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location("setup_duckdb", Path(__file__).resolve().parents[1] / "tools/setup_duckdb.py")
+spec = importlib.util.spec_from_file_location(
+    "setup_duckdb", Path(__file__).resolve().parents[1] / "tools/setup_duckdb.py"
+)
 assert spec is not None and spec.loader is not None
 setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup)
@@ -29,6 +31,10 @@ class NativeSetup(unittest.TestCase):
                 output.writestr("libduckdb.so", b"library")
                 output.writestr("../escape", b"unwanted")
             prefix = Path(directory) / "native"
-            setup.install_archive(archive, prefix, hashlib.sha256(archive.read_bytes()).hexdigest())
-            self.assertEqual(sorted(p.name for p in prefix.iterdir()), ["duckdb.h", "libduckdb.so"])
+            setup.install_archive(
+                archive, prefix, hashlib.sha256(archive.read_bytes()).hexdigest()
+            )
+            self.assertEqual(
+                sorted(p.name for p in prefix.iterdir()), ["duckdb.h", "libduckdb.so"]
+            )
             self.assertFalse((Path(directory) / "escape").exists())

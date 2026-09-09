@@ -7,7 +7,9 @@
     clears the custom slot, idempotently. Status/message require a live shell.
     Execute's boolean is true only for internal transaction-control SQL; false
     applies the safe layer's single-statement/type allowlist. Status 0 is success,
-    1 a native error, and 2 an unsupported statement. *)
+    1 a native error, 2 an unsupported statement, and 3 cancellation-suppressed
+    raw execute admission. Execute with false and Query prepare/execute/fetch
+    admit interruptible subcalls; true control SQL remains noninterruptible. *)
 type database
 type connection
 val database_owner : unit -> database
@@ -15,6 +17,12 @@ val connection_owner : database -> connection
 val open_database : database -> string -> int -> int -> bool -> unit
 val connect : connection -> unit
 val execute : connection -> string -> bool -> unit
+
+(** Fixed private control SQL. Begin/Commit are individually interruptible and
+    latch-admitted; Rollback is exclusive noninterruptible cleanup. Status 3
+    means no control call was admitted. The legacy bool entry is unchanged. *)
+type control_statement = Begin | Commit | Rollback
+val execute_control : connection -> control_statement -> unit
 val database_status : database -> int
 val database_message : database -> string
 val connection_status : connection -> int
@@ -31,6 +39,89 @@ val finish_connection_close : connection -> unit
 (** Internal seam, not cancellation: caller must independently synchronize
     lifetime and operation identity. Never expose as a public cancellation API. *)
 val interrupt : connection -> unit
+
+(** Unsafe, provisional lifecycle used by private Resource. Raw execute and
+    Query extraction/prepare/execute/fetch subcalls admit USER delivery. Query
+    bind/reset and Appender scalar mutations admit without delivery. Named
+    Begin/Commit admit USER; Rollback is noninterruptible cleanup. Filesystem
+    reservation/publication decisions never enable delivery. Complete B4 review
+    and responsiveness gates remain open; these are not accepted guarantees.
+
+    Callers exclusively serialize worker operations on requests and owner trees,
+    including close, disposal and GC root bookkeeping. The sole system-thread
+    controller may reserve/deliver/retire while admitted user work runs; it must retain
+    the entire owner/request graph and join before detach/disposal/close.
+    Runtime serialization does NOT make these externals domain-safe. Install
+    only on an idle connected owner. Foreign activity is separate from cleanup
+    eligibility. Detach after foreign completion and reservation retirement,
+    before explicit owner/parent close. Other concurrent unsafe work is unsupported.
+
+    A request binds successfully at most once; failed installation leaves a fresh
+    request fresh. While bound it retains the ML connection slot and a native
+    shell reference. The owner's request pointer is non-owning. Live work and any
+    sole controller/selected attempt MUST retain the entire request until
+    completion/retirement. Root all live children as well: an unreachable bound
+    request or child must be quiescent, with no same-owner guard user. Finalizers
+    try once, fail closed on invariant violation and never wait. Native references
+    are released outside the guard. Finalizer order need not preserve ML roots
+    once both are dead; the native shell reference handles that case. Fallback
+    destruction may block. Held-runtime controller entries serialize with
+    held-runtime finalizers; no guard is held while releasing the runtime. *)
+module Native_request : sig
+  type t
+  type installation
+  type install_result =
+    | Installed
+    | Install_contended
+    | Connection_closed
+    | Connection_leased
+    | Request_used
+    | Connection_active
+  type uninstall_result =
+    | Uninstalled
+    | Uninstall_contended
+    | Native_work_pending
+    | Delivery_pending
+    | Not_installed
+  type reserve_result = Reserved | Ineligible | Reservation_pending
+  type interrupt_result = Delivered | Skipped | Not_reserved
+  type dispose_error = Still_installed
+
+  val create : unit -> t
+
+  (** Cancellation latches permanently. On disposed aliases it is a no-op. *)
+  val cancel : t -> unit
+
+  (** Preallocate all ML owner roots before taking request synchronization.
+      An installation retains its request and connection until dropped; preparing
+      it does not bind or consume either. The native single-use check is unchanged. *)
+  val prepare_install : connection -> t -> installation
+
+  (** Publication using preallocated roots; no ML allocation or runtime release. *)
+  val try_install_prepared : installation -> install_result
+
+  (** Convenience for callers not holding a request mutex. *)
+  val try_install : connection -> t -> install_result
+
+  (** At most one reservation, owned and retired only by the sole
+      controller in a protected finally. No other caller may retire it. *)
+  val reserve_delivery : t -> reserve_result
+  val try_interrupt : t -> interrupt_result
+
+  (** Normal allocating ABI; delegates immediately to the same nonblocking
+      try-delivery. A test-linked wrapper may pause before that recheck. *)
+  val deliver : t -> interrupt_result
+
+  (** Idempotent with no reservation, including on disposed aliases. *)
+  val retire_delivery : t -> unit
+  val try_uninstall : t -> uninstall_result
+
+  (** Deterministic and idempotent; refuses installed requests. Disposed aliases
+      remain valid tombstones: install reports Request_used, uninstall
+      Not_installed, reserve Ineligible, and interrupt Not_reserved. *)
+  val dispose : t -> (unit, dispose_error) result
+end
+
 val live_resources : unit -> int
 val fallback_reclaims : unit -> int
 
@@ -40,6 +131,9 @@ val fallback_reclaims : unit -> int
 type prepared
 val prepared_owner : connection -> prepared
 val prepare : prepared -> string -> unit
+(* Native status ABI: 0 success, 1 native error (prepared_message),
+   2 unsupported statement, 3 cancellation suppressed native admission.
+   An admitted native failure retains status 1 and its original diagnostic. *)
 val prepared_status : prepared -> int
 val prepared_message : prepared -> string
 val parameter_count : prepared -> int
@@ -93,6 +187,17 @@ val prepared_column_types : prepared -> int array
 type local_file_work
 val local_file_work : unit -> local_file_work
 val publish_local_file : local_file_work -> string -> string -> int
+
+(** Noninterruptible native decision for one immediate filesystem reservation.
+    Caller holds exclusive Resource admission across this AND the reservation.
+    No reusable ticket; phase/work ends before return. *)
+type file_admission = File_admitted | File_cancelled
+val admit_local_file : connection -> file_admission
+
+(** Same no-replace link, with the owner's persistent latch decision before
+    actual link. Caller holds exclusive transaction admission and roots owner.
+    Returns -1 if suppressed, otherwise 0/errno; never enables interruption. *)
+val publish_local_file_admitted : connection -> local_file_work -> string -> string -> int
 val remove_local_file : local_file_work -> string -> int
 val finish_local_file_work : local_file_work -> unit
 val file_error_message : int -> string

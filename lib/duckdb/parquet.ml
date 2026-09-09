@@ -12,7 +12,9 @@ let path p =
   with Stdlib.Sys_error e -> Error (Native_error e)
 let literal s = "'" ^ String.substr_replace_all s ~pattern:"'" ~with_:"''" ^ "'"
 let fold_rows c paths decoder ~init ~f =
-  let rec loop paths acc = match paths with
+  let rec loop paths acc = match checkpoint c with
+    | Error e -> Error e
+    | Ok () -> match paths with
     | [] -> Ok acc
     | p :: rest ->
       let stopped = ref false in
@@ -28,13 +30,15 @@ let check_types types =
   match Array.findi types ~f:(fun _ typ -> not (List.mem [1;2;3;4;5;10;11;12;13;17;18;22;31] typ ~equal:Int.equal)) with
   | None -> Ok ()
   | Some (column, actual) -> Error (Unsupported_parquet_type { column; actual })
-let publish source destination =
+let publish c tx source destination =
+  with_admission c (Some tx) (fun () ->
   let work = F.local_file_work () in
   Exn.protect ~finally:(fun () -> F.finish_local_file_work work)
     ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
-      let e = F.publish_local_file work source destination in
-      if e = 0 then Ok () else if F.file_exists_error e then Error Destination_exists
-      else Error (Native_error (F.file_error_message e))))
+      let e = F.publish_local_file_admitted (native_connection c) work source destination in
+      if e = -1 then Error Cancelled else if e = 0 then checkpoint c
+      else if F.file_exists_error e then Error Destination_exists
+      else Error (Native_error (F.file_error_message e)))))
 let remove temporary =
   let work = F.local_file_work () in
   Exn.protect ~finally:(fun () -> F.finish_local_file_work work)
@@ -47,13 +51,22 @@ let export c ~query destination =
   with_transaction c ~f:(fun tx ->
     Result.bind (Query.with_prepared_transaction tx query ~f:(fun p ->
       Result.bind (Query.select_schema p) ~f:check_types)) ~f:(fun () ->
-      let temporary = try Ok (Stdlib.Filename.temp_file ~temp_dir:(Stdlib.Filename.dirname destination)
-        ".duckdb-parquet-" ".parquet") with Stdlib.Sys_error e -> Error (Native_error e) in
+      (* Exclusive admission spans the native reservation decision and exactly
+         one synchronous reservation. Record its ownership before checking the
+         latch again, so cancellation cannot strand a successfully owned temp. *)
+      let temporary = with_admission c (Some tx) (fun () ->
+        match F.admit_local_file (native_connection c) with
+        | F.File_cancelled -> Error Cancelled
+        | F.File_admitted -> try Ok (Stdlib.Filename.temp_file ~temp_dir:(Stdlib.Filename.dirname destination)
+          ".duckdb-parquet-" ".parquet") with Stdlib.Sys_error e -> Error (Native_error e)) in
       Result.bind temporary ~f:(fun temporary ->
         scope (fun () ->
           Result.bind (Query.with_prepared_transaction tx
             ("COPY (\n" ^ query ^ "\n) TO $__duckdb_ml_destination (FORMAT PARQUET)") ~f:(fun p ->
               Result.bind (Query.bind p 1 (Scalar.Required Scalar.String) temporary) ~f:(fun () ->
                 Result.bind (Query.execute_prepared p) ~f:Query.close_result)))
-            ~f:(fun () -> publish temporary destination))
-          (fun () -> remove temporary))))
+            ~f:(fun () -> Result.bind (checkpoint c) ~f:(fun () ->
+              publish c tx temporary destination)))
+          (* The private tx is never exposed; Query scopes have drained and
+             publication admission has returned. Its lease owns this cleanup. *)
+          (fun () -> admit_cleanup c; remove temporary))))

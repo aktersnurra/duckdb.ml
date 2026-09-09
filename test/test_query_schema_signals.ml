@@ -44,10 +44,11 @@ let () =
     (Stdlib.Sys.Signal_handle (fun _ -> Stdlib.Atomic.incr handled; raise Stdlib.Sys.Break)) in
   Exn.protect ~finally:(fun () -> arm 0 0; fail_control 0; Stdlib.Sys.Safe.set_signal Stdlib.Sys.sigusr1 previous)
     ~f:(fun () ->
-      (* Observer adds two binding resources to the usual one-connection counts. *)
-      List.iter ["begin", 1, 9, 8; "validate", 2, 10, 10;
+      (* Observer adds two resources. Fixed named control SQL removes only
+         the old transient SQL copy at control entry; returns are unchanged. *)
+      List.iter ["begin", 1, 8, 8; "validate", 2, 10, 10;
         "validation-close", 3, 10, 9; "execute", 4, 8, 9;
-        "commit", 5, 10, 9; "rollback", 4, 9, 8; "rejection-close", 3, 10, 9]
+        "commit", 5, 9, 9; "rollback", 4, 8, 8; "rejection-close", 3, 10, 9]
         ~f:(fun (operation, ordinal, enter_live, leave_live) ->
           signal_case operation "enter" ordinal enter_live;
           signal_case operation "leave" ordinal leave_live));

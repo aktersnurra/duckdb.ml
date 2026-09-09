@@ -1,0 +1,23 @@
+(executable
+ (name test_native_close)
+ (modules test_native_close)
+ (libraries base threads duckdb-ffi evidence_support)
+ (foreign_stubs (language c) (names lifecycle_hooks)
+  (extra_deps ../adapter_bridge_hooks.c ../../lib/ffi/query_native.h)
+  (include_dirs ../../lib/ffi %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=duckdb_execute_prepared
+  -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=duckdb_ml_connection_ref
+  -cclib -Wl,--wrap=ml_duckdb_native_request_create
+  -cclib -Wl,--wrap=ml_duckdb_native_request_install
+  -cclib -Wl,--wrap=ml_duckdb_native_request_uninstall
+  -cclib -Wl,--wrap=ml_duckdb_native_request_dispose
+  -cclib -Wl,--wrap=ml_duckdb_native_request_cancel
+  -cclib -Wl,--wrap=duckdb_bind_int64 -cclib -Wl,--wrap=duckdb_clear_bindings
+  -cclib -Wl,--wrap=duckdb_appender_flush -cclib -Wl,--wrap=duckdb_appender_close
+  -cclib -Wl,--wrap=duckdb_appender_clear -cclib -Wl,--wrap=duckdb_appender_destroy
+  -cclib -Wl,--wrap=duckdb_destroy_result -cclib -Wl,--wrap=duckdb_destroy_prepare
+  -cclib -Wl,--wrap=duckdb_destroy_data_chunk -cclib -Wl,--wrap=duckdb_fetch_chunk))
+(rule (alias runtest)
+ (action (run timeout 60 ./%{exe:test_native_close.exe})))

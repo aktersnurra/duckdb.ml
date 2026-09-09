@@ -1,0 +1,1 @@
+let transfer (connection : Duckdb.connection) = Domain.Safe.spawn (fun () -> connection)

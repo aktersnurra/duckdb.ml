@@ -1,0 +1,19 @@
+(executable
+ (name positive)
+ (modules positive)
+ (libraries base duckdb-ffi))
+
+(library
+ (name native_request_compile_controls)
+ (modules interface_positive)
+ (libraries duckdb-ffi))
+
+(rule
+ (alias runtest)
+ (deps check_interfaces.sh interface_positive.mli interface_positive.ml
+       connection_delivery.ml.fail forge_request.ml.fail
+       ../../lib/ffi/duckdb_ffi.mli)
+ (action
+  (progn
+   (run bash %{dep:check_interfaces.sh} %{ocamlc})
+   (run timeout 30 ./%{exe:positive.exe}))))

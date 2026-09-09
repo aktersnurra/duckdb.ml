@@ -11,16 +11,31 @@ static void bind_status(prepared_owner *p, duckdb_state state) {
     p->status = state == DuckDBSuccess ? 0 : 1;
     if (p->status) snprintf(p->message, sizeof(p->message), "%s", "DuckDB parameter binding failed");
 }
+/* Called only after work_begin, with the runtime released. Binding/reset do
+   not benefit from engine interruption, but each mutation must admit the latch. */
+static bool admit_binding(prepared_owner *p) {
+    if (duckdb_ml_native_noninterruptible_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) {
+        p->status = 3;
+        return false;
+    }
+    return true;
+}
 CAMLprim value ml_duckdb_bind_null(value v, value index) {
     CAMLparam2(v, index); prepared_owner *p = duckdb_ml_prepared(v); idx_t i = Long_val(index);
-    caml_enter_blocking_section(); bind_status(p, duckdb_bind_null(p->prepared, i));
+    caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(p->parent);
+    if (admit_binding(p)) bind_status(p, duckdb_bind_null(p->prepared, i));
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_bind_int64(value v, value index, value typ, value number) {
     CAMLparam4(v, index, typ, number); prepared_owner *p = duckdb_ml_prepared(v);
     idx_t i = Long_val(index); int type = Int_val(typ); int64_t x = Int64_val(number);
     caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(p->parent);
+    p->status = 0;
     duckdb_state state = DuckDBError; duckdb_value temporal = NULL;
+    if (admit_binding(p)) {
     switch (type) {
     case DUCKDB_TYPE_BOOLEAN: state = duckdb_bind_boolean(p->prepared, i, x != 0); break;
     case DUCKDB_TYPE_TINYINT: state = duckdb_bind_int8(p->prepared, i, (int8_t)x); break;
@@ -35,16 +50,25 @@ CAMLprim value ml_duckdb_bind_int64(value v, value index, value typ, value numbe
     case DUCKDB_TYPE_TIMESTAMP_NS: temporal = duckdb_create_timestamp_ns((duckdb_timestamp_ns){x}); break;
     default: break;
     }
-    if (temporal) { state = duckdb_bind_value(p->prepared, i, temporal); duckdb_destroy_value(&temporal); }
-    bind_status(p, state);
+    if (temporal) {
+        if (admit_binding(p)) state = duckdb_bind_value(p->prepared, i, temporal);
+        duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+        duckdb_destroy_value(&temporal);
+        duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+    }
+    if (p->status != 3) bind_status(p, state);
+    }
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_bind_float(value v, value index, value typ, value number) {
     CAMLparam4(v, index, typ, number); prepared_owner *p = duckdb_ml_prepared(v);
     idx_t i = Long_val(index); int type = Int_val(typ); double x = Double_val(number);
     caml_enter_blocking_section();
-    bind_status(p, type == DUCKDB_TYPE_FLOAT ? duckdb_bind_float(p->prepared, i, (float)x)
+    duckdb_ml_native_work_begin(p->parent);
+    if (admit_binding(p)) bind_status(p, type == DUCKDB_TYPE_FLOAT ? duckdb_bind_float(p->prepared, i, (float)x)
                                            : duckdb_bind_double(p->prepared, i, x));
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_bind_string(value v, value index, value typ, value text) {
@@ -54,14 +78,19 @@ CAMLprim value ml_duckdb_bind_string(value v, value index, value typ, value text
     if (!p->input) caml_raise_out_of_memory();
     duckdb_ml_acquired(); memcpy(p->input, String_val(text), length);
     caml_enter_blocking_section();
-    bind_status(p, type == DUCKDB_TYPE_BLOB ? duckdb_bind_blob(p->prepared, i, p->input, length)
+    duckdb_ml_native_work_begin(p->parent);
+    if (admit_binding(p)) bind_status(p, type == DUCKDB_TYPE_BLOB ? duckdb_bind_blob(p->prepared, i, p->input, length)
         : duckdb_bind_varchar_length(p->prepared, i, p->input, length));
     free(p->input); p->input = NULL; duckdb_ml_released();
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_reset(value v) {
     CAMLparam1(v); prepared_owner *p = duckdb_ml_prepared(v);
-    caml_enter_blocking_section(); bind_status(p, duckdb_clear_bindings(p->prepared));
+    caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(p->parent);
+    if (admit_binding(p)) bind_status(p, duckdb_clear_bindings(p->prepared));
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 static duckdb_vector vector(prepared_owner *p, intnat column) {

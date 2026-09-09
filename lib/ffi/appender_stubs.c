@@ -34,11 +34,31 @@ static void error(appender_owner *p, const char *message) {
     p->status = 1;
     snprintf(p->message, sizeof(p->message), "%s", message ? message : "DuckDB appender failed");
 }
-static void check(appender_owner *p, duckdb_state state) {
+/* Status ABI: 0 success, 1 native diagnostic, 3 suppressed cancellation.
+   Never replace a native failure with a later cancellation classification. */
+static bool admit_user(appender_owner *p) {
+    if (p->status) return false;
+    if (duckdb_ml_native_user_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) {
+        p->status = 3; return false;
+    }
+    return true;
+}
+static bool admit_scalar(appender_owner *p) {
+    if (p->status) return false;
+    if (duckdb_ml_native_noninterruptible_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) {
+        p->status = 3; return false;
+    }
+    return true;
+}
+static void check(appender_owner *p, duckdb_state state, duckdb_ml_runtime runtime) {
     if (state != DuckDBSuccess) {
         duckdb_error_data data = duckdb_appender_error_data(p->appender);
         error(p, data ? duckdb_error_data_message(data) : NULL);
-        if (data) duckdb_destroy_error_data(&data);
+        if (data) {
+            duckdb_ml_native_cleanup_begin(p->parent, runtime);
+            duckdb_destroy_error_data(&data);
+            duckdb_ml_native_cleanup_end(p->parent, runtime);
+        }
     }
 }
 static void clear_input(appender_owner *p) {
@@ -53,18 +73,29 @@ static void clear_input(appender_owner *p) {
 }
 /* Clear BEFORE destroy: DuckDB destroy calls close, and the C++ destructor
    can close again. No destructor may silently flush discarded buffered rows. */
-static void close_native(appender_owner *p, bool flush) {
+static void close_native(appender_owner *p, bool flush, duckdb_ml_runtime runtime) {
     if (!p) return;
     if (p->appender) {
-        if (flush && !p->status) check(p, duckdb_appender_close(p->appender));
-        check(p, duckdb_appender_clear(p->appender));
+        if (flush && !p->status) {
+            /* Only the ordinary unlocked close requests a user flush. */
+            duckdb_ml_native_work_begin(p->parent);
+            if (admit_user(p)) {
+                duckdb_state state = duckdb_appender_close(p->appender);
+                duckdb_ml_native_user_call_end(p->parent);
+                check(p, state, runtime);
+            }
+            duckdb_ml_native_work_end(p->parent);
+        }
+        duckdb_ml_native_cleanup_begin(p->parent, runtime);
+        check(p, duckdb_appender_clear(p->appender), runtime);
         duckdb_appender_destroy(&p->appender); duckdb_ml_released();
+        duckdb_ml_native_cleanup_end(p->parent, runtime);
     }
     clear_input(p);
 }
 static void delete_owner(appender_owner *p) {
     if (!p) return;
-    close_native(p, false);
+    close_native(p, false, DUCKDB_ML_RUNTIME_HELD);
     if (p->schema) { free(p->schema); duckdb_ml_released(); }
     if (p->table) { free(p->table); duckdb_ml_released(); }
     if (p->types) { free(p->types); duckdb_ml_released(); }
@@ -99,27 +130,50 @@ CAMLprim value ml_duckdb_create_appender(value v, value schema, value table) {
     p->table = copy_string(table); duckdb_ml_acquired();
     duckdb_connection c = duckdb_ml_connection_handle(p->parent);
     caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(p->parent);
     /* The explicit transaction is already active. Metadata and appender bind
        to the same catalog snapshot; the safe child then reserves admission. */
     duckdb_prepared_statement statement = NULL;
+    duckdb_extracted_statements extracted = NULL;
     duckdb_result result = {0};
     const char *sql = "SELECT database_name,is_nullable FROM duckdb_columns() WHERE database_name=current_database() AND schema_name=? AND table_name=? ORDER BY column_index";
-    if (duckdb_prepare(c, sql, &statement) != DuckDBSuccess) error(p, statement ? duckdb_prepare_error(statement) : NULL);
-    if (!p->status && (duckdb_bind_varchar(statement, 1, p->schema) || duckdb_bind_varchar(statement, 2, p->table))) error(p, "Cannot bind appender metadata");
-    if (!p->status && duckdb_execute_prepared(statement, &result) != DuckDBSuccess) error(p, duckdb_result_error(&result));
+    if (admit_user(p)) {
+        idx_t count = duckdb_extract_statements(c, sql, &extracted);
+        duckdb_ml_native_user_call_end(p->parent);
+        if (count != 1) error(p, extracted ? duckdb_extract_statements_error(extracted) : NULL);
+    }
+    if (admit_user(p)) {
+        duckdb_state state = duckdb_prepare_extracted_statement(c, extracted, 0, &statement);
+        duckdb_ml_native_user_call_end(p->parent);
+        if (state != DuckDBSuccess) error(p, statement ? duckdb_prepare_error(statement) : NULL);
+    }
+    if (admit_scalar(p) && duckdb_bind_varchar(statement, 1, p->schema) != DuckDBSuccess) error(p, "Cannot bind appender metadata");
+    if (admit_scalar(p) && duckdb_bind_varchar(statement, 2, p->table) != DuckDBSuccess) error(p, "Cannot bind appender metadata");
+    if (admit_user(p)) {
+        duckdb_state state = duckdb_execute_prepared(statement, &result);
+        duckdb_ml_native_user_call_end(p->parent);
+        if (state != DuckDBSuccess) error(p, duckdb_result_error(&result));
+    }
     duckdb_data_chunk chunk = NULL;
-    if (!p->status) chunk = duckdb_fetch_chunk(result);
-    if (!p->status && (!chunk || duckdb_data_chunk_get_size(chunk) == 0)) error(p, "Table not found in current database");
-    if (!p->status) {
+    if (admit_user(p)) {
+        chunk = duckdb_fetch_chunk(result);
+        duckdb_ml_native_user_call_end(p->parent);
+        if (duckdb_result_error(&result)) error(p, duckdb_result_error(&result));
+        else if (!chunk || duckdb_data_chunk_get_size(chunk) == 0) error(p, "Table not found in current database");
+    }
+    if (admit_user(p)) {
         /* A full first chunk can match the physical count even with generated
            columns. Require exhaustion before accepting its positional metadata. */
         duckdb_data_chunk extra = duckdb_fetch_chunk(result);
+        duckdb_ml_native_user_call_end(p->parent);
         if (extra) {
             error(p, "Generated-column or very wide tables are not supported by appender");
+            duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
             duckdb_destroy_data_chunk(&extra);
+            duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
         } else if (duckdb_result_error(&result)) error(p, duckdb_result_error(&result));
     }
-    if (!p->status) {
+    if (admit_scalar(p)) {
         idx_t n = duckdb_data_chunk_get_size(chunk);
         duckdb_string_t *names = duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 0));
         uint32_t len = duckdb_string_t_length(names[0]);
@@ -127,12 +181,14 @@ CAMLprim value ml_duckdb_create_appender(value v, value schema, value table) {
         if (!catalog) error(p, "Cannot allocate catalog name");
         else {
             memcpy(catalog, duckdb_string_t_data(&names[0]), len); catalog[len] = 0;
-            duckdb_state state = duckdb_appender_create_ext(c, catalog, p->schema, p->table, &p->appender);
+            if (admit_scalar(p)) {
+                duckdb_state state = duckdb_appender_create_ext(c, catalog, p->schema, p->table, &p->appender);
+                if (p->appender) duckdb_ml_acquired();
+                check(p, state, DUCKDB_ML_RUNTIME_RELEASED);
+            }
             free(catalog);
-            if (p->appender) duckdb_ml_acquired();
-            check(p, state);
         }
-        if (!p->status) {
+        if (admit_scalar(p)) {
             p->columns = duckdb_appender_column_count(p->appender);
             /* Reject generated columns rather than confusing physical positions.
                Very wide metadata spanning chunks is likewise rejected explicitly. */
@@ -141,16 +197,23 @@ CAMLprim value ml_duckdb_create_appender(value v, value schema, value table) {
                 p->types = calloc(n, sizeof(int)); if (p->types) duckdb_ml_acquired();
                 p->nullable = calloc(n, sizeof(bool)); if (p->nullable) duckdb_ml_acquired();
                 if (!p->types || !p->nullable) error(p, "Cannot allocate appender schema");
-                else for (idx_t i = 0; i < n; ++i) {
+                else for (idx_t i = 0; i < n && admit_scalar(p); ++i) {
                     duckdb_logical_type t = duckdb_appender_column_type(p->appender, i);
-                    p->types[i] = duckdb_get_type_id(t); duckdb_destroy_logical_type(&t);
+                    p->types[i] = duckdb_get_type_id(t);
+                    duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+                    duckdb_destroy_logical_type(&t);
+                    duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
                     p->nullable[i] = ((bool *)duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 1)))[i];
                 }
             }
         }
     }
+    duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
     if (chunk) duckdb_destroy_data_chunk(&chunk);
     duckdb_destroy_result(&result); if (statement) duckdb_destroy_prepare(&statement);
+    if (extracted) duckdb_destroy_extracted(&extracted);
+    duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 static duckdb_value make_value(append_cell *c) {
@@ -195,26 +258,46 @@ CAMLprim value ml_duckdb_append_rows(value v, value rows) {
         }
     }
     caml_enter_blocking_section();
-    for (size_t row = 0; row < p->rows && !p->status; ++row) {
-        check(p, duckdb_appender_begin_row(p->appender));
-        for (idx_t col = 0; col < p->columns && !p->status; ++col) {
+    duckdb_ml_native_work_begin(p->parent);
+    for (size_t row = 0; row < p->rows && admit_scalar(p); ++row) {
+        check(p, duckdb_appender_begin_row(p->appender), DUCKDB_ML_RUNTIME_RELEASED);
+        for (idx_t col = 0; col < p->columns && admit_scalar(p); ++col) {
             duckdb_value cell = make_value(&p->cells[row * p->columns + col]);
             if (!cell) error(p, "Cannot construct appender value");
-            else { check(p, duckdb_append_value(p->appender, cell)); duckdb_destroy_value(&cell); }
+            else {
+                if (admit_scalar(p)) check(p, duckdb_append_value(p->appender, cell), DUCKDB_ML_RUNTIME_RELEASED);
+                duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+                duckdb_destroy_value(&cell);
+                duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+            }
         }
-        if (!p->status) check(p, duckdb_appender_end_row(p->appender));
+        /* EndRow can automatically flush the collection through a real INSERT.
+           Earlier cell work is noninterruptible, not scheduler-dispatched. */
+        if (admit_user(p)) {
+            duckdb_state state = duckdb_appender_end_row(p->appender);
+            duckdb_ml_native_user_call_end(p->parent);
+            check(p, state, DUCKDB_ML_RUNTIME_RELEASED);
+        }
     }
     clear_input(p);
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_flush_appender(value v) {
     CAMLparam1(v); appender_owner *p = Appender(v);
-    caml_enter_blocking_section(); if (!p->status) check(p, duckdb_appender_flush(p->appender));
+    caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(p->parent);
+    if (admit_user(p)) {
+        duckdb_state state = duckdb_appender_flush(p->appender);
+        duckdb_ml_native_user_call_end(p->parent);
+        check(p, state, DUCKDB_ML_RUNTIME_RELEASED);
+    }
+    duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_close_appender(value v, value flush) {
     CAMLparam2(v, flush); appender_owner *p = Appender(v); bool do_flush = Bool_val(flush);
-    caml_enter_blocking_section(); close_native(p, do_flush);
+    caml_enter_blocking_section(); close_native(p, do_flush, DUCKDB_ML_RUNTIME_RELEASED);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
 CAMLprim value ml_duckdb_finish_appender_close(value v) { delete_owner(Appender(v)); Appender(v) = NULL; return Val_unit; }

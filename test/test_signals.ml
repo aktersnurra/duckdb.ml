@@ -70,7 +70,10 @@ let () =
       | "open-enter" | "open-leave" | "database-close-enter" -> 2
       | "database-close-leave" -> 1
       | "connect-enter" | "connection-close-leave" -> 3
-      | "query-enter" | "transaction-enter" | "rollback-enter" | "commit-enter" -> 5
+      (* Fixed named control SQL no longer owns a transient SQL copy; the
+         raw-query entry still does. Shell/engine/result counts are unchanged. *)
+      | "query-enter" -> 5
+      | "transaction-enter" | "rollback-enter" | "commit-enter" -> 4
       | _ -> 4 in
     assert (live_at_signal () = expected_live);
     assert (injections () = 1); assert (Stdlib.Atomic.get handled = 1);

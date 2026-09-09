@@ -1,0 +1,77 @@
+(executable
+ (name test_native_delivery)
+ (modules test_native_delivery query_delivery appender_delivery control_publication)
+ (libraries base threads duckdb duckdb-ffi evidence_support)
+ (foreign_stubs (language c) (names delivery_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard
+  -cclib -Wl,--wrap=duckdb_extract_statements -cclib -Wl,--wrap=duckdb_prepare_extracted_statement
+  -cclib -Wl,--wrap=duckdb_execute_prepared -cclib -Wl,--wrap=duckdb_interrupt
+  -cclib -Wl,--wrap=duckdb_destroy_result -cclib -Wl,--wrap=duckdb_destroy_prepare
+  -cclib -Wl,--wrap=duckdb_destroy_extracted -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=caml_thread_new -cclib -Wl,--wrap=caml_thread_join
+  -cclib -Wl,--wrap=caml_ml_condition_wait
+  -cclib -Wl,--wrap=ml_duckdb_execute -cclib -Wl,--wrap=ml_duckdb_native_request_create
+  -cclib -Wl,--wrap=ml_duckdb_native_request_install -cclib -Wl,--wrap=ml_duckdb_native_request_uninstall
+    -cclib -Wl,--wrap=ml_duckdb_prepare
+  -cclib -Wl,--wrap=ml_duckdb_reset
+  -cclib -Wl,--wrap=ml_duckdb_bind_null
+  -cclib -Wl,--wrap=ml_duckdb_bind_int64
+  -cclib -Wl,--wrap=ml_duckdb_bind_float
+  -cclib -Wl,--wrap=ml_duckdb_bind_string
+  -cclib -Wl,--wrap=ml_duckdb_execute_prepared
+  -cclib -Wl,--wrap=ml_duckdb_fetch
+  -cclib -Wl,--wrap=duckdb_bind_null
+  -cclib -Wl,--wrap=duckdb_bind_int64
+  -cclib -Wl,--wrap=duckdb_bind_double
+  -cclib -Wl,--wrap=duckdb_bind_varchar_length
+  -cclib -Wl,--wrap=duckdb_clear_bindings
+  -cclib -Wl,--wrap=duckdb_create_timestamp_s
+  -cclib -Wl,--wrap=duckdb_bind_value
+  -cclib -Wl,--wrap=duckdb_destroy_value
+  -cclib -Wl,--wrap=duckdb_fetch_chunk
+  -cclib -Wl,--wrap=duckdb_destroy_data_chunk
+  -cclib -Wl,--wrap=ml_duckdb_create_appender
+  -cclib -Wl,--wrap=ml_duckdb_appender_nullable
+  -cclib -Wl,--wrap=ml_duckdb_append_rows
+  -cclib -Wl,--wrap=ml_duckdb_flush_appender
+  -cclib -Wl,--wrap=ml_duckdb_close_appender
+  -cclib -Wl,--wrap=duckdb_prepare
+  -cclib -Wl,--wrap=duckdb_bind_varchar
+  -cclib -Wl,--wrap=duckdb_appender_create_ext
+  -cclib -Wl,--wrap=duckdb_appender_begin_row
+  -cclib -Wl,--wrap=duckdb_append_value
+  -cclib -Wl,--wrap=duckdb_appender_end_row
+  -cclib -Wl,--wrap=duckdb_appender_flush
+  -cclib -Wl,--wrap=duckdb_appender_close
+  -cclib -Wl,--wrap=duckdb_appender_clear
+  -cclib -Wl,--wrap=duckdb_appender_destroy
+  -cclib -Wl,--wrap=duckdb_appender_column_count
+  -cclib -Wl,--wrap=duckdb_destroy_error_data
+  -cclib -Wl,--wrap=duckdb_destroy_logical_type
+  -cclib -Wl,--wrap=ml_duckdb_admit_local_file -cclib -Wl,--wrap=caml_sys_open
+  -cclib -Wl,--wrap=ml_duckdb_execute_control -cclib -Wl,--wrap=ml_duckdb_publish_local_file_admitted
+  -cclib -Wl,--wrap=ml_duckdb_publish_local_file -cclib -Wl,--wrap=link -cclib -Wl,--wrap=unlink
+  -cclib -Wl,--wrap=ml_duckdb_native_request_reserve_delivery
+  -cclib -Wl,--wrap=ml_duckdb_native_request_deliver -cclib -Wl,--wrap=ml_duckdb_native_request_retire_delivery))
+(rule (alias runtest)
+ (action (run timeout 120 ./%{exe:test_native_delivery.exe})))
+
+(rule (alias query-delivery)
+ (deps check_query_interfaces.sh ../../lib/duckdb/resource.mli ../../lib/duckdb/scalar.mli ../../lib/ffi/duckdb_ffi.mli)
+ (action (progn
+  (run bash %{dep:check_query_interfaces.sh} %{ocamlc})
+  (run timeout 120 ./%{exe:test_native_delivery.exe} query))))
+
+(rule (alias appender-delivery)
+ (deps check_appender_interfaces.sh ../../lib/duckdb/resource.mli ../../lib/duckdb/scalar.mli ../../lib/ffi/duckdb_ffi.mli)
+ (action (progn
+  (run bash %{dep:check_appender_interfaces.sh} %{ocamlc})
+  (run timeout 120 ./%{exe:test_native_delivery.exe} appender))))
+
+(rule (alias control-publication)
+ (deps check_control_interfaces.sh ../../lib/ffi/duckdb_ffi.mli)
+ (action (progn
+  (run bash %{dep:check_control_interfaces.sh} %{ocamlc})
+  (run timeout 120 ./%{exe:test_native_delivery.exe} control))))

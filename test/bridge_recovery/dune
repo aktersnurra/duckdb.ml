@@ -1,0 +1,17 @@
+(executable
+ (name test_bridge_recovery)
+ (modules test_bridge_recovery)
+ (libraries base threads duckdb duckdb-ffi)
+ (foreign_stubs (language c) (names recovery_hooks)
+  (extra_deps ../adapter_bridge_hooks.c)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=duckdb_execute_prepared
+  -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=ml_duckdb_native_request_create
+  -cclib -Wl,--wrap=ml_duckdb_native_request_install
+  -cclib -Wl,--wrap=ml_duckdb_native_request_uninstall
+  -cclib -Wl,--wrap=ml_duckdb_native_request_dispose
+  -cclib -Wl,--wrap=ml_duckdb_native_request_cancel))
+(rule (alias runtest)
+ (action (run timeout 60 ./%{exe:test_bridge_recovery.exe})))

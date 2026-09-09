@@ -30,7 +30,9 @@ duckdb_state wrapped_append(duckdb_appender,duckdb_value) __asm__("__wrap_duckdb
 duckdb_state wrapped_append(duckdb_appender a,duckdb_value v) { pause_at(2);return real_append(a,v); }
 duckdb_state real_flush(duckdb_appender) __asm__("__real_duckdb_appender_flush");
 duckdb_state wrapped_flush(duckdb_appender) __asm__("__wrap_duckdb_appender_flush");
-duckdb_state wrapped_flush(duckdb_appender a) { pause_at(3);return real_flush(a); }
+/* Safe normal close now flushes explicitly before clear/destroy. The caller
+   arms 3 for manual flush or 4 for that normal-close flush, never both. */
+duckdb_state wrapped_flush(duckdb_appender a) { pause_at(3);pause_at(4);return real_flush(a); }
 duckdb_state real_close(duckdb_appender) __asm__("__real_duckdb_appender_close");
 duckdb_state wrapped_close(duckdb_appender) __asm__("__wrap_duckdb_appender_close");
 duckdb_state wrapped_close(duckdb_appender a) { pause_at(4);return real_close(a); }

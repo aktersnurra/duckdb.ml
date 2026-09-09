@@ -10,13 +10,14 @@
 #include <string.h>
 #include <unistd.h>
 
-typedef struct { char *source, *destination; } file_work;
+typedef struct { char *source, *destination; connection_owner *parent; } file_work;
 #define Work(v) (*((file_work **)Data_custom_val(v)))
 static void finish(value v) {
     file_work *w = Work(v);
     if (w) {
         if (w->source) { free(w->source); duckdb_ml_released(); }
         if (w->destination) { free(w->destination); duckdb_ml_released(); }
+        if (w->parent) duckdb_ml_connection_unref(w->parent);
         free(w);
         Work(v) = NULL; duckdb_ml_released();
     }
@@ -45,6 +46,21 @@ CAMLprim value ml_duckdb_publish_local_file(value v, value source, value destina
     w->destination = copy(destination); duckdb_ml_acquired();
     caml_enter_blocking_section();
     int result = link(w->source, w->destination) == 0 ? 0 : errno;
+    caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_int(result));
+}
+CAMLprim value ml_duckdb_publish_local_file_admitted(value connection, value v, value source, value destination) {
+    CAMLparam4(connection, v, source, destination); file_work *w = Work(v);
+    w->source = copy(source); duckdb_ml_acquired();
+    w->destination = copy(destination); duckdb_ml_acquired();
+    /* The work owns this reference before a raising runtime transition. The
+       safe caller also roots the live connection slot through exclusive work. */
+    w->parent = duckdb_ml_connection_ref(connection);
+    caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(w->parent);
+    int result;
+    if (duckdb_ml_native_noninterruptible_call_begin(w->parent) == DUCKDB_ML_CALL_CANCELLED) result = -1;
+    else result = link(w->source, w->destination) == 0 ? 0 : errno;
+    duckdb_ml_native_work_end(w->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_int(result));
 }
 CAMLprim value ml_duckdb_remove_local_file(value v, value source) {

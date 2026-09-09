@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Extract ONLY the SHA256-pinned native dependency; never run opam or sudo."""
+
 import argparse
 import hashlib
 import json
@@ -25,16 +26,23 @@ def install_archive(archive, prefix, expected_sha256):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", required=True, type=Path)
-    parser.add_argument("--archive", type=Path, help="use an already downloaded pinned archive")
+    parser.add_argument(
+        "--archive", type=Path, help="use an already downloaded pinned archive"
+    )
     args = parser.parse_args()
-    pin = json.loads((ROOT / "stage1/toolchain.lock.json").read_text())["archives"]["duckdb"]
+    pin = json.loads((ROOT / "stage1/toolchain.lock.json").read_text())["archives"][
+        "duckdb"
+    ]
     with tempfile.TemporaryDirectory(prefix="duckdb-native-") as temporary:
         archive = args.archive
         if archive is None:
             archive = Path(temporary) / "duckdb.zip"
             if not pin["url"].startswith("https://"):
                 raise ValueError("native dependency URL must use HTTPS")
-            with urllib.request.urlopen(pin["url"], timeout=180) as source, archive.open("wb") as target:  # noqa: S310 - HTTPS guard and pinned SHA256 above
+            with (
+                urllib.request.urlopen(pin["url"], timeout=180) as source,
+                archive.open("wb") as target,
+            ):  # noqa: S310 - HTTPS guard and pinned SHA256 above
                 shutil.copyfileobj(source, target)
         install_archive(archive, args.prefix, pin["sha256"])
     print("DuckDB v1.5.5: verified and extracted", args.prefix)

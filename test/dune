@@ -132,8 +132,9 @@
  (link_flags :standard -cclib -Wl,--wrap=caml_enter_blocking_section
   -cclib -Wl,--wrap=caml_leave_blocking_section
   -cclib -Wl,--wrap=ml_duckdb_execute_prepared
-  -cclib -Wl,--wrap=ml_duckdb_publish_local_file
-  -cclib -Wl,--wrap=ml_duckdb_remove_local_file))
+  -cclib -Wl,--wrap=ml_duckdb_publish_local_file_admitted
+  -cclib -Wl,--wrap=ml_duckdb_remove_local_file
+  -cclib -Wl,--wrap=ml_duckdb_close_appender))
 (rule (alias runtest) (action (progn
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} create-enter)
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} create-leave)
@@ -141,6 +142,8 @@
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} append-leave)
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} flush-enter)
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} flush-leave)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} close-flush-enter)
+ (run timeout 30 ./%{exe:test_stage3c_signals.exe} close-flush-leave)
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} close-enter)
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} close-leave)
  (run timeout 30 ./%{exe:test_stage3c_signals.exe} discard-enter)
@@ -159,3 +162,54 @@
 (rule (alias runtest)
  (deps check_appender_interfaces.sh ../lib/duckdb/duckdb.mli (glob_files appender_compile/*))
  (action (run bash %{dep:check_appender_interfaces.sh} %{ocamlc})))
+
+(executable (name test_adapter_bridge) (modules test_adapter_bridge)
+ (libraries base threads duckdb duckdb-ffi evidence_support)
+ (foreign_stubs (language c) (names adapter_bridge_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (link_flags :standard -cclib -Wl,--wrap=duckdb_execute_prepared
+  -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=duckdb_disconnect
+  -cclib -Wl,--wrap=ml_duckdb_native_request_create
+  -cclib -Wl,--wrap=ml_duckdb_native_request_install
+  -cclib -Wl,--wrap=ml_duckdb_native_request_uninstall
+  -cclib -Wl,--wrap=ml_duckdb_native_request_dispose
+  -cclib -Wl,--wrap=ml_duckdb_native_request_cancel))
+(rule (alias adapter-bridge)
+ (deps check_adapter_bridge_interfaces.sh ../lib/duckdb/duckdb.mli
+       (glob_files adapter_bridge_compile/*))
+ (action (progn
+  (run bash %{dep:check_adapter_bridge_interfaces.sh} %{ocamlc})
+  (run timeout 60 ./%{exe:test_adapter_bridge.exe}))))
+(alias (name runtest) (deps (alias adapter-bridge)))
+
+(library (name adapter_bridge_responsiveness) (wrapped false)
+ (modules adapter_bridge_responsiveness)
+ (libraries base threads duckdb duckdb-ffi evidence_support)
+ (foreign_stubs (language c) (names adapter_bridge_responsiveness_hooks)
+  (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
+  (flags (:standard -std=c11 -Wall -Wextra)))
+ (c_library_flags
+  -Wl,--wrap=duckdb_execute_prepared -Wl,--wrap=duckdb_query
+  -Wl,--wrap=duckdb_destroy_result -Wl,--wrap=duckdb_destroy_prepare
+  -Wl,--wrap=duckdb_destroy_extracted -Wl,--wrap=duckdb_destroy_data_chunk
+  -Wl,--wrap=duckdb_appender_clear -Wl,--wrap=duckdb_appender_destroy
+  -Wl,--wrap=duckdb_disconnect -Wl,--wrap=duckdb_close
+  -Wl,--wrap=duckdb_interrupt -Wl,--wrap=link -Wl,--wrap=unlink
+  -Wl,--wrap=ml_duckdb_clear_work -Wl,--wrap=ml_duckdb_finish_result_close
+  -Wl,--wrap=ml_duckdb_finish_prepared_close -Wl,--wrap=ml_duckdb_finish_appender_close
+  -Wl,--wrap=ml_duckdb_finish_connection_close -Wl,--wrap=ml_duckdb_finish_database_close
+  -Wl,--wrap=ml_duckdb_finish_local_file_work
+  -Wl,--wrap=ml_duckdb_execute_control -Wl,--wrap=caml_thread_join
+  -Wl,--wrap=caml_enter_blocking_section -Wl,--wrap=caml_leave_blocking_section
+  -Wl,--wrap=duckdb_destroy_config -Wl,--wrap=duckdb_destroy_value
+  -Wl,--wrap=duckdb_destroy_logical_type -Wl,--wrap=duckdb_destroy_error_data))
+(executable (name test_adapter_bridge_async) (modules test_adapter_bridge_async)
+ (libraries async adapter_bridge_responsiveness))
+(executable (name test_adapter_bridge_eio) (modules test_adapter_bridge_eio)
+ (libraries base eio_main adapter_bridge_responsiveness))
+(rule (alias adapter-bridge-responsiveness)
+ (action (progn
+  (run timeout 120 ./%{exe:test_adapter_bridge_async.exe})
+  (run timeout 120 ./%{exe:test_adapter_bridge_eio.exe}))))
+(alias (name runtest) (deps (alias adapter-bridge-responsiveness)))
