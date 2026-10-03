@@ -48,11 +48,13 @@ type error = Invalid_configuration of string | Embedded_nul | Closed
   | Data_error of Scalar.error
   | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
   | Effects_not_allowed | Rollback_failed of error * error
+
+(** Raised when a callback exception is followed by a failed rollback. *)
 exception Rollback_exception of exn * error
-exception Cleanup_exception of error * exn
 
 (** A result error and exceptional cleanup are retained together. Ordinary
     primary and cleanup exceptions are paired as [Base.Exn.Finally]. *)
+exception Cleanup_exception of error * exn
 
 module Config : sig
   type t
@@ -69,7 +71,7 @@ type database
 type connection
 type transaction
 
-(** Unpublished Stage4b bridge, validated within the supported contract below.
+(** Runs one synchronous callback on a connection under a cancellable request.
     Synchronous callbacks only, under the no-outward-effect barrier. Cancellation
     persists across admitted native boundaries, with one independent controller
     per admitted request. Under the supported ordinary-cancellation contract,
@@ -118,7 +120,8 @@ val execute_transaction : transaction -> string -> (unit, error) result
 val with_database : Config.t -> f:(database -> ('a, error) result) -> ('a, error) result
 val with_connection : database -> f:(connection -> ('a, error) result) -> ('a, error) result
 
-(** Exclusive for the complete callback and commit/rollback. Reentrant/nested use
+(** Runs [f] between BEGIN and COMMIT; any error or exception rolls back.
+    Exclusive for the complete callback and commit/rollback. Reentrant/nested use
     of the original connection returns Busy. The token is revoked on exit.
     Error/exception/Break rolls back; failed rollback preserves both outcomes.
     Interruption does not establish that writes did not commit. DuckDB's
@@ -147,7 +150,8 @@ val parameter_count : prepared -> (int, error) result
 val bind : prepared -> int -> 'a Scalar.field -> 'a -> (unit, error) result
 val reset : prepared -> (unit, error) result
 
-(** All parameters must be bound. The result exclusively leases the connection
+(** Executes with the current bindings and materializes the result.
+    All parameters must be bound. The result exclusively leases the connection
     until closed; reset/reexecute/prepared close return Live_children.
     Before execution, freshly inferred parameter types must equal those at
     preparation, otherwise Data_error Parameter_schema_changed is returned.
@@ -162,7 +166,8 @@ val close_result : query_result -> (unit, error) result
 val with_prepared : connection -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result
 val with_prepared_transaction : transaction -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result
 
-(** After admission, consumes/closes the result on every exit. Busy admission
+(** Streams borrowed chunks to [f] until exhaustion or [Stop].
+    After admission, consumes/closes the result on every exit. Busy admission
     rejects without consuming it. The callback is synchronous, local,
     and guarded against outward effects. No owner transition is exposed through
     a chunk. Aliases attempting mutation/fetch/close during a callback get Busy.
@@ -182,7 +187,8 @@ val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a st
 type cell = Cell : 'a Scalar.field * 'a -> cell
 type appender
 
-(** Opens a child in the current database and explicit schema (default main).
+(** Opens a bulk-insert appender on [table] inside the transaction.
+    Opens a child in the current database and explicit schema (default main).
     Holds the transaction snapshot and reserves the connection until close.
     Other token operations return Busy. Names use their stored catalog spelling.
     Generated-column tables and metadata larger than one native chunk are rejected.
@@ -223,7 +229,8 @@ val path : string -> (path, error) result
     fails; external file mutation is not a transaction snapshot guarantee. *)
 val fold_rows : connection -> path list -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
 
-(** Export one engine-parsed, parameter-free SELECT through DuckDB COPY.
+(** Writes the rows of [query] to a new Parquet file at the destination.
+    Export one engine-parsed, parameter-free SELECT through DuckDB COPY.
     Omit a trailing statement terminator. The destination is a bound parameter.
     Only supported scalar types are accepted; TIMESTAMP_S/MS are rejected
     because this pinned writer/reader normalizes them to microseconds. Explicit

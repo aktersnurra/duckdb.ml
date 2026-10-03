@@ -1,0 +1,3 @@
+(library (name duckdb_worker) (public_name duckdb.worker)
+ (flags (:standard -extension-universe beta))
+ (libraries base threads duckdb))

@@ -51,7 +51,7 @@ test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb/META")" = "base
 # paths during the independent consumer build, as in the packaging prerequisite.
 producer_build -p duckdb-async --build-dir _build-async
 local_dune install --root "$producer" --build-dir _build-async --prefix "$prefix" duckdb-async
-test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb-async/META")" = "async base core duckdb threads"
+test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb-async/META")" = "async base core duckdb duckdb.worker threads"
 mv "$producer" "$producer.hidden"
 consumer="$work/consumer"
 mkdir "$consumer"

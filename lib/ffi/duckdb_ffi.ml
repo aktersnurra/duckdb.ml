@@ -135,3 +135,37 @@ external remove_local_file : local_file_work -> string -> int = "ml_duckdb_remov
 external finish_local_file_work : local_file_work -> unit = "ml_duckdb_finish_local_file_work" [@@noalloc]
 external file_error_message : int -> string = "ml_duckdb_file_error_message"
 external file_exists_error : int -> bool = "ml_duckdb_file_exists_error" [@@noalloc]
+
+module Status = struct
+  type t = Success | Native_failure | Unsupported | Suppressed
+  let of_code = function
+    | 0 -> Success | 2 -> Unsupported | 3 -> Suppressed | _ -> Native_failure
+end
+
+type fetch_outcome = Chunk | Exhausted | Fetch_failed
+let next_chunk prepared =
+  match fetch prepared with 0 -> Exhausted | 1 -> Chunk | _ -> Fetch_failed
+
+module Type_id = struct
+  let invalid = 0
+  let boolean = 1
+  let tinyint = 2
+  let smallint = 3
+  let integer = 4
+  let bigint = 5
+  let float = 10
+  let double = 11
+  let timestamp = 12
+  let date = 13
+  let varchar = 17
+  let blob = 18
+  let timestamp_s = 20
+  let timestamp_ms = 21
+  let timestamp_ns = 22
+  let timestamp_tz = 31
+  let any = 34
+end
+
+module Statement_kind = struct
+  let select = 1
+end

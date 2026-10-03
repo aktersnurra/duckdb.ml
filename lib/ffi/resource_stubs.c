@@ -24,7 +24,7 @@ typedef struct database_owner {
     duckdb_config config;
     char *path, *open_error;
     int status;
-    char message[512];
+    char message[DUCKDB_ML_MESSAGE_SIZE];
 } database_owner;
 typedef enum {
     DUCKDB_ML_NATIVE_IDLE,
@@ -69,7 +69,7 @@ struct connection_owner {
     duckdb_prepared_statement prepared;
     duckdb_result result;
     int has_result, status;
-    char message[512];
+    char message[DUCKDB_ML_MESSAGE_SIZE];
 };
 #define Database(v) (*((database_owner **)Data_custom_val(v)))
 #define Connection(v) (*((connection_owner **)Data_custom_val(v)))
@@ -187,7 +187,7 @@ static void native_close_begin(connection_owner *owner, duckdb_ml_runtime runtim
     duckdb_ml_native_unlock(owner);
 }
 static void message(char *out, const char *in) {
-    snprintf(out, 512, "%s", in ? in : "DuckDB operation failed");
+    snprintf(out, DUCKDB_ML_MESSAGE_SIZE, "%s", in ? in : "DuckDB operation failed");
 }
 static void database_clear(database_owner *owner) {
     if (!owner) return;
@@ -322,7 +322,7 @@ CAMLprim value ml_duckdb_open(value v, value path, value threads, value memory, 
     CAMLparam5(v, path, threads, memory, readonly);
     database_owner *owner = Database(v);
     if (strcmp(duckdb_library_version(), "v1.5.5") != 0) {
-        owner->status = 1; message(owner->message, "duckdb-ffi requires DuckDB v1.5.5");
+        owner->status = DUCKDB_ML_STATUS_ERROR; message(owner->message, "duckdb-ffi requires DuckDB v1.5.5");
         CAMLreturn(Val_unit);
     }
     size_t length = caml_string_length(path);
@@ -332,7 +332,7 @@ CAMLprim value ml_duckdb_open(value v, value path, value threads, value memory, 
     long thread_count = Long_val(threads), memory_bytes = Long_val(memory);
     int read_only = Bool_val(readonly);
     caml_enter_blocking_section();
-    owner->status = 1;
+    owner->status = DUCKDB_ML_STATUS_ERROR;
     duckdb_state state = duckdb_create_config(&owner->config);
     if (owner->config) acquired();
     char number[64];
@@ -350,7 +350,7 @@ CAMLprim value ml_duckdb_open(value v, value path, value threads, value memory, 
         state = duckdb_open_ext(length ? owner->path : NULL, &owner->database,
                                 owner->config, &owner->open_error);
     if (owner->database) acquired();
-    if (state == DuckDBSuccess) owner->status = 0;
+    if (state == DuckDBSuccess) owner->status = DUCKDB_ML_STATUS_OK;
     else message(owner->message, owner->open_error);
     if (owner->config) { duckdb_destroy_config(&owner->config); released(); }
     free(owner->path); owner->path = NULL; released();
@@ -366,7 +366,7 @@ CAMLprim value ml_duckdb_connect(value v) {
     connection_owner *owner = Connection(v);
     caml_enter_blocking_section();
     duckdb_ml_native_work_begin(owner);
-    owner->status = duckdb_connect(owner->parent->database, &owner->connection) == DuckDBSuccess ? 0 : 1;
+    owner->status = duckdb_connect(owner->parent->database, &owner->connection) == DuckDBSuccess ? DUCKDB_ML_STATUS_OK : DUCKDB_ML_STATUS_ERROR;
     if (owner->connection) acquired();
     if (owner->status) message(owner->message, "DuckDB connection failed");
     duckdb_ml_native_work_end(owner);
@@ -399,15 +399,15 @@ CAMLprim value ml_duckdb_execute(value v, value sql, value control) {
     int is_control = Bool_val(control);
     caml_enter_blocking_section();
     duckdb_ml_native_work_begin(owner);
-    owner->status = 0;
+    owner->status = DUCKDB_ML_STATUS_OK;
     bool cleanup_started = false;
     if (is_control) {
         owner->has_result = 1; acquired();
         if (duckdb_query(owner->connection, owner->sql, &owner->result) != DuckDBSuccess) {
-            owner->status = 1; message(owner->message, duckdb_result_error(&owner->result));
+            owner->status = DUCKDB_ML_STATUS_ERROR; message(owner->message, duckdb_result_error(&owner->result));
         }
     } else if (duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) {
-        owner->status = 3;
+        owner->status = DUCKDB_ML_STATUS_CANCELLED;
     } else {
         idx_t count = duckdb_extract_statements(owner->connection, owner->sql, &owner->extracted);
         duckdb_ml_native_user_call_end(owner);
@@ -415,19 +415,19 @@ CAMLprim value ml_duckdb_execute(value v, value sql, value control) {
         const char *error = owner->extracted
             ? duckdb_extract_statements_error(owner->extracted)
             : "DuckDB could not allocate extracted statements";
-        if (error && *error) { owner->status = 1; message(owner->message, error); }
-        else if (count != 1) owner->status = 2;
-        else if (duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) owner->status = 3;
+        if (error && *error) { owner->status = DUCKDB_ML_STATUS_ERROR; message(owner->message, error); }
+        else if (count != 1) owner->status = DUCKDB_ML_STATUS_UNSUPPORTED;
+        else if (duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) owner->status = DUCKDB_ML_STATUS_CANCELLED;
         else {
             duckdb_state state = duckdb_prepare_extracted_statement(owner->connection, owner->extracted, 0, &owner->prepared);
             duckdb_ml_native_user_call_end(owner);
             if (owner->prepared) acquired();
             if (state != DuckDBSuccess) {
-                owner->status = 1;
+                owner->status = DUCKDB_ML_STATUS_ERROR;
                 message(owner->message, owner->prepared ? duckdb_prepare_error(owner->prepared)
                                                        : "DuckDB could not allocate prepared statement");
-            } else if (!duckdb_ml_allowed_statement(duckdb_prepared_statement_type(owner->prepared))) owner->status = 2;
-            else if (duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) owner->status = 3;
+            } else if (!duckdb_ml_allowed_statement(duckdb_prepared_statement_type(owner->prepared))) owner->status = DUCKDB_ML_STATUS_UNSUPPORTED;
+            else if (duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) owner->status = DUCKDB_ML_STATUS_CANCELLED;
             else {
                 owner->has_result = 1; acquired();
                 duckdb_state executed = duckdb_execute_prepared(owner->prepared, &owner->result);
@@ -436,7 +436,7 @@ CAMLprim value ml_duckdb_execute(value v, value sql, value control) {
                 duckdb_ml_native_cleanup_begin(owner, DUCKDB_ML_RUNTIME_RELEASED);
                 cleanup_started = true;
                 if (executed != DuckDBSuccess) {
-                    owner->status = 1; message(owner->message, duckdb_result_error(&owner->result));
+                    owner->status = DUCKDB_ML_STATUS_ERROR; message(owner->message, duckdb_result_error(&owner->result));
                 }
             }
         }
@@ -460,16 +460,16 @@ CAMLprim value ml_duckdb_execute_control(value v, value statement) {
     const char *sql = control == 0 ? "BEGIN TRANSACTION" : control == 1 ? "COMMIT" : "ROLLBACK";
     caml_enter_blocking_section();
     duckdb_ml_native_work_begin(owner);
-    owner->status = 0;
+    owner->status = DUCKDB_ML_STATUS_OK;
     if (control != 2 && duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) {
-        owner->status = 3;
+        owner->status = DUCKDB_ML_STATUS_CANCELLED;
         duckdb_ml_native_cleanup_begin(owner, DUCKDB_ML_RUNTIME_RELEASED);
     } else {
         owner->has_result = 1; acquired();
         duckdb_state result = duckdb_query(owner->connection, sql, &owner->result);
         duckdb_ml_native_cleanup_begin(owner, DUCKDB_ML_RUNTIME_RELEASED);
         if (result != DuckDBSuccess) {
-            owner->status = 1; message(owner->message, duckdb_result_error(&owner->result));
+            owner->status = DUCKDB_ML_STATUS_ERROR; message(owner->message, duckdb_result_error(&owner->result));
         }
     }
     clear_work(owner, DUCKDB_ML_RUNTIME_RELEASED);

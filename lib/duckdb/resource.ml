@@ -7,6 +7,13 @@ type error = Invalid_configuration of string | Embedded_nul | Closed
   | Effects_not_allowed | Rollback_failed of error * error
 exception Rollback_exception of exn * error
 exception Cleanup_exception of error * exn
+
+module Syntax = struct
+  let ( let* ) x f = Result.bind x ~f
+  let ( let+ ) x f = Result.map x ~f
+end
+open Syntax
+
 module Config = struct
   type storage = Memory | File of string
   type access = Read_write | Read_only
@@ -19,8 +26,10 @@ module Config = struct
       | Memory, Read_only -> invalid "in-memory databases cannot be read-only"
       | File path, _ when String.is_empty path || String.contains path '\000' || String.contains path ':' ->
         invalid "file path must be nonempty, NUL-free and colon-free"
-      | _ -> Ok { path = (match storage with Memory -> "" | File p -> p);
-                   threads; memory_limit_bytes; read_only = (match access with Read_only -> true | Read_write -> false) }
+      | _ ->
+        let path = match storage with Memory -> "" | File path -> path in
+        let read_only = match access with Read_only -> true | Read_write -> false in
+        Ok { path; threads; memory_limit_bytes; read_only }
 end
 
 type state = Open | Closing | Closed_state
@@ -44,6 +53,19 @@ and connection = { owner : owner; request : request option }
 and transaction = { connection : connection; mutable active : bool; mutable failure : error option }
 and child = { connection : connection; transaction : transaction option;
               mutable child_state : state; cleanup : unit -> unit }
+
+(* Exceptions captured with their backtraces. *)
+type raised = exn * Stdlib.Printexc.raw_backtrace
+let raised exn : raised = exn, Stdlib.Printexc.get_raw_backtrace ()
+let reraise ((exn, backtrace) : raised) = Stdlib.Printexc.raise_with_backtrace exn backtrace
+(* Capture inside the runtime boundary: its exceptional C return otherwise
+   replaces the original callback backtrace, including Query fold frames. *)
+let capture f = Stdlib.Sys.with_async_exns (fun () -> try Ok (f ()) with exn -> Error (raised exn))
+(* Also captures what the boundary itself raises on return. *)
+let capture_all f = try capture f with exn -> Error (raised exn)
+let guarded f = match capture f with Ok value -> value | Error raised -> reraise raised
+let attempt f = try Ok (f ()) with exn -> Error (raised exn)
+
 let request_locked request f =
   Stdlib.Mutex.lock request.interrupt_mutex;
   Exn.protect ~finally:(fun () -> Stdlib.Mutex.unlock request.interrupt_mutex)
@@ -57,25 +79,22 @@ let join_controller request =
     Thread.join controller;
     request_locked request (fun () -> request.controller <- None))
 let start_controller owner request native =
+  let stopped () = request_locked request (fun () -> request.controller_stop) in
+  let deliver_once () =
+    match F.Native_request.reserve_delivery native with
+    | Ineligible -> ()
+    | Reservation_pending -> failwith "sole controller owns native reservation"
+    | Reserved ->
+      Exn.protect ~finally:(fun () -> F.Native_request.retire_delivery native)
+        ~f:(fun () -> match F.Native_request.deliver native with
+          | Delivered -> request_locked request (fun () -> request.interrupted <- true)
+          | Skipped -> ()
+          | Not_reserved -> failwith "selected native reservation lost") in
+  let rec loop () = if not (stopped ()) then (deliver_once (); Thread.delay 0.001; loop ()) in
   let work () =
     Exn.protect ~finally:(fun () -> ignore (Sys.opaque_identity owner)) ~f:(fun () ->
-      try
-        let rec loop () =
-          if not (request_locked request (fun () -> request.controller_stop)) then (
-            (match F.Native_request.reserve_delivery native with
-             | Ineligible -> ()
-             | Reservation_pending -> failwith "sole controller owns native reservation"
-             | Reserved ->
-               Exn.protect ~finally:(fun () -> F.Native_request.retire_delivery native)
-                 ~f:(fun () -> match F.Native_request.deliver native with
-                   | Delivered -> request_locked request (fun () -> request.interrupted <- true)
-                   | Skipped -> ()
-                   | Not_reserved -> failwith "selected native reservation lost"));
-            Thread.delay 0.001;
-            loop ()) in
-        loop ()
-      with exn ->
-        let failure = Some (exn, Stdlib.Printexc.get_raw_backtrace ()) in
+      try loop () with exn ->
+        let failure = Some (raised exn) in
         request_locked request (fun () ->
           request.controller_failure <- failure;
           request.cancelled <- true;
@@ -101,54 +120,91 @@ let checkpoint c = match c.request with
 let facade_access c = match c.request with
   | None -> if Option.is_some c.owner.request_lease then Error Busy else Ok ()
   | Some request -> request_locked request (fun () ->
-    if not (match request.request_state with Running -> true | _ -> false) then Error Closed
-    else if Option.exists c.owner.request_lease ~f:(phys_equal request) then Ok ()
-    else Error Closed)
+    match request.request_state with
+    | Running when Option.exists c.owner.request_lease ~f:(phys_equal request) -> Ok ()
+    | Fresh | Admitted | Running | Quiescing | Settling | Finished -> Error Closed)
+
 let gate () = { mutex = Stdlib.Mutex.create (); changed = Condition.create (); state = Open; busy = false }
 let locked gate f =
   Stdlib.Mutex.lock gate.mutex;
   Exn.protect ~finally:(fun () -> Stdlib.Mutex.unlock gate.mutex)
     ~f:(fun () -> Stdlib.Sys.with_async_exns f)
 let signal gate = Condition.broadcast gate.changed
+(* Called with the gate held. *)
+let wait_until gate condition = while not (condition ()) do Condition.wait gate.changed gate.mutex done
+let idle gate () = not gate.busy
 let finish_operation gate = locked gate (fun () -> gate.busy <- false; signal gate)
-let available gate = match gate.state with Open -> Ok () | Closing | Closed_state -> Error Closed
-let admit gate extra = locked gate (fun () ->
-  Result.bind (available gate) ~f:(fun () ->
-    if gate.busy || extra () then Error Busy else (gate.busy <- true; Ok ())))
-let protected_operation gate f =
-  Exn.protect ~finally:(fun () -> finish_operation gate)
-    ~f:(fun () ->
-      (* Capture inside the runtime boundary: its exceptional C return otherwise
-         replaces the original callback backtrace, including Query fold frames. *)
-      match Stdlib.Sys.with_async_exns (fun () ->
-        try Ok (f ()) with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())) with
-      | Ok result -> result
-      | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace)
+let begin_discard gate = locked gate (fun () -> gate.state <- Closing; gate.busy <- true)
+let mark_closed gate = locked gate (fun () -> gate.state <- Closed_state; gate.busy <- false; signal gate)
+let available gate () = match gate.state with Open -> Ok () | Closing | Closed_state -> Error Closed
+
+(* Admission is an ordered list of checks evaluated under the gate. The first
+   failure wins; [claim] runs, still under the gate, only when all pass. *)
+let all_ok checks = List.fold checks ~init:(Ok ()) ~f:(fun acc check -> Result.bind acc ~f:check)
+let require holds error () = if holds () then Ok () else Error error
+let admit gate checks ~claim = locked gate (fun () -> let* () = all_ok checks in claim ())
+let claim_busy gate () = gate.busy <- true; Ok ()
+
+let protected_operation gate f = Exn.protect ~finally:(fun () -> finish_operation gate) ~f:(fun () -> guarded f)
 
 (* The exact pinned runtime turns asynchronous Break into an ordinary exception
    at the INNER boundary. Cleanup can finish one interrupted idempotent step and
    then re-raise; this is neither masking nor a repeated-interruption promise. *)
 let complete_cleanup f =
-  let call () =
-    match Stdlib.Sys.with_async_exns (fun () ->
-      try Ok (f ()) with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())) with
-    | Ok result -> result
-    | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace in
-  match call () with
+  match guarded f with
   | result -> result
   | exception Stdlib.Sys.Break ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    let _ = call () in
+    let _ = guarded f in
     Stdlib.Printexc.raise_with_backtrace Stdlib.Sys.Break backtrace
-let native_close_database native =
-  Exn.protect ~finally:(fun () -> F.finish_database_close native)
-    ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () -> F.close_database native))
-let native_close_connection native =
-  Exn.protect ~finally:(fun () -> F.finish_connection_close native)
-    ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () -> F.close_connection native))
-let connection_result native = match F.connection_status native with
-  | 0 -> Ok () | 2 -> Error Unsupported_statement | 3 -> Error Cancelled
-  | _ -> Error (Native_error (F.connection_message native))
+
+exception Effect_denied
+let without_escaping_effects work =
+  let denied = ref false in
+  let result =
+    try Stdlib.Effect.Deep.try_with work ()
+      { effc = fun (type a) (_ : a Stdlib.Effect.t) ->
+          Some (fun (k : (a, _) Stdlib.Effect.Deep.continuation) ->
+            denied := true; Stdlib.Effect.Deep.discontinue k Effect_denied) }
+    with Effect_denied -> Error Effects_not_allowed
+  in if !denied then Error Effects_not_allowed else result
+(* Runs [work] effect-free, then [cleanup] on every exit. A cleanup exception
+   is paired with the result error it would otherwise hide. *)
+let scope work cleanup =
+  let result_error = ref None in
+  Exn.protect
+    ~finally:(fun () ->
+      try complete_cleanup cleanup with exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        let exception_ = match !result_error with None -> exn | Some error -> Cleanup_exception (error, exn) in
+        Stdlib.Printexc.raise_with_backtrace exception_ backtrace)
+    ~f:(fun () -> guarded (fun () ->
+      let result = without_escaping_effects work in
+      Result.iter_error result ~f:(fun error -> result_error := Some error);
+      result))
+
+(* Runs [setup] on a freshly acquired native owner; any failure releases it. *)
+let acquiring ~release setup =
+  match Stdlib.Sys.with_async_exns setup with
+  | Ok _ as ok -> ok
+  | Error _ as error -> release (); error
+  | exception exn -> Exn.protect ~f:(fun () -> raise exn) ~finally:release
+
+let native_status code ~message = match F.Status.of_code code with
+  | F.Status.Success -> Ok ()
+  | F.Status.Unsupported -> Error Unsupported_statement
+  | F.Status.Suppressed -> Error Cancelled
+  | F.Status.Native_failure -> Error (Native_error (message ()))
+let connection_result native =
+  native_status (F.connection_status native) ~message:(fun () -> F.connection_message native)
+(* [close] releases native resources; [finish] then releases the shell even
+   when [close] was interrupted. Inlined so cleanup backtraces name the
+   specific close function. *)
+let[@inline always] release_native ~close ~finish native =
+  Exn.protect ~finally:(fun () -> finish native) ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () -> close native))
+let native_close_database native = release_native ~close:F.close_database ~finish:F.finish_database_close native
+let native_close_connection native = release_native ~close:F.close_connection ~finish:F.finish_connection_close native
+
 (* All callers own exclusive operation/transaction admission. Native admission
    decides user/BEGIN/COMMIT against the persistent latch; only rollback is
    cleanup. The native phase ends before diagnostics and result destruction. *)
@@ -163,63 +219,118 @@ let raw_begin c begin_attempted =
   | Error _ as error -> error
   | Ok () -> checkpoint c
 let raw_commit c begin_attempted =
-  Result.bind (raw_control c F.Commit) ~f:(fun () ->
-    (* Known successful commit is durable even if cancellation won before ML
-       return. Exceptions before this bookkeeping remain conservatively unknown. *)
-    begin_attempted := false;
-    checkpoint c)
+  let* () = raw_control c F.Commit in
+  (* Known successful commit is durable even if cancellation won before ML
+     return. Exceptions before this bookkeeping remain conservatively unknown. *)
+  begin_attempted := false;
+  checkpoint c
+let rollback_if_begun c begin_attempted = if !begin_attempted then raw_control c F.Rollback else Ok ()
+(* BEGIN, [body], COMMIT. [begin_attempted] tells the caller whether a rollback is owed. *)
+let in_native_transaction c begin_attempted body =
+  let* () = checkpoint c in
+  let* () = raw_begin c begin_attempted in
+  let* value = body () in
+  let* () = checkpoint c in
+  let+ () = raw_commit c begin_attempted in
+  value
 let raw_execute c sql =
-  Result.bind (checkpoint c) ~f:(fun () ->
-    Exn.protect ~finally:(fun () -> F.clear_work c.owner.native_connection)
-      ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
-        F.execute c.owner.native_connection sql false;
-        Result.bind (connection_result c.owner.native_connection) ~f:(fun () -> checkpoint c))))
+  let* () = checkpoint c in
+  Exn.protect ~finally:(fun () -> F.clear_work c.owner.native_connection)
+    ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
+      F.execute c.owner.native_connection sql false;
+      let* () = connection_result c.owner.native_connection in
+      checkpoint c))
+
+(* A failed primary outcome and its rollback are both retained. *)
+type failure = Failed of error | Raised of raised
+let combine failure rolled_back = match failure, rolled_back with
+  | Failed primary, Ok (Ok ()) -> Error primary
+  | Raised primary, Ok (Ok ()) -> reraise primary
+  | Failed primary, Ok (Error secondary) -> Error (Rollback_failed (primary, secondary))
+  | Raised (primary, backtrace), Ok (Error secondary) ->
+    Stdlib.Printexc.raise_with_backtrace (Rollback_exception (primary, secondary)) backtrace
+  | Failed primary, Error (secondary, backtrace) ->
+    Stdlib.Printexc.raise_with_backtrace (Cleanup_exception (primary, secondary)) backtrace
+  | Raised (primary, backtrace), Error (secondary, _) ->
+    Stdlib.Printexc.raise_with_backtrace (Exn.Finally (primary, secondary)) backtrace
+(* Runs [work]; any error or exception rolls back. A rollback that fails or
+   raises also discards the owner before the combined outcome is reported. *)
+let settle ~rollback ~discard work =
+  let recover failure =
+    let rolled_back = attempt rollback in
+    match rolled_back with
+    | Ok (Ok ()) -> combine failure rolled_back
+    | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:(fun () -> combine failure rolled_back) in
+  match capture_all work with
+  | Ok (Ok value) -> Ok value
+  | Ok (Error error) -> recover (Failed error)
+  | Error raised -> recover (Raised raised)
+
 let open_database config =
   let native = F.database_owner () in
-  match Stdlib.Sys.with_async_exns (fun () ->
+  acquiring ~release:(fun () -> native_close_database native) (fun () ->
     F.open_database native config.Config.path config.threads config.memory_limit_bytes config.read_only;
-    if F.database_status native = 0 then
-      Ok { native_database = native; database_gate = gate (); children = [] }
-    else Error (Native_error (F.database_message native))) with
-  | Ok db -> Ok db
-  | Error error -> native_close_database native; Error error
-  | exception exn -> Exn.protect ~f:(fun () -> raise exn) ~finally:(fun () -> native_close_database native)
+    let+ () = native_status (F.database_status native) ~message:(fun () -> F.database_message native) in
+    { native_database = native; database_gate = gate (); children = [] })
 let connect db =
-  Result.bind (admit db.database_gate (fun () -> false)) ~f:(fun () ->
-    protected_operation db.database_gate (fun () ->
-      let native = F.connection_owner db.native_database in
-      match Stdlib.Sys.with_async_exns (fun () ->
-        F.connect native;
-        Result.bind (connection_result native) ~f:(fun () ->
-          let c = { owner = { native_connection = native; parent = db; connection_gate = gate (); lease = None;
-                    request_lease = None; prepared_children = []; result_owner = None }; request = None } in
-          locked db.database_gate (fun () -> db.children <- c :: db.children);
-          Ok c)) with
-      | Ok c -> Ok c
-      | Error error -> native_close_connection native; Error error
-      | exception exn -> Exn.protect ~f:(fun () -> raise exn) ~finally:(fun () -> native_close_connection native)))
+  let db_gate = db.database_gate in
+  let* () = admit db_gate [ available db_gate; require (idle db_gate) Busy ] ~claim:(claim_busy db_gate) in
+  protected_operation db_gate (fun () ->
+    let native = F.connection_owner db.native_database in
+    acquiring ~release:(fun () -> native_close_connection native) (fun () ->
+      F.connect native;
+      let+ () = connection_result native in
+      let owner = { native_connection = native; parent = db; connection_gate = gate (); lease = None;
+                    request_lease = None; prepared_children = []; result_owner = None } in
+      let c = { owner; request = None } in
+      locked db_gate (fun () -> db.children <- c :: db.children);
+      c))
 let unregister c = locked c.owner.parent.database_gate (fun () ->
   c.owner.parent.children <- List.filter c.owner.parent.children ~f:(fun child -> not (phys_equal child.owner c.owner)))
 let transaction_connection tx = tx.connection
 let native_connection c = c.owner.native_connection
 let poison_transaction tx error = locked tx.connection.owner.connection_gate (fun () ->
   if Option.is_none tx.failure then tx.failure <- Some error)
+let poisoned tx = match tx.failure with Some error -> Error error | None -> Ok ()
+
+let token_active = function None -> true | Some tx -> tx.active
+let lease_matches owner tx = match owner.lease, tx with
+  | None, None -> true
+  | Some current, Some supplied -> phys_equal current supplied
+  | Some _, None | None, Some _ -> false
+let result_free owner ~holder = match owner.result_owner with
+  | None -> true
+  | Some current -> Option.exists holder ~f:(phys_equal current)
+(* One exclusive operation: the token or child must be live, the owner open
+   and reachable through this facade, and nothing else may hold it. *)
+let admit_operation c ~live ~tx ~holder work =
+  let gate = c.owner.connection_gate in
+  let* () = admit gate
+    [ require live Closed
+    ; available gate
+    ; (fun () -> facade_access c)
+    ; require (fun () -> idle gate () && lease_matches c.owner tx && result_free c.owner ~holder) Busy ]
+    ~claim:(claim_busy gate) in
+  protected_operation gate work
 let with_admission c tx work =
-  let admission = locked c.owner.connection_gate (fun () ->
-    if Option.exists tx ~f:(fun tx -> not tx.active) then Error Closed
-    else Result.bind (available c.owner.connection_gate) ~f:(fun () -> Result.bind (facade_access c) ~f:(fun () ->
-      let lease_matches = match c.owner.lease, tx with
-        | None, None -> true | Some current, Some supplied -> phys_equal current supplied
-        | _ -> false in
-      if c.owner.connection_gate.busy || Option.is_some c.owner.result_owner || not lease_matches then Error Busy
-      else (c.owner.connection_gate.busy <- true; Ok ())))) in
-  Result.bind admission ~f:(fun () -> protected_operation c.owner.connection_gate (fun () ->
-    Result.bind (checkpoint c) ~f:work))
+  admit_operation c ~live:(fun () -> token_active tx) ~tx ~holder:None (fun () ->
+    let* () = checkpoint c in
+    work ())
+let child_open (child : child) = match child.child_state with Open -> true | Closing | Closed_state -> false
+let child_operation ?(cleanup = false) (child : child) ~allow_result work =
+  let c = child.connection in
+  admit_operation c ~tx:child.transaction ~holder:(Option.some_if allow_result child)
+    ~live:(fun () -> child_open child && token_active child.transaction)
+    (fun () ->
+      if cleanup then (admit_cleanup c; work ())
+      else let* () = checkpoint c in work ())
+
 let register_child connection transaction ~cleanup =
   let child = { connection; transaction; cleanup; child_state = Open } in
   locked connection.owner.connection_gate (fun () -> connection.owner.prepared_children <- child :: connection.owner.prepared_children);
   child
-let child_is_closed (child : child) = locked child.connection.owner.connection_gate (fun () -> (match child.child_state with Closed_state -> true | _ -> false))
+let child_is_closed (child : child) = locked child.connection.owner.connection_gate (fun () ->
+  match child.child_state with Closed_state -> true | Open | Closing -> false)
 let unregister_child (child : child) = locked child.connection.owner.connection_gate (fun () ->
   child.child_state <- Closed_state;
   child.connection.owner.prepared_children <- List.filter child.connection.owner.prepared_children
@@ -229,21 +340,6 @@ let release_result (child : child) = locked child.connection.owner.connection_ga
   match child.connection.owner.result_owner with
   | Some owner when phys_equal child owner -> child.connection.owner.result_owner <- None
   | None | Some _ -> ())
-let child_operation ?(cleanup = false) (child : child) ~allow_result work =
-  let c = child.connection in
-  let admission = locked c.owner.connection_gate (fun () ->
-    if (match child.child_state with Open -> false | _ -> true) || Option.exists child.transaction ~f:(fun tx -> not tx.active) then Error Closed
-    else Result.bind (available c.owner.connection_gate) ~f:(fun () -> Result.bind (facade_access c) ~f:(fun () ->
-      let lease_matches = match c.owner.lease, child.transaction with
-        | None, None -> true | Some current, Some supplied -> phys_equal current supplied
-        | _ -> false in
-      let result_matches = match c.owner.result_owner with
-        | None -> true | Some owner -> allow_result && phys_equal child owner in
-      if c.owner.connection_gate.busy || not lease_matches || not result_matches then Error Busy
-      else (c.owner.connection_gate.busy <- true; Ok ())))) in
-  Result.bind admission ~f:(fun () -> protected_operation c.owner.connection_gate (fun () ->
-    if cleanup then admit_cleanup c;
-    Result.bind (if cleanup then Ok () else checkpoint c) ~f:work))
 let destroy_children c predicate =
   let children = locked c.owner.connection_gate (fun () -> List.filter c.owner.prepared_children ~f:predicate) in
   let rec destroy = function
@@ -254,19 +350,20 @@ let destroy_children c predicate =
   destroy children
 let force_close_child (child : child) =
   let gate = child.connection.owner.connection_gate in
+  (* A transaction's BEGIN/settlement uses the lease rather than busy.
+     Only a still-active token may close its own child inside its callback;
+     revoked tokens leave destruction to settlement before waiting scopes. *)
+  let foreign_lease () = match child.connection.owner.lease with
+    | None -> false
+    | Some tx -> not (tx.active && Option.exists child.transaction ~f:(phys_equal tx)) in
   let destroy = locked gate (fun () ->
     match child.child_state with
     | Closed_state -> false
     | Open | Closing ->
       child.child_state <- Closing;
-      (* A transaction's BEGIN/settlement uses the lease rather than busy.
-         Only a still-active token may close its own child inside its callback;
-         revoked tokens leave destruction to settlement before waiting scopes. *)
-      let foreign_lease () = match child.connection.owner.lease with
-        | None -> false
-        | Some tx -> not (tx.active && Option.exists child.transaction ~f:(phys_equal tx)) in
-      while gate.busy || foreign_lease () do Condition.wait gate.changed gate.mutex done;
-      match child.child_state with Closed_state -> false
+      wait_until gate (fun () -> idle gate () && not (foreign_lease ()));
+      match child.child_state with
+      | Closed_state -> false
       | Open | Closing -> gate.busy <- true; true) in
   if destroy then
     Exn.protect ~finally:(fun () -> unregister_child child; finish_operation gate)
@@ -294,170 +391,110 @@ let destroy_connection c =
   let request = locked c.owner.connection_gate (fun () -> c.owner.request_lease) in
   Option.iter request ~f:join_controller;
   Exn.protect
-    ~finally:(fun () -> locked c.owner.connection_gate (fun () ->
-      c.owner.connection_gate.state <- Closed_state; c.owner.connection_gate.busy <- false; signal c.owner.connection_gate);
-      unregister c)
+    ~finally:(fun () -> mark_closed c.owner.connection_gate; unregister c)
     ~f:(fun () ->
       Exn.protect ~finally:(fun () -> detach_owner_request c; native_close_connection c.owner.native_connection)
         ~f:(fun () -> destroy_children c (fun _ -> true)))
 let destroy_database db =
-  Exn.protect
-    ~finally:(fun () -> locked db.database_gate (fun () ->
-      db.database_gate.state <- Closed_state; db.database_gate.busy <- false; signal db.database_gate))
+  Exn.protect ~finally:(fun () -> mark_closed db.database_gate)
     ~f:(fun () -> native_close_database db.native_database)
-let close_connection c =
-  match c.request with
-  | Some _ -> locked c.owner.connection_gate (fun () ->
-    Result.bind (facade_access c) ~f:(fun () -> Error Busy))
-  | None ->
-  let choice = locked c.owner.connection_gate (fun () ->
-    match c.owner.connection_gate.state with
-    | Closed_state -> Ok false
-    | Closing -> Error Busy
-    | Open ->
-      if c.owner.connection_gate.busy || Option.is_some c.owner.request_lease || Option.is_some c.owner.lease || Option.is_some c.owner.result_owner then Error Busy
-      else if not (List.is_empty c.owner.prepared_children) then Error Live_children
-      else (c.owner.connection_gate.state <- Closing; c.owner.connection_gate.busy <- true; Ok true)) in
-  Result.map choice ~f:(fun destroy -> if destroy then destroy_connection c)
-let close_database db =
-  let choice = locked db.database_gate (fun () ->
-    match db.database_gate.state with
-    | Closed_state -> Ok false
-    | Closing -> Error Busy
-    | Open ->
-      if db.database_gate.busy then Error Busy
-      else if not (List.is_empty db.children) then Error Live_children
-      else (db.database_gate.state <- Closing; db.database_gate.busy <- true; Ok true)) in
-  Result.map choice ~f:(fun destroy -> if destroy then destroy_database db)
-let execute c sql =
-  if String.contains sql '\000' then Error Embedded_nul
-  else with_admission c None (fun () -> raw_execute c sql)
-let execute_transaction tx sql =
-  if String.contains sql '\000' then Error Embedded_nul
-  else with_admission tx.connection (Some tx) (fun () -> raw_execute tx.connection sql)
 
-exception Effect_denied
-let without_escaping_effects work =
-  let denied = ref false in
-  let result =
-    try Stdlib.Effect.Deep.try_with work ()
-      { effc = fun (type a) (_ : a Stdlib.Effect.t) ->
-          Some (fun (k : (a, _) Stdlib.Effect.Deep.continuation) ->
-            denied := true; Stdlib.Effect.Deep.discontinue k Effect_denied) }
-    with Effect_denied -> Error Effects_not_allowed
-  in if !denied then Error Effects_not_allowed else result
-let scope work cleanup =
-  let result_error = ref None in
-  Exn.protect
-    ~finally:(fun () ->
-      try complete_cleanup cleanup with exn ->
-        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        let exception_ = match !result_error with None -> exn | Some error -> Cleanup_exception (error, exn) in
-        Stdlib.Printexc.raise_with_backtrace exception_ backtrace)
-    ~f:(fun () ->
-      match Stdlib.Sys.with_async_exns (fun () ->
-        try
-          let result = without_escaping_effects work in
-          (match result with Error error -> result_error := Some error | Ok _ -> ());
-          Ok result
-        with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())) with
-      | Ok result -> result
-      | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace)
-let force_close_connection c =
-  let destroy = locked c.owner.connection_gate (fun () ->
-    match c.owner.connection_gate.state with
-    | Closed_state -> false
-    | Open | Closing ->
-      c.owner.connection_gate.state <- Closing;
-      while c.owner.connection_gate.busy || Option.is_some c.owner.lease || Option.is_some c.owner.request_lease do
-        Condition.wait c.owner.connection_gate.changed c.owner.connection_gate.mutex
-      done;
-      match c.owner.connection_gate.state with
-      | Closed_state -> false
-      | Open | Closing -> c.owner.connection_gate.busy <- true; true) in
-  if destroy then destroy_connection c
-let force_close_database db =
-  let children = locked db.database_gate (fun () ->
-    match db.database_gate.state with
+(* Manual close: a completed close succeeds again; [refuse] may veto an open owner. *)
+let close_once gate ~refuse ~destroy =
+  let+ first = locked gate (fun () ->
+    match gate.state with
+    | Closed_state -> Ok false
+    | Closing -> Error Busy
+    | Open ->
+      let+ () = refuse () in
+      gate.state <- Closing; gate.busy <- true; true) in
+  if first then destroy ()
+(* Scoped close: revoke admission, wait for [quiescent], then claim the owner
+   once. [snapshot] is read under that same claim. *)
+let force_close gate ~quiescent ~snapshot =
+  locked gate (fun () ->
+    match gate.state with
     | Closed_state -> None
     | Open | Closing ->
-      db.database_gate.state <- Closing;
-      while db.database_gate.busy do Condition.wait db.database_gate.changed db.database_gate.mutex done;
-      match db.database_gate.state with
+      gate.state <- Closing;
+      wait_until gate quiescent;
+      match gate.state with
       | Closed_state -> None
-      | Open | Closing -> db.database_gate.busy <- true; Some db.children) in
-  match children with
-  | None -> ()
-  | Some children ->
+      | Open | Closing -> gate.busy <- true; Some (snapshot ()))
+
+let close_connection c =
+  let gate = c.owner.connection_gate in
+  match c.request with
+  | Some _ -> locked gate (fun () -> let* () = facade_access c in Error Busy)
+  | None ->
+    let unleased () =
+      idle gate () && Option.is_none c.owner.request_lease
+      && Option.is_none c.owner.lease && Option.is_none c.owner.result_owner in
+    close_once gate ~destroy:(fun () -> destroy_connection c) ~refuse:(fun () ->
+      all_ok [ require unleased Busy
+             ; require (fun () -> List.is_empty c.owner.prepared_children) Live_children ])
+let close_database db =
+  let gate = db.database_gate in
+  close_once gate ~destroy:(fun () -> destroy_database db) ~refuse:(fun () ->
+    all_ok [ require (idle gate) Busy; require (fun () -> List.is_empty db.children) Live_children ])
+let reject_nul sql = if String.contains sql '\000' then Error Embedded_nul else Ok ()
+let data result = Result.map_error result ~f:(fun error -> Data_error error)
+let execute c sql =
+  let* () = reject_nul sql in
+  with_admission c None (fun () -> raw_execute c sql)
+let execute_transaction tx sql =
+  let* () = reject_nul sql in
+  with_admission tx.connection (Some tx) (fun () -> raw_execute tx.connection sql)
+
+let force_close_connection c =
+  let gate = c.owner.connection_gate in
+  let quiescent () = idle gate () && Option.is_none c.owner.lease && Option.is_none c.owner.request_lease in
+  Option.iter (force_close gate ~quiescent ~snapshot:Fn.id) ~f:(fun () -> destroy_connection c)
+let force_close_database db =
+  let gate = db.database_gate in
+  Option.iter (force_close gate ~quiescent:(idle gate) ~snapshot:(fun () -> db.children)) ~f:(fun children ->
     (* Revoke every child before waiting for any one child. Existing transactions
        can finish rollback internally; user operations are no longer admitted. *)
-    Exn.protect
-      ~finally:(fun () -> finish_operation db.database_gate)
-      ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
-        List.iter children ~f:(fun c -> locked c.owner.connection_gate (fun () ->
-          match c.owner.connection_gate.state with Open -> c.owner.connection_gate.state <- Closing | _ -> ()));
-        List.iter children ~f:force_close_connection;
-        destroy_database db))
+    let revoke c = locked c.owner.connection_gate (fun () ->
+      match c.owner.connection_gate.state with
+      | Open -> c.owner.connection_gate.state <- Closing
+      | Closing | Closed_state -> ()) in
+    Exn.protect ~finally:(fun () -> finish_operation gate) ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
+      List.iter children ~f:revoke;
+      List.iter children ~f:force_close_connection;
+      destroy_database db)))
 let with_database config ~f =
-  Result.bind (open_database config) ~f:(fun db -> scope (fun () -> f db) (fun () -> force_close_database db))
+  let* db = open_database config in
+  scope (fun () -> f db) (fun () -> force_close_database db)
 let with_connection db ~f =
-  Result.bind (connect db) ~f:(fun c -> scope (fun () -> f c) (fun () -> force_close_connection c))
+  let* c = connect db in
+  scope (fun () -> f c) (fun () -> force_close_connection c)
+
 let with_transaction c ~f =
+  let gate = c.owner.connection_gate in
   let tx = { connection = c; active = true; failure = None } in
-  let admission = locked c.owner.connection_gate (fun () ->
-    Result.bind (facade_access c) ~f:(fun () -> Result.bind (checkpoint c) ~f:(fun () -> Result.bind (available c.owner.connection_gate) ~f:(fun () ->
-      if c.owner.connection_gate.busy || Option.is_some c.owner.lease || Option.is_some c.owner.result_owner then Error Busy
-      else (c.owner.lease <- Some tx; Ok ()))))) in
-  Result.bind admission ~f:(fun () ->
-    let begin_attempted = ref false in
-    let revoke_and_drain () = locked c.owner.connection_gate (fun () ->
-      tx.active <- false;
-      while c.owner.connection_gate.busy do Condition.wait c.owner.connection_gate.changed c.owner.connection_gate.mutex done);
-      admit_cleanup c;
-      destroy_children c (fun child -> Option.exists child.transaction ~f:(phys_equal tx)) in
-    let release () = locked c.owner.connection_gate (fun () -> c.owner.lease <- None; signal c.owner.connection_gate) in
-    let rollback () =
-      complete_cleanup (fun () -> revoke_and_drain ();
-        if !begin_attempted then raw_control c F.Rollback else Ok ()) in
-    let discard () =
-      locked c.owner.connection_gate (fun () ->
-        c.owner.connection_gate.state <- Closing;
-        c.owner.connection_gate.busy <- true);
-      release (); complete_cleanup (fun () -> destroy_connection c)
-    in
-    Exn.protect ~finally:release ~f:(fun () ->
-      let outcome =
-        try Stdlib.Sys.with_async_exns (fun () -> try Ok (
-          match Result.bind (checkpoint c) ~f:(fun () ->
-            raw_begin c begin_attempted) with
-          | Error error -> Error error
-          | Ok () ->
-            let result = without_escaping_effects (fun () -> f tx) in
-            revoke_and_drain ();
-            match result, tx.failure with
-            | Error error, _ -> Error error
-            | Ok _, Some error -> Error error
-            | Ok value, None -> Result.map (Result.bind (checkpoint c) ~f:(fun () -> raw_commit c begin_attempted)) ~f:(fun () -> value))
-          with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-        with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
-      in
-      match outcome with
-      | Ok (Ok value) -> Ok value
-      | Ok (Error _) | Error _ ->
-        let rolled_back = try Ok (rollback ()) with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()) in
-        let restore () = match outcome, rolled_back with
-          | Ok (Error primary), Ok (Ok ()) -> Error primary
-          | Error (primary, backtrace), Ok (Ok ()) -> Stdlib.Printexc.raise_with_backtrace primary backtrace
-          | Ok (Error primary), Ok (Error secondary) -> Error (Rollback_failed (primary, secondary))
-          | Error (primary, backtrace), Ok (Error secondary) -> Stdlib.Printexc.raise_with_backtrace (Rollback_exception (primary, secondary)) backtrace
-          | Ok (Error primary), Error (secondary, backtrace) -> Stdlib.Printexc.raise_with_backtrace (Cleanup_exception (primary, secondary)) backtrace
-          | Error (primary, backtrace), Error (secondary, _) -> Stdlib.Printexc.raise_with_backtrace (Exn.Finally (primary, secondary)) backtrace
-          | Ok (Ok _), _ -> assert false
-        in
-        match rolled_back with
-        | Ok (Ok ()) -> restore ()
-        | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:restore)
-)
+  let* () = admit gate
+    [ (fun () -> facade_access c)
+    ; (fun () -> checkpoint c)
+    ; available gate
+    ; require (fun () -> idle gate () && Option.is_none c.owner.lease && Option.is_none c.owner.result_owner) Busy ]
+    ~claim:(fun () -> c.owner.lease <- Some tx; Ok ()) in
+  let begin_attempted = ref false in
+  let revoke_and_drain () =
+    locked gate (fun () -> tx.active <- false; wait_until gate (idle gate));
+    admit_cleanup c;
+    destroy_children c (fun child -> Option.exists child.transaction ~f:(phys_equal tx)) in
+  let release () = locked gate (fun () -> c.owner.lease <- None; signal gate) in
+  let rollback () = complete_cleanup (fun () -> revoke_and_drain (); rollback_if_begun c begin_attempted) in
+  let discard () = begin_discard gate; release (); complete_cleanup (fun () -> destroy_connection c) in
+  Exn.protect ~finally:release ~f:(fun () ->
+    settle ~rollback ~discard (fun () ->
+      in_native_transaction c begin_attempted (fun () ->
+        let result = without_escaping_effects (fun () -> f tx) in
+        revoke_and_drain ();
+        let* value = result in
+        let+ () = poisoned tx in
+        value)))
 
 let with_child_snapshot (child : child) work =
   match child.transaction with
@@ -467,35 +504,12 @@ let with_child_snapshot (child : child) work =
     (* child_operation already owns exclusive admission. No public token or
        callback can use this internal transaction; materialization precedes COMMIT. *)
     let begin_attempted = ref false in
-    let outcome =
-      try Stdlib.Sys.with_async_exns (fun () -> try Ok (
-        Result.bind (checkpoint c) ~f:(fun () ->
-          Result.bind (raw_begin c begin_attempted) ~f:(fun () ->
-            Result.bind (checkpoint c) ~f:(fun () ->
-              Result.bind (work ()) ~f:(fun value ->
-                Result.map (Result.bind (checkpoint c) ~f:(fun () -> raw_commit c begin_attempted)) ~f:(fun () -> value))))))
-        with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-      with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()) in
-    match outcome with
-    | Ok (Ok value) -> Ok value
-    | Ok (Error _) | Error _ ->
-      let rolled_back =
-        try Ok (complete_cleanup (fun () ->
-          admit_cleanup c;
-          if !begin_attempted then raw_control c F.Rollback else Ok ()))
-        with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()) in
-      let restore () = match outcome, rolled_back with
-        | Ok (Error primary), Ok (Ok ()) -> Error primary
-        | Error (primary, backtrace), Ok (Ok ()) -> Stdlib.Printexc.raise_with_backtrace primary backtrace
-        | Ok (Error primary), Ok (Error secondary) -> Error (Rollback_failed (primary, secondary))
-        | Error (primary, backtrace), Ok (Error secondary) -> Stdlib.Printexc.raise_with_backtrace (Rollback_exception (primary, secondary)) backtrace
-        | Ok (Error primary), Error (secondary, backtrace) -> Stdlib.Printexc.raise_with_backtrace (Cleanup_exception (primary, secondary)) backtrace
-        | Error (primary, backtrace), Error (secondary, _) -> Stdlib.Printexc.raise_with_backtrace (Exn.Finally (primary, secondary)) backtrace
-        | Ok (Ok _), _ -> assert false in
-      match rolled_back with
-      | Ok (Ok ()) -> restore ()
-      | Ok (Error _) | Error _ ->
-        Exn.protect ~finally:(fun () -> complete_cleanup (fun () -> destroy_connection c)) ~f:restore
+    settle
+      ~rollback:(fun () -> complete_cleanup (fun () -> admit_cleanup c; rollback_if_begun c begin_attempted))
+      ~discard:(fun () -> complete_cleanup (fun () -> destroy_connection c))
+      (fun () -> in_native_transaction c begin_attempted (fun () ->
+        let* () = checkpoint c in
+        work ()))
 
 module Bridge = struct
   type nonrec request = request
@@ -525,93 +539,75 @@ module Bridge = struct
       match request.request_state with
       | Finished -> Error Closed
       | Admitted | Running | Quiescing | Settling -> Error Busy
-      | Fresh ->
-        request.request_state <- Admitted;
-        Ok ())
+      | Fresh -> request.request_state <- Admitted; Ok ())
 
   let run request c ~f =
-    Result.bind (consume request) ~f:(fun () ->
-      let request_is_installed = ref false in
-      let facade = { owner = c.owner; request = Some request } in
-      let admit_request () =
-        locked c.owner.connection_gate (fun () ->
-          match facade_access c with
-          | Error _ as error -> error
-          | Ok () ->
-            match available c.owner.connection_gate with
-            | Error _ as error -> error
-            | Ok () ->
-              if c.owner.connection_gate.busy
-                 || Option.is_some c.owner.request_lease
-                 || Option.is_some c.owner.lease
-                 || Option.is_some c.owner.result_owner
-              then Error Busy
-              else if not (List.is_empty c.owner.prepared_children) then Error Live_children
-              else request_locked request (fun () ->
-                if request.cancelled then Error Cancelled
-                else (
-                  c.owner.request_lease <- Some request;
-                  request_is_installed := true;
-                  Ok ()))) in
-      let bind_native () =
-        (* The lease is already exclusive. Allocation failure is inside [scope],
-           so even a request with no native state is revoked and released. *)
-        let native = F.Native_request.create () in
-        let root = Some native in
-        request_locked request (fun () -> request.native_request <- root);
-        let installation = F.Native_request.prepare_install c.owner.native_connection native in
-        let result = request_locked request (fun () ->
-          if request.cancelled then F.Native_request.cancel native;
-          match F.Native_request.try_install_prepared installation with
-          | Installed ->
-            request.request_state <- Running;
-            if request.cancelled then Error Cancelled else Ok ()
-          | Connection_closed -> Error Closed
-          | Install_contended | Connection_leased | Connection_active -> Error Busy
-          | Request_used -> assert false) in
-        Result.map result ~f:(fun () -> start_controller c.owner request native) in
-      let cleanup () =
-        if !request_is_installed then (
-          locked c.owner.connection_gate (fun () ->
-            request_locked request (fun () -> request.request_state <- Quiescing);
-            while c.owner.connection_gate.busy || Option.is_some c.owner.lease do
-              Condition.wait c.owner.connection_gate.changed c.owner.connection_gate.mutex
-            done);
-          join_controller request;
-          request_locked request (fun () -> request.request_state <- Settling);
-          Exn.protect ~finally:(fun () ->
+    let* () = consume request in
+    let gate = c.owner.connection_gate in
+    let installed = ref false in
+    let facade = { owner = c.owner; request = Some request } in
+    let admit_request () =
+      let unleased () =
+        idle gate () && Option.is_none c.owner.request_lease
+        && Option.is_none c.owner.lease && Option.is_none c.owner.result_owner in
+      admit gate
+        [ (fun () -> facade_access c)
+        ; available gate
+        ; require unleased Busy
+        ; require (fun () -> List.is_empty c.owner.prepared_children) Live_children ]
+        ~claim:(fun () -> request_locked request (fun () ->
+          if request.cancelled then Error Cancelled
+          else (c.owner.request_lease <- Some request; installed := true; Ok ()))) in
+    let bind_native () =
+      (* The lease is already exclusive. Allocation failure is inside [scope],
+         so even a request with no native state is revoked and released. *)
+      let native = F.Native_request.create () in
+      let root = Some native in
+      request_locked request (fun () -> request.native_request <- root);
+      let installation = F.Native_request.prepare_install c.owner.native_connection native in
+      let+ () = request_locked request (fun () ->
+        if request.cancelled then F.Native_request.cancel native;
+        match F.Native_request.try_install_prepared installation with
+        | Installed ->
+          request.request_state <- Running;
+          if request.cancelled then Error Cancelled else Ok ()
+        | Connection_closed -> Error Closed
+        | Install_contended | Connection_leased | Connection_active -> Error Busy
+        | Request_used -> assert false) in
+      start_controller c.owner request native in
+    let cleanup () =
+      if !installed then (
+        locked gate (fun () ->
+          request_locked request (fun () -> request.request_state <- Quiescing);
+          wait_until gate (fun () -> idle gate () && Option.is_none c.owner.lease));
+        join_controller request;
+        request_locked request (fun () -> request.request_state <- Settling);
+        Exn.protect
+          ~finally:(fun () ->
             detach_request request;
             if request_locked request (fun () -> request.interrupted) then (
-              locked c.owner.connection_gate (fun () ->
-                c.owner.connection_gate.state <- Closing; c.owner.connection_gate.busy <- true);
+              begin_discard gate;
               destroy_connection c))
-            ~f:(fun () -> destroy_children c (fun child ->
-              Option.exists child.connection.request ~f:(phys_equal request)));
-          match request_locked request (fun () -> request.controller_failure) with
-          | None -> ()
-          | Some (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace) in
-      let release () =
-        locked c.owner.connection_gate (fun () ->
-          if !request_is_installed then c.owner.request_lease <- None;
-          request_locked request (fun () -> request.request_state <- Finished);
-          signal c.owner.connection_gate) in
-      (* Terminal classification and latch publication share the request mutex.
-         Cleanup failures keep their original diagnostics, never become Cancelled. *)
-      Exn.protect ~finally:release ~f:(fun () ->
-        let result =
-          scope
-            (fun () -> Result.bind (admit_request ()) ~f:(fun () ->
-              Result.bind (bind_native ()) ~f:(fun () -> f facade)))
-            cleanup
-        in
-        locked c.owner.connection_gate (fun () ->
-          request_locked request (fun () ->
-            if !request_is_installed then (
-              c.owner.request_lease <- None;
-              request_is_installed := false);
-            request.request_state <- Finished;
-            signal c.owner.connection_gate;
-            match result with
-            | Ok _ when request.cancelled -> Error Cancelled
-            | Ok _ | Error _ -> result))))
+          ~f:(fun () -> destroy_children c (fun child ->
+            Option.exists child.connection.request ~f:(phys_equal request)));
+        Option.iter (request_locked request (fun () -> request.controller_failure)) ~f:reraise) in
+    (* Publishes the terminal state and reports whether cancellation latched.
+       The body uses it to classify the outcome; [finally] repeats it for
+       exceptional exits. Classification and latch share the request mutex, and
+       cleanup failures keep their original diagnostics, never become Cancelled. *)
+    let finish () =
+      locked gate (fun () -> request_locked request (fun () ->
+        if !installed then (c.owner.request_lease <- None; installed := false);
+        request.request_state <- Finished;
+        signal gate;
+        request.cancelled)) in
+    Exn.protect ~finally:(fun () -> ignore (finish () : bool)) ~f:(fun () ->
+      let result = scope (fun () ->
+        let* () = admit_request () in
+        let* () = bind_native () in
+        f facade) cleanup in
+      let cancelled = finish () in
+      match result with
+      | Ok _ when cancelled -> Error Cancelled
+      | Ok _ | Error _ -> result)
 end

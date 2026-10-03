@@ -6,6 +6,14 @@
 /* Private native seam. A child retains its parent's stable shell independently
    of OCaml finalization order. Safe-layer admission owns serialization. */
 typedef struct connection_owner connection_owner;
+#define DUCKDB_ML_MESSAGE_SIZE 512
+/* Owner status ABI, decoded on the ML side by Duckdb_ffi.Status. */
+typedef enum {
+    DUCKDB_ML_STATUS_OK = 0,
+    DUCKDB_ML_STATUS_ERROR = 1,
+    DUCKDB_ML_STATUS_UNSUPPORTED = 2,
+    DUCKDB_ML_STATUS_CANCELLED = 3,
+} duckdb_ml_status;
 /* Every transition releases the guard before work/destruction. Unlocked callers
    may retry between attempts; held-runtime fallback must never wait. */
 typedef enum { DUCKDB_ML_RUNTIME_HELD, DUCKDB_ML_RUNTIME_RELEASED } duckdb_ml_runtime;
@@ -37,7 +45,7 @@ typedef struct prepared_owner {
     duckdb_data_chunk chunk;
     char *input;
     int has_result, status;
-    char message[512];
+    char message[DUCKDB_ML_MESSAGE_SIZE];
 } prepared_owner;
 prepared_owner *duckdb_ml_prepared(value v);
 #endif

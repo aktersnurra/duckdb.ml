@@ -8,28 +8,10 @@ let check_type (native @ local) index typ =
   if actual = S.native_id typ then Ok ()
   else Error (Resource.Data_error (S.Type_mismatch { index; expected = S.name typ; actual }))
 let read : type a. t @ local -> int -> int -> a S.t -> a = fun (chunk @ local) column row typ ->
-  match typ with
-  | S.Bool -> not (Int64.equal (F.box_int64 (F.chunk_int64 chunk.native column row)) 0L)
-  | S.Int8 -> Int64.to_int_exn (F.box_int64 (F.chunk_int64 chunk.native column row))
-  | S.Int16 -> Int64.to_int_exn (F.box_int64 (F.chunk_int64 chunk.native column row))
-  | S.Int32 -> Stdlib.Int64.to_int32 (F.box_int64 (F.chunk_int64 chunk.native column row))
-  | S.Date -> Stdlib.Int64.to_int32 (F.box_int64 (F.chunk_int64 chunk.native column row))
-  | S.Int64 ->
-    F.box_int64 (F.chunk_int64 chunk.native column row)
-  | S.Timestamp_s ->
-    F.box_int64 (F.chunk_int64 chunk.native column row)
-  | S.Timestamp_ms ->
-    F.box_int64 (F.chunk_int64 chunk.native column row)
-  | S.Timestamp_us ->
-    F.box_int64 (F.chunk_int64 chunk.native column row)
-  | S.Timestamp_ns ->
-    F.box_int64 (F.chunk_int64 chunk.native column row)
-  | S.Timestamp_tz ->
-    F.box_int64 (F.chunk_int64 chunk.native column row)
-  | S.Float32 -> F.chunk_float chunk.native column row
-  | S.Float64 -> F.chunk_float chunk.native column row
-  | S.String -> F.chunk_string chunk.native column row
-  | S.Blob -> F.chunk_string chunk.native column row
+  match S.repr typ with
+  | S.Integer { decode; _ } -> decode (F.box_int64 (F.chunk_int64 chunk.native column row))
+  | S.Floating -> F.chunk_float chunk.native column row
+  | S.Bytes -> F.chunk_string chunk.native column row
 let column : type a. t @ local -> column:int -> row:int -> a S.field -> (a, Resource.error) result =
   fun (chunk @ local) ~column ~row field ->
     let columns = F.column_count chunk.native in
@@ -55,7 +37,7 @@ let validate_schema native decoder =
     let rec loop : type a. int -> a Row.t -> (unit, Resource.error) result = fun index -> function
       | Row.Empty -> Ok () | Row.Map (inner, _) -> loop index inner
       | Row.Column (field, rest) ->
-        let checked = match field with S.Required typ -> check_type native index typ | S.Nullable typ -> check_type native index typ in
+        let checked = match S.witness field with S.Packed typ -> check_type native index typ in
         Result.bind checked ~f:(fun () -> loop (index + 1) rest) in
     loop 0 decoder
 let decode (chunk @ local) row decoder =

@@ -8,14 +8,19 @@
 #include <stdlib.h>
 #include <string.h>
 static void bind_status(prepared_owner *p, duckdb_state state) {
-    p->status = state == DuckDBSuccess ? 0 : 1;
-    if (p->status) snprintf(p->message, sizeof(p->message), "%s", "DuckDB parameter binding failed");
+    p->status = state == DuckDBSuccess ? DUCKDB_ML_STATUS_OK : DUCKDB_ML_STATUS_ERROR;
+    if (p->status) {
+        /* Prefer the engine's diagnostic when the statement recorded one. */
+        const char *error = duckdb_prepare_error(p->prepared);
+        snprintf(p->message, sizeof(p->message), "%s",
+                 error && *error ? error : "DuckDB parameter binding failed");
+    }
 }
 /* Called only after work_begin, with the runtime released. Binding/reset do
    not benefit from engine interruption, but each mutation must admit the latch. */
 static bool admit_binding(prepared_owner *p) {
     if (duckdb_ml_native_noninterruptible_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) {
-        p->status = 3;
+        p->status = DUCKDB_ML_STATUS_CANCELLED;
         return false;
     }
     return true;
@@ -33,7 +38,7 @@ CAMLprim value ml_duckdb_bind_int64(value v, value index, value typ, value numbe
     idx_t i = Long_val(index); int type = Int_val(typ); int64_t x = Int64_val(number);
     caml_enter_blocking_section();
     duckdb_ml_native_work_begin(p->parent);
-    p->status = 0;
+    p->status = DUCKDB_ML_STATUS_OK;
     duckdb_state state = DuckDBError; duckdb_value temporal = NULL;
     if (admit_binding(p)) {
     switch (type) {
@@ -56,7 +61,7 @@ CAMLprim value ml_duckdb_bind_int64(value v, value index, value typ, value numbe
         duckdb_destroy_value(&temporal);
         duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
     }
-    if (p->status != 3) bind_status(p, state);
+    if (p->status != DUCKDB_ML_STATUS_CANCELLED) bind_status(p, state);
     }
     duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);

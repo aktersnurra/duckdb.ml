@@ -20,7 +20,7 @@ typedef struct {
     connection_owner *parent;
     duckdb_appender appender;
     int status;
-    char message[512];
+    char message[DUCKDB_ML_MESSAGE_SIZE];
     char *schema, *table;
     int *types;
     bool *nullable;
@@ -31,7 +31,7 @@ typedef struct {
 #define Appender(v) (*((appender_owner **)Data_custom_val(v)))
 static void error(appender_owner *p, const char *message) {
     if (p->status) return;
-    p->status = 1;
+    p->status = DUCKDB_ML_STATUS_ERROR;
     snprintf(p->message, sizeof(p->message), "%s", message ? message : "DuckDB appender failed");
 }
 /* Status ABI: 0 success, 1 native diagnostic, 3 suppressed cancellation.
@@ -39,14 +39,14 @@ static void error(appender_owner *p, const char *message) {
 static bool admit_user(appender_owner *p) {
     if (p->status) return false;
     if (duckdb_ml_native_user_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) {
-        p->status = 3; return false;
+        p->status = DUCKDB_ML_STATUS_CANCELLED; return false;
     }
     return true;
 }
 static bool admit_scalar(appender_owner *p) {
     if (p->status) return false;
     if (duckdb_ml_native_noninterruptible_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) {
-        p->status = 3; return false;
+        p->status = DUCKDB_ML_STATUS_CANCELLED; return false;
     }
     return true;
 }

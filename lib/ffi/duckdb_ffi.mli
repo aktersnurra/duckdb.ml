@@ -44,8 +44,8 @@ val interrupt : connection -> unit
     Query extraction/prepare/execute/fetch subcalls admit USER delivery. Query
     bind/reset and Appender scalar mutations admit without delivery. Named
     Begin/Commit admit USER; Rollback is noninterruptible cleanup. Filesystem
-    reservation/publication decisions never enable delivery. Complete B4 review
-    and responsiveness gates remain open; these are not accepted guarantees.
+    reservation/publication decisions never enable delivery. Delivery
+    responsiveness is provisional and not a guarantee.
 
     Callers exclusively serialize worker operations on requests and owner trees,
     including close, disposal and GC root bookkeeping. The sole system-thread
@@ -202,3 +202,42 @@ val remove_local_file : local_file_work -> string -> int
 val finish_local_file_work : local_file_work -> unit
 val file_error_message : int -> string
 val file_exists_error : int -> bool
+
+(** Typed views of the integer ABI above; the integer entries stay for callers
+    that inspect raw codes. *)
+module Status : sig
+  (** [Native_failure] carries its diagnostic in the owner's [*_message];
+      [Suppressed] means the cancellation latch refused native admission. *)
+  type t = Success | Native_failure | Unsupported | Suppressed
+  val of_code : int -> t
+end
+
+(** [Fetch_failed] always leaves a non-success [prepared_status]. *)
+type fetch_outcome = Chunk | Exhausted | Fetch_failed
+val next_chunk : prepared -> fetch_outcome
+
+(** DuckDB [duckdb_type] identifiers used by the safe layer. *)
+module Type_id : sig
+  val invalid : int
+  val boolean : int
+  val tinyint : int
+  val smallint : int
+  val integer : int
+  val bigint : int
+  val float : int
+  val double : int
+  val timestamp : int
+  val date : int
+  val varchar : int
+  val blob : int
+  val timestamp_s : int
+  val timestamp_ms : int
+  val timestamp_ns : int
+  val timestamp_tz : int
+  val any : int
+end
+
+(** DuckDB [duckdb_statement_type] identifiers used by the safe layer. *)
+module Statement_kind : sig
+  val select : int
+end

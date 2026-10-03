@@ -46,15 +46,12 @@ manifest["capsule"] = generate(
     "worker_owner.ml",
     [
         (
-            "~finally:(fun () -> Thread.TLS.set active previous)",
-            "~finally:(fun () -> Thread.TLS.set active previous; Typed_probe.callback_cleanup (Thread.TLS.get active))",
-        ),
-        (
-            "if flush then D.flush_appender appender else Ok ()",
-            "if flush then (Typed_probe.explicit_flush (); D.flush_appender appender) else Ok ()",
+            "Duckdb_worker.Make (Duckdb_worker.Silent)",
+            "Duckdb_worker.Make (struct\n  let callback_restored ~active = Typed_probe.callback_cleanup active\n  let explicit_flush = Typed_probe.explicit_flush\nend)",
         ),
     ],
 )
+manifest["worker"] = generate("worker_source.ml", "duckdb_worker.ml", [])
 manifest["probe"] = generate(
     "probe_source.ml", "typed_probe.ml", [("let enabled = false", "let enabled = true")]
 )

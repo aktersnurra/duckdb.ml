@@ -27,4 +27,22 @@ val name : 'a t -> string
 val validate : 'a t -> 'a -> (unit, error) result
 val round_float32 : float -> float
 
+(** [None] (SQL NULL) is always valid. *)
+val validate_option : 'a t -> 'a option -> (unit, error) result
+
 val native_id : 'a t -> int
+
+(** Every witness, for tables derived from the scalar universe. *)
+type packed = Packed : _ t -> packed
+val all : packed list
+
+(** How a witness crosses the native boundary: as integer bits (with the exact
+    lossless conversion pair), as a double, or as owned bytes. *)
+type _ repr =
+  | Integer : { encode : 'a -> int64; decode : int64 -> 'a } -> 'a repr
+  | Floating : float repr
+  | Bytes : string repr
+val repr : 'a t -> 'a repr
+
+(** The witness inside a field, NULL-ability erased. *)
+val witness : 'a field -> packed

@@ -103,9 +103,9 @@ try:
         records.append(
             mutate(
                 "explicit_flush_omission",
-                root / "lib/async/worker_owner.ml",
-                "if flush then D.flush_appender appender else Ok ()",
-                "if flush then (if false then D.flush_appender appender else Ok ()) else Ok ()",
+                root / "lib/worker/duckdb_worker.ml",
+                "Probe.explicit_flush (); D.flush_appender appender",
+                "if false then (Probe.explicit_flush (); D.flush_appender appender) else Ok ()",
                 "ingest_rollback_and_auto_flush",
                 "explicit flush is adapter initiated before close",
                 instrumented=True,

@@ -42,7 +42,7 @@ producer_build -p duckdb --build-dir _build-safe
 local_dune install --root "$producer" --build-dir _build-safe --prefix "$prefix" duckdb
 producer_build -p duckdb-eio --build-dir _build-eio
 local_dune install --root "$producer" --build-dir _build-eio --prefix "$prefix" duckdb-eio
-test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb-eio/META")" = "base duckdb eio eio.unix threads"
+test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb-eio/META")" = "base duckdb duckdb.worker eio eio.unix threads"
 mv "$producer" "$producer.hidden"
 consumer="$work/consumer"
 mkdir "$consumer"

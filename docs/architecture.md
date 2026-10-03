@@ -2,7 +2,16 @@
 
 The repository publishes four packages: `duckdb-ffi` contains the native C API
 bridge; `duckdb` owns synchronous database resources; `duckdb-async` and
-`duckdb-eio` are independent scheduler adapters over the safe core.
+`duckdb-eio` are independent scheduler adapters over the safe core. Both
+adapters apply the same `duckdb.worker` functor (`Duckdb_worker.Make`) to get
+their synchronous owner capsule. Its `Probe` argument is the only seam tests
+need, so instrumented builds inject observers instead of patching sources.
+
+Inside `duckdb`, admission, cleanup and settlement are small combinators in
+`Resource`. Admission runs an ordered list of checks under the owner gate.
+`acquiring` releases a fresh native owner on any failure. `close_once` and
+`force_close` give manual and scoped close. `settle` combines a failed outcome
+with its rollback. `Query`, `Appender` and `Parquet` are built from these.
 
 Database, connection, statement, result, chunk, and appender lifetimes are
 explicit and scoped. Borrowed chunk views are usable only in their synchronous

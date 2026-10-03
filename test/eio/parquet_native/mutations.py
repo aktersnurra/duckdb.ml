@@ -118,9 +118,9 @@ def main():
                 assert source.count(before) == 1
                 source = source.replace(before, after)
             if name == "leave_actual_parquet_tls":
-                before = "Thread.TLS.set active previous; Typed_probe.callback_cleanup"
-                after = "Thread.TLS.set active (previous || true); Typed_probe.callback_cleanup"
-                source += f"\np = Path('worker_owner.ml')\ns = p.read_text()\nassert s.count({before!r}) == 1\np.write_text(s.replace({before!r}, {after!r}))\n"
+                before = "Thread.TLS.set active previous;"
+                after = "Thread.TLS.set active (previous || true);"
+                source += f"\np = Path('duckdb_worker.ml')\ns = p.read_text()\nassert s.count({before!r}) == 1\np.write_text(s.replace({before!r}, {after!r}))\n"
             path.write_text(source)
             record["red"] = run(selector, OUT / f"{name}-red.log")
             text = (ROOT / record["red"]["log"]).read_text()

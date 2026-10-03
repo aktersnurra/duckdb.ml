@@ -18,16 +18,16 @@ CONTROLS = {
     "omit_explicit_flush": (
         "ingest_semantics",
         "explicit flush plus close flush",
-        "worker_owner.ml",
-        "Typed_probe.explicit_flush (); D.flush_appender appender",
-        "Typed_probe.explicit_flush (); Ok ()",
+        "duckdb_worker.ml",
+        "Probe.explicit_flush (); D.flush_appender appender",
+        "Probe.explicit_flush (); Ok ()",
     ),
     "leave_callback_tls": (
         "typed_values_and_failures",
         "Stop actual worker TLS restored",
-        "worker_owner.ml",
-        "Thread.TLS.set active previous; Typed_probe.callback_cleanup",
-        "Thread.TLS.set active (previous || true); Typed_probe.callback_cleanup",
+        "duckdb_worker.ml",
+        "Thread.TLS.set active previous;",
+        "Thread.TLS.set active (previous || true);",
     ),
     "extra_operation_worker": (
         "typed_values_and_failures",

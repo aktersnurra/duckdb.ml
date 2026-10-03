@@ -6,10 +6,19 @@ type error = Invalid_configuration of string | Embedded_nul | Closed
   | Data_error of Scalar.error
   | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
   | Effects_not_allowed | Rollback_failed of error * error
+
+(** Raised when a callback exception is followed by a failed rollback. *)
 exception Rollback_exception of exn * error
-exception Cleanup_exception of error * exn
+
 (** A result error and exceptional cleanup are retained together. Ordinary
     primary and cleanup exceptions are paired as [Base.Exn.Finally]. *)
+exception Cleanup_exception of error * exn
+
+(** Result binding operators shared by the private modules. *)
+module Syntax : sig
+  val ( let* ) : ('a, 'e) result -> ('a -> ('b, 'e) result) -> ('b, 'e) result
+  val ( let+ ) : ('a, 'e) result -> ('a -> 'b) -> ('b, 'e) result
+end
 
 module Config : sig
   type t
@@ -26,27 +35,17 @@ type database
 type connection
 type transaction
 
-(** Unpublished B1 intermediate slice, NOT an accepted cancellation bridge.
-    Synchronous callbacks only, under the no-outward-effect barrier. Cancellation
-    is cooperative at ML boundaries; native work may finish normally. No native
-    interrupt, scheduler, bounded shutdown or cancellation-safe reuse claim.
-    Facades/children are revoked at settlement; owned values may escape.
-    The owner is Busy throughout [run]; facade close is Busy while active and
-    Closed after revocation, never an owner disconnect. Live children cannot
-    be imported. Requests are single-use, including failed admission: overlapping
-    [run] is Busy, later [run]/[cancel] is Closed. [cancel] latches a request,
-    not its outcome; repeated cancellation before settlement succeeds. Pending
-    includes never-run requests. Cancellation replaces only an otherwise
-    successful outcome, not primary errors or exceptions. *)
-(* Private lifecycle refinement: exclusive admission precedes native allocation
-   and binding. Cancellation publication shares request synchronization with
+(** Runs one synchronous callback under a cancellable request; see the public
+    [Duckdb.Bridge] documentation for the contract. *)
+(* Private lifecycle: exclusive admission precedes native allocation and
+   binding. Cancellation publication shares request synchronization with
    binding; native detach/disposal precedes lease release or discard disconnect.
    One owned system-thread controller services raw/Query work, Appender metadata
    and flushing, and named BEGIN/COMMIT. Scalar/reset/file decisions admit the
    persistent latch without delivery; rollback remains noninterruptible cleanup.
    Recoverable ordinary rollback retains that controller with delivery excluded;
    cancellation-driven/terminal cleanup joins before destruction or lease release.
-   Any actual native delivery makes the owner discard-only. B2 is unaccepted. *)
+   Any actual native delivery makes the owner discard-only. *)
 module Bridge : sig
   type request
   type settlement = Pending | Settled
@@ -117,3 +116,27 @@ val checkpoint : connection -> (unit, error) result
    cleanup retires/joins before destruction; ordinary cleanup retains the
    same controller, with native delivery excluded throughout destruction. *)
 val admit_cleanup : connection -> unit
+
+(* Exception capture. [capture] runs inside the runtime boundary so a callback
+   backtrace survives; [capture_all] also catches what the boundary raises. *)
+type raised = exn * Stdlib.Printexc.raw_backtrace
+val capture : (unit -> 'a) -> ('a, raised) result
+val capture_all : (unit -> 'a) -> ('a, raised) result
+val reraise : raised -> 'a
+
+(* Runs [setup] on a freshly acquired native owner; an error or exception
+   releases it before being returned or re-raised. *)
+val acquiring : release:(unit -> unit) -> (unit -> ('a, 'e) result) -> ('a, 'e) result
+
+(* Decodes an owner status code; [message] is read only for a native failure. *)
+val native_status : int -> message:(unit -> string) -> (unit, error) result
+
+(* SQL and identifiers cross the C boundary as NUL-terminated strings. *)
+val reject_nul : string -> (unit, error) result
+
+(* [close] releases native resources; [finish] then releases the shell even
+   when [close] was interrupted. *)
+val release_native : close:('a -> unit) -> finish:('a -> unit) -> 'a -> unit
+
+(* Lifts a scalar validation failure into [Data_error]. *)
+val data : ('a, Scalar.error) result -> ('a, error) result
