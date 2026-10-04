@@ -17,8 +17,8 @@ open Syntax
 module Config = struct
   type storage = Memory | File of string
   type access = Read_write | Read_only
-  type t = { path : string; threads : int; memory_limit_bytes : int; read_only : bool }
-  let create ?(threads = 1) ?(memory_limit_bytes = 0) ?(access = Read_write) storage =
+  type t = { path : string; threads : int; memory_limit_bytes : int; read_only : bool; statement_cache : int [@warning "-69"] }
+  let create ?(threads = 1) ?(memory_limit_bytes = 0) ?(statement_cache = 64) ?(access = Read_write) storage =
     let invalid s = Error (Invalid_configuration s) in
     if threads <= 0 then invalid "threads must be positive"
     else if memory_limit_bytes < 0 then invalid "memory_limit_bytes must be nonnegative (0 = engine default)"
@@ -29,7 +29,7 @@ module Config = struct
       | _ ->
         let path = match storage with Memory -> "" | File path -> path in
         let read_only = match access with Read_only -> true | Read_write -> false in
-        Ok { path; threads; memory_limit_bytes; read_only }
+        Ok { path; threads; memory_limit_bytes; read_only; statement_cache }
 end
 
 type state = Open | Closing | Closed_state

@@ -1,0 +1,5 @@
+module D = Duckdb
+module R = D.Request
+module C = R.Connection
+let insert = R.exec D.Fields.[int64; string] "insert into t values (?, ?)"
+let f c = C.exec c insert D.Args.[42L]

@@ -24,3 +24,7 @@ val fold_rows : connection -> path list -> 'row Row.t -> init:'a -> f:('row -> '
     interruption during/after publication can follow a published output. No
     crash durability, hostile-directory or atomic transaction/file claim. *)
 val export : connection -> query:string -> path -> (unit, error) result
+val fold : connection -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
+  f:('row -> 'a -> ('a Query.step, Request.request_error) result) -> ('a, Request.request_error) result
+val fold_table : connection -> path list -> (_, 'row) Request.table -> init:'a ->
+  f:('row -> 'a -> ('a Query.step, Request.request_error) result) -> ('a, Request.request_error) result

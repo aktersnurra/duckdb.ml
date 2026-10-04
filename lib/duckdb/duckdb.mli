@@ -64,8 +64,11 @@ module Config : sig
   (** [threads] defaults to 1 and must be positive. [memory_limit_bytes]
       defaults to 0 (engine default); negative values are rejected. File paths
       must be nonempty, NUL-free and colon-free (no special/remote URI paths).
-      Read-only mode requires a file. *)
-  val create : ?threads:int -> ?memory_limit_bytes:int -> ?access:access -> storage -> (t, error) result
+      Read-only mode requires a file. [statement_cache] bounds each connection's
+      typed-request statement cache (default 64; 0 disables; negative is
+      rejected). *)
+  val create : ?threads:int -> ?memory_limit_bytes:int -> ?statement_cache:int -> ?access:access ->
+    storage -> (t, error) result
 end
 type database
 type connection
@@ -217,6 +220,168 @@ val close_appender : appender -> (unit, error) result
 val with_appender : connection -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
 val with_appender_transaction : transaction -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
 
+(** Typed values for request parameters, result columns and table columns.
+    A codec is a base scalar witness, optionally NULL-able, optionally mapped
+    to a user type. The nullability index rules out [nullable (nullable _)]
+    and keeps NULL away from custom conversions. *)
+module Codec : sig
+  type non_null
+  type nullable
+  type ('a, 'nullability) t
+
+  (** Shorthands; included by [Fields] and [Table.Columns] for list literals. *)
+  module Values : sig
+    val bool : (bool, non_null) t
+    val int8 : (int, non_null) t
+    val int16 : (int, non_null) t
+    val int32 : (int32, non_null) t
+    val int64 : (int64, non_null) t
+    val float32 : (float, non_null) t
+    val float64 : (float, non_null) t
+    val string : (string, non_null) t
+    val blob : (string, non_null) t
+    val date : (int32, non_null) t
+    val timestamp_s : (int64, non_null) t
+    val timestamp_ms : (int64, non_null) t
+    val timestamp_us : (int64, non_null) t
+    val timestamp_ns : (int64, non_null) t
+    val timestamp_tz : (int64, non_null) t
+    val of_scalar : 'a Scalar.t -> ('a, non_null) t
+
+    (** NULL is [None]. Only a non-null codec can be made nullable. *)
+    val nullable : ('a, non_null) t -> ('a option, nullable) t
+
+    (** [encode] runs before binding/appending, [decode] after the base value
+        is read; their errors are reported as [Encode_rejected]/[Decode_rejected]. *)
+    val custom : encode:('a -> 'b Base.Or_error.t) -> decode:('b -> 'a Base.Or_error.t) ->
+      ('b, non_null) t -> ('a, non_null) t
+  end
+end
+
+(** Declared parameters or result columns, e.g. [Fields.[int64; nullable string]].
+    ['list] identifies the values; ['fn] is the curried row constructor type
+    returning ['result]. *)
+module Fields : sig
+  include module type of Codec.Values
+  type ('list, 'fn, 'result) t =
+    | [] : (unit, 'result, 'result) t
+    | (::) : ('a, _) Codec.t * ('list, 'fn, 'result) t -> ('a * 'list, 'a -> 'fn, 'result) t
+end
+
+(** Parameter values or appended rows, e.g. [Args.[42L; Some "x"]]. *)
+module Args : sig
+  type 'list t = [] : unit t | (::) : 'a * 'list t -> ('a * 'list) t
+end
+
+module Request : sig
+  type zero = [ `Zero ]
+  type one = [ `One ]
+  type zero_or_one = [ `Zero | `One ]
+  type many = [ `Zero | `One | `Many ]
+
+  (** SQL text, typed parameters, typed rows and a multiplicity. Pure data:
+      safe to share across connections, workers and adapters. *)
+  type ('params, 'row, 'multiplicity) t
+
+  (** A declared table; built and used through [Table]. *)
+  type ('columns, 'row) table
+
+  (** [oneshot] (default false) bypasses the connection's statement cache. *)
+  val exec : ?oneshot:bool -> ('params, _, _) Fields.t -> string -> ('params, unit, zero) t
+  val one : ?oneshot:bool -> ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t -> row:'fn ->
+    string -> ('params, 'row, one) t
+  val zero_or_one : ?oneshot:bool -> ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t -> row:'fn ->
+    string -> ('params, 'row, zero_or_one) t
+  val many : ?oneshot:bool -> ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t -> row:'fn ->
+    string -> ('params, 'row, many) t
+  val query : (_, _, _) t -> string
+
+  type context = Query of string | Table of { schema : string; name : string }
+  type cause =
+    | Core of error
+    | Parameter_count of { expected : int; actual : int }
+    | Row_count of { expected : [ `One | `Zero_or_one ]; actual : [ `Zero | `More_than_one ] }
+    | Unknown_column of { name : string }
+    | Missing_column of { name : string }
+    | Encode_rejected of { index : int; reason : Base.Error.t }
+    | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
+    | Rollback_failed of { primary : request_error; rollback : error }
+  and request_error = { context : context; cause : cause }
+  val query_of_context : context -> string
+
+  (** Operations over one synchronous owner, or one adapter pool. A request is
+      validated against engine metadata when first prepared on a connection. *)
+  module type QUERY = sig
+    type owner
+    type error
+    type 'a future
+    val exec : owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
+    val find : owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
+    val find_opt : owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
+      ('row option, error) result future
+    val collect : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+      ('row list, error) result future
+
+    (** [f] runs synchronously on the owning thread or worker, as [fold_rows]. *)
+    val fold : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+      init:'a -> f:('row -> 'a -> ('a step, request_error) result) -> ('a, error) result future
+  end
+
+  module type CONNECTION = sig
+    include QUERY
+
+    (** [with_transaction] semantics; the callback is synchronous. *)
+    val with_transaction : owner -> f:(transaction -> ('a, request_error) result) -> ('a, error) result future
+
+    (** A complete transaction and typed appender lifecycle. [flush] requests an
+        additional explicit flush after all batches. *)
+    val ingest : owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+      (unit, error) result future
+  end
+
+  module Connection : CONNECTION
+    with type owner = connection and type error = request_error and type 'a future = 'a
+  module Transaction : QUERY
+    with type owner = transaction and type error = request_error and type 'a future = 'a
+end
+
+(** A declared table: name, column names with codecs, and a row constructor. *)
+module Table : sig
+  type ('columns, 'row) t = ('columns, 'row) Request.table
+  module Columns : sig
+    include module type of Codec.Values
+    type ('list, 'fn, 'result) t =
+      | [] : (unit, 'result, 'result) t
+      | (::) : (string * ('a, _) Codec.t) * ('list, 'fn, 'result) t -> ('a * 'list, 'a -> 'fn, 'result) t
+  end
+
+  (** Names are quoted, never spliced unquoted, and must be NUL-free (checked on
+      use). Columns are matched to the catalog by name in any order; omitted
+      catalog columns must have a default. Checked when an appender opens or a
+      generated request is first prepared. *)
+  val declare : ?schema:string -> string -> ('columns, 'fn, 'row) Columns.t -> row:'fn -> ('columns, 'row) t
+
+  (** SELECT of exactly the declared columns, decoded by the declared row. *)
+  val select : (_, 'row) t -> (unit, 'row, Request.many) Request.t
+
+  (** INSERT of exactly the declared columns; omitted columns take defaults. *)
+  val insert : ('columns, _) t -> ('columns, unit, Request.zero) Request.t
+
+  type ('columns, 'row) appender
+
+  (** Opens the core appender on the declared columns and checks them against
+      the catalog before any row is accepted. Scope and poisoning semantics are
+      those of [with_appender]/[with_appender_transaction]. *)
+  val with_appender : connection -> ('columns, 'row) t ->
+    f:(('columns, 'row) appender -> ('a, Request.request_error) result) -> ('a, Request.request_error) result
+  val with_appender_transaction : transaction -> ('columns, 'row) t ->
+    f:(('columns, 'row) appender -> ('a, Request.request_error) result) -> ('a, Request.request_error) result
+
+  (** One validated batch, as [append_rows]. *)
+  val append : ('columns, _) appender -> 'columns Args.t list -> (unit, Request.request_error) result
+  val flush : (_, _) appender -> (unit, Request.request_error) result
+end
+
 module Parquet : sig
 
 type path
@@ -244,4 +409,11 @@ val fold_rows : connection -> path list -> 'row Row.t -> init:'a -> f:('row -> '
     interruption during/after publication can follow a published output. No
     crash durability, hostile-directory or atomic transaction/file claim. *)
 val export : connection -> query:string -> path -> (unit, error) result
+
+(** Folds each file as [fold_rows] does, decoding through [Fields] or a declared
+    table's columns (matched by position; the file must have exactly those). *)
+val fold : connection -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
+  f:('row -> 'a -> ('a step, Request.request_error) result) -> ('a, Request.request_error) result
+val fold_table : connection -> path list -> (_, 'row) Table.t -> init:'a ->
+  f:('row -> 'a -> ('a step, Request.request_error) result) -> ('a, Request.request_error) result
 end

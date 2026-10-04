@@ -219,3 +219,6 @@
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra)))
  (link_flags :standard -cclib -Wl,--wrap=duckdb_prepare_extracted_statement))
+(rule (alias runtest)
+ (deps check_request_types.sh ../lib/duckdb/duckdb.mli (glob_files request_compile/*))
+ (action (run bash %{dep:check_request_types.sh} %{ocamlc})))

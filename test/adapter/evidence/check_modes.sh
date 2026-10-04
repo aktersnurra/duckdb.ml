@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 compiler=$1
+# The public interface names Base types (Base.Error.t); every compilation
+# against the standalone duckdb.mli needs Base's interfaces.
+export OCAMLPARAM="_,I=$(ocamlfind query base)"
 root=$PWD
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

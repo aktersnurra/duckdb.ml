@@ -1,0 +1,4 @@
+module D = Duckdb
+module R = D.Request
+module C = R.Connection
+let f c = C.find c (R.many D.Fields.[] D.Fields.[int64] ~row:(fun x -> x) "select 1") D.Args.[]

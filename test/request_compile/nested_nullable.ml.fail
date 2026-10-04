@@ -1,0 +1,4 @@
+module D = Duckdb
+module R = D.Request
+module C = R.Connection
+let fields = D.Fields.[nullable (nullable int64)]

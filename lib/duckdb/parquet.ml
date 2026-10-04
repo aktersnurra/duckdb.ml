@@ -90,3 +90,6 @@ let export c ~query destination =
       (* The private tx is never exposed; Query scopes have drained and
          publication admission has returned. Its lease owns this cleanup. *)
       (fun () -> admit_cleanup c; remove temporary))
+
+let fold (_ : connection) (_ : path list) _ ~row:_ ~init:_ ~f:_ = failwith "Duckdb.Parquet.fold: not implemented"
+let fold_table (_ : connection) (_ : path list) _ ~init:_ ~f:_ = failwith "Duckdb.Parquet.fold_table: not implemented"

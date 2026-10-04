@@ -1,0 +1,4 @@
+module D = Duckdb
+module R = D.Request
+module C = R.Connection
+let id = D.Codec.Values.(custom ~encode:Base.Or_error.return ~decode:Base.Or_error.return (nullable int64))

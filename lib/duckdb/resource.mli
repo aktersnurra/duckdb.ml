@@ -29,7 +29,8 @@ module Config : sig
       defaults to 0 (engine default); negative values are rejected. File paths
       must be nonempty, NUL-free and colon-free (no special/remote URI paths).
       Read-only mode requires a file. *)
-  val create : ?threads:int -> ?memory_limit_bytes:int -> ?access:access -> storage -> (t, error) result
+  val create : ?threads:int -> ?memory_limit_bytes:int -> ?statement_cache:int -> ?access:access ->
+    storage -> (t, error) result
 end
 type database
 type connection
