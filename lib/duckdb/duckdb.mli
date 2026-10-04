@@ -153,9 +153,12 @@ val reset : prepared -> (unit, error) result
 (** Executes with the current bindings and materializes the result.
     All parameters must be bound. The result exclusively leases the connection
     until closed; reset/reexecute/prepared close return Live_children.
-    Before execution, freshly inferred parameter types must equal those at
-    preparation, otherwise Data_error Parameter_schema_changed is returned.
-    Reset does not update that schema; prepare anew to accept a changed schema.
+    Parameter types inferred now must equal those at preparation, otherwise
+    Data_error Parameter_schema_changed is returned and nothing is published.
+    They are re-inferred only when a CREATE/ALTER/DROP (on any connection in
+    the process) may have become visible since the last check; parameterless
+    statements need no check. Reset does not update that schema; prepare anew
+    to accept a changed schema.
     Validation and execution share a DuckDB transaction snapshot. Outside an
     explicit transaction, an internal transaction is settled before returning
     the materialized result; no hidden transaction spans result callbacks.

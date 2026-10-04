@@ -37,6 +37,13 @@ void duckdb_ml_acquired(void);
 void duckdb_ml_released(void);
 void duckdb_ml_fallback(void);
 int duckdb_ml_allowed_statement(duckdb_statement_type type);
+/* Process-wide schema epoch. It advances before and after every CREATE/ALTER/
+   DROP execution, and when a transaction that ran one settles, so a reader
+   that sees no change across a window knows no schema change became visible
+   in it. [enter] reports whether [leave] must advance it again. */
+bool duckdb_ml_changes_schema(duckdb_prepared_statement prepared);
+bool duckdb_ml_schema_enter(connection_owner *owner, duckdb_prepared_statement prepared);
+void duckdb_ml_schema_leave(bool changing);
 typedef struct prepared_owner {
     connection_owner *parent;
     duckdb_prepared_statement prepared;

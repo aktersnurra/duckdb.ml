@@ -11,7 +11,7 @@ let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fal
 let config = ok (Config.create Memory)
 let count c expected = ok (execute c (Stdlib.Printf.sprintf
   "SELECT CASE WHEN count(*)=%d THEN 1 ELSE error('snapshot settlement') END FROM t" expected))
-let signal_case operation boundary ordinal expected_live =
+let signal_case ~revalidate operation boundary ordinal expected_live =
   Stdlib.Atomic.set handled 0;
   ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
     with_connection db ~f:(fun observer ->
@@ -21,6 +21,8 @@ let signal_case operation boundary ordinal expected_live =
         let rollback = String.equal operation "rollback" in
         let rejection_close = String.equal operation "rejection-close" in
         if rollback || rejection_close then ok (execute c "ALTER TABLE t ALTER x TYPE DOUBLE");
+        (* Unrelated DDL advances the schema epoch, so execution re-validates. *)
+        if revalidate then ok (execute observer "CREATE TABLE unrelated(y BIGINT)");
         if String.equal boundary "enter" then arm ordinal 0 else arm 0 ordinal;
         let outcome = try Ok (execute_prepared p) with exn -> Error exn in
         let discarded = rollback ||
@@ -34,7 +36,8 @@ let signal_case operation boundary ordinal expected_live =
         if discarded then (closed (execute c "SELECT 1"); closed (parameter_count p))
         else (ok (execute c "SELECT 1"); ok (reset p));
         count observer (if String.equal operation "commit" && String.equal boundary "leave" then 1 else 0);
-        Stdlib.Printf.printf "snapshot-%s-%s: live=%d expected=%d\n%!" operation boundary (live_at_signal ()) expected_live;
+        Stdlib.Printf.printf "snapshot-%s-%s revalidate=%b: live=%d expected=%d\n%!" operation boundary revalidate
+          (live_at_signal ()) expected_live;
         assert (live_at_signal () = expected_live);
         assert (injections () = 1); assert (Stdlib.Atomic.get handled = 1);
         Ok ())))));
@@ -50,9 +53,14 @@ let () =
         "validation-close", 3, 10, 9; "execute", 4, 8, 9;
         "commit", 5, 9, 9; "rollback", 4, 8, 8; "rejection-close", 3, 10, 9]
         ~f:(fun (operation, ordinal, enter_live, leave_live) ->
-          signal_case operation "enter" ordinal enter_live;
-          signal_case operation "leave" ordinal leave_live));
-  Stdlib.print_endline "schema signals: 14 targeted boundaries; primary/rollback/commit, visibility, discard/reuse, zero fallback=ok"
+          signal_case ~revalidate:true operation "enter" ordinal enter_live;
+          signal_case ~revalidate:true operation "leave" ordinal leave_live);
+      (* Unchanged epoch: BEGIN, the original execute, COMMIT; no re-prepare. *)
+      List.iter ["begin", 1, 8, 8; "execute", 2, 8, 9; "commit", 3, 9, 9]
+        ~f:(fun (operation, ordinal, enter_live, leave_live) ->
+          signal_case ~revalidate:false operation "enter" ordinal enter_live;
+          signal_case ~revalidate:false operation "leave" ordinal leave_live));
+  Stdlib.print_endline "schema signals: 14 re-validating and 6 skipped-validation boundaries; primary/rollback/commit, visibility, discard/reuse, zero fallback=ok"
 
 let () =
   List.iter [1; 2; 3; 4] ~f:(fun fault ->

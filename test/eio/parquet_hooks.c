@@ -74,8 +74,9 @@ duckdb_state __wrap_duckdb_prepare_extracted_statement(duckdb_connection c, duck
   if (second) atomic_fetch_add(&counts[1], 1);
   duckdb_state state = __real_duckdb_prepare_extracted_statement(c, e, index, p);
   if (state == DuckDBSuccess) {
-    /* The core prepares a second, short-lived parameter-schema validator.
-       Keep the original statement, never its validator's destruction. */
+    /* A parameterized statement may get a second, short-lived parameter-schema
+       validator after a schema change. Keep the original statement, never a
+       validator's destruction. */
     uintptr_t empty = 0;
     if (first) atomic_compare_exchange_strong(&first_prepared, &empty, (uintptr_t)*p);
     empty = 0;

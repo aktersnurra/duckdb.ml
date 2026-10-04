@@ -123,6 +123,10 @@ module Native_request : sig
 end
 
 val live_resources : unit -> int
+
+(** Advances around every CREATE/ALTER/DROP and when a transaction that ran
+    one settles. Equal reads bracket a window with no visible schema change. *)
+val schema_epoch : unit -> int
 val fallback_reclaims : unit -> int
 
 (** Unsafe prepared/result/chunk owner. Retains a native connection shell, not
@@ -178,6 +182,9 @@ val finish_appender_close : appender -> unit
 val appender_is_closed : appender -> bool
 
 val prepared_kind : prepared -> int
+
+(** CREATE, ALTER or DROP: executing it advances [schema_epoch]. *)
+val prepared_changes_schema : prepared -> bool
 val prepared_column_types : prepared -> int array
 
 (** Local no-replace hard-link publication; returns errno (0 on success).

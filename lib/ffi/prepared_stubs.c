@@ -94,7 +94,9 @@ CAMLprim value ml_duckdb_execute_prepared(value v) {
     if (duckdb_ml_native_user_call_begin(p->parent) == DUCKDB_ML_CALL_CANCELLED) p->status = DUCKDB_ML_STATUS_CANCELLED;
     else {
         p->has_result = 1; duckdb_ml_acquired();
+        bool changing = duckdb_ml_schema_enter(p->parent, p->prepared);
         duckdb_state state = duckdb_execute_prepared(p->prepared, &p->result);
+        duckdb_ml_schema_leave(changing);
         duckdb_ml_native_user_call_end(p->parent);
         if (state != DuckDBSuccess) set_error(p, duckdb_result_error(&p->result));
     }
@@ -148,6 +150,9 @@ CAMLprim value ml_duckdb_column_type(value v, value index) {
     return Val_int(duckdb_column_type(&Prepared(v)->result, Long_val(index)));
 }
 CAMLprim value ml_duckdb_chunk_length(value v) { return Val_long(duckdb_data_chunk_get_size(Prepared(v)->chunk)); }
+CAMLprim value ml_duckdb_prepared_changes_schema(value v) {
+    return Val_bool(duckdb_ml_changes_schema(Prepared(v)->prepared));
+}
 CAMLprim value ml_duckdb_prepared_kind(value v) {
     return Val_int(duckdb_prepared_statement_type(Prepared(v)->prepared));
 }

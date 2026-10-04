@@ -5,10 +5,20 @@ module F = Duckdb_ffi
 module S = Scalar
 type prepared = { native : F.prepared; child : child; connection : connection; sql : string;
                   parameter_types : int array;
-                  bound : bool array; mutable result : query_result option }
+                  bound : bool array; mutable result : query_result option;
+                  in_transaction : bool; mutable validated_epoch : int option }
 and query_result = { prepared : prepared; mutable closed : bool }
 type chunk = Borrowed_chunk.t
 type 'a step = Continue of 'a | Stop of 'a
+
+(* Parameter types observed by [observe] are known to be current while the
+   schema epoch stays at the returned value: only when no schema change became
+   visible during it, and only in a fresh snapshot (no explicit transaction,
+   whose snapshot may predate later changes). *)
+let stable_epoch ~fresh observe =
+  let before = F.schema_epoch () in
+  let+ () = observe () in
+  if fresh && F.schema_epoch () = before then Some before else None
 
 (* Held-runtime metadata is admitted as a synchronous batch, not separately
    interruptible calls. Checkpoint again before publishing its owned output. *)
@@ -30,13 +40,14 @@ let destroy_result r =
     ~f:(fun () -> native_close_result r.prepared.connection r.prepared.native)
 
 (* The parent owns this cleanup even if the caller drops every alias. *)
-let register c tx native ~sql ~parameter_types =
+let register c tx native ~sql ~parameter_types ~validated_epoch =
   let self = ref None in
   let child = register_child c tx ~cleanup:(fun () ->
     Exn.protect ~finally:(fun () -> Option.iter !self ~f:revoke_result)
       ~f:(fun () -> native_close c native)) in
   let bound = Array.create ~len:(Array.length parameter_types) false in
-  let p = { native; child; connection = c; sql; parameter_types; bound; result = None } in
+  let p = { native; child; connection = c; sql; parameter_types; bound; result = None;
+            in_transaction = Option.is_some tx; validated_epoch } in
   self := Some p;
   p
 let prepare_on c tx sql =
@@ -44,11 +55,12 @@ let prepare_on c tx sql =
   with_admission c tx (fun () ->
     let native = F.prepared_owner (native_connection c) in
     acquiring ~release:(fun () -> native_close c native) (fun () ->
-      F.prepare native sql;
-      let* () = settled c native in
+      let* validated_epoch = stable_epoch ~fresh:(Option.is_none tx) (fun () ->
+        F.prepare native sql;
+        settled c native) in
       let parameter_types = Array.init (F.parameter_count native) ~f:(fun i -> F.parameter_type native (i + 1)) in
       let+ () = checkpoint c in
-      register c tx native ~sql ~parameter_types))
+      register c tx native ~sql ~parameter_types ~validated_epoch))
 let prepare c sql = prepare_on c None sql
 let prepare_transaction tx sql = prepare_on (transaction_connection tx) (Some tx) sql
 
@@ -93,7 +105,7 @@ let bind : type a. prepared -> int -> a S.field -> a -> (unit, error) result = f
             p.bound.(index - 1) <- true)) in
       match field with S.Required typ -> apply typ (Some value) | S.Nullable typ -> apply typ value)
 
-let validate_parameter_schema p =
+let check_parameter_schema p =
   let fresh = F.prepared_owner (native_connection p.connection) in
   let unchanged () =
     F.parameter_count fresh = Array.length p.parameter_types
@@ -104,15 +116,40 @@ let validate_parameter_schema p =
     let* () = settled p.connection fresh in
     if unchanged () then checkpoint p.connection else Error (Data_error S.Parameter_schema_changed))
     (fun () -> native_close p.connection fresh)
+(* How execution established that its parameter types are current. *)
+type validation =
+  | No_parameters  (* nothing a schema change could convert *)
+  | Checked        (* re-prepared in this execution's snapshot *)
+  | Skipped of int (* epoch unchanged since validation; snapshot not yet established *)
+(* Re-prepares only when a schema change may have become visible since the
+   last validation. Called inside the execution's snapshot. *)
+let validate_parameter_schema p =
+  let current = F.schema_epoch () in
+  if Array.is_empty p.parameter_types then Ok No_parameters
+  else if Option.equal Int.equal p.validated_epoch (Some current) then Ok (Skipped current)
+  else
+    let+ validated = stable_epoch ~fresh:(not p.in_transaction) (fun () -> check_parameter_schema p) in
+    Option.iter validated ~f:(fun epoch -> p.validated_epoch <- Some epoch);
+    Checked
+(* The engine snapshot may begin only at execution. After a skipped check, a
+   change that became visible meanwhile (other than this statement's own) is
+   checked in that same snapshot; a mismatch fails before publication and the
+   snapshot owner rolls back. *)
+let recheck_after_execution p = function
+  | No_parameters | Checked -> Ok ()
+  | Skipped epoch ->
+    if F.schema_epoch () = epoch || F.prepared_changes_schema p.native then Ok ()
+    else check_parameter_schema p
 let execute_prepared p = without_result p (fun () ->
   match Array.findi p.bound ~f:(fun _ bound -> not bound) with
   | Some (i, _) -> Error (Data_error (S.Unbound_parameter (i + 1)))
   | None ->
     let execute () =
-      let* () = validate_parameter_schema p in
+      let* validation = validate_parameter_schema p in
       let* () = checkpoint p.connection in
       F.execute_prepared p.native;
-      settled p.connection p.native in
+      let* () = settled p.connection p.native in
+      recheck_after_execution p validation in
     let publish () =
       let+ () = checkpoint p.connection in
       let r = { prepared = p; closed = false } in

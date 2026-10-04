@@ -18,6 +18,14 @@ let wait id = E.await ~label:("Query native boundary " ^ Int.to_string id) (fun 
 let wait_count id n = E.await ~label:("Query count " ^ Int.to_string id) (fun () -> count id >= n)
 let one_controller () = check "Query sole controller joined" (count 10 = 1 && count 12 = 1)
 let next_suppressed facade = cancelled (D.execute facade "SELECT 42")
+(* A parameter makes execution validate; unrelated DDL then advances the schema
+   epoch, so execution re-prepares. That DDL adds one extract, one prepare and
+   one execute to the raw counts. *)
+let schema_prepared c =
+  let p = ok (D.prepare c "SELECT ?::BIGINT") in
+  ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 1L);
+  ok (D.execute c "CREATE TEMP TABLE IF NOT EXISTS schema_epoch_bump(x BIGINT)");
+  p
 let before_prepare owner =
   reset (); gate 14 true;
   let request = B.create () in
@@ -32,7 +40,7 @@ let prepare_subcall ~schema point owner =
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
     let work () = if schema then (
-      let p = ok (D.prepare c "SELECT 1") in
+      let p = schema_prepared c in
       gate point true; selected_gate true;
       Result.map (D.execute_prepared p) ~f:(fun _ -> ()))
     else (gate point true; selected_gate true; Result.map (D.prepare c "SELECT 1") ~f:(fun _ -> ())) in
@@ -44,7 +52,8 @@ let prepare_subcall ~schema point owner =
       E.await ~label:"Query prepare selection or cleanup" (fun () -> selected_entered () || count 11 > 0);
       check "Query prepare admits USER" (selected_entered ());
       gate point false; wait_count 11 1;
-      check "Query next prepare subcall suppressed" (if point = 2 then count 1 = (if schema then 1 else 0) else count 2 = 0);
+      check "Query next prepare subcall suppressed"
+        (if point = 2 then count 1 = (if schema then 2 else 0) else count 2 = (if schema then 1 else 0));
       check "Query cleanup awaits selected retirement" (count 12 = 0 && count 13 = 0);
       selected_gate false; cancelled (join ());
       check "Query selected prepare delivery skipped" (count 4 = 0 && count 16 = 1); one_controller ()))
@@ -152,7 +161,7 @@ let cleanup_join ~schema ~result owner =
   let point = if result then 31 else 4 in
   let destructor = if result then 32 else 8 in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    let p = if schema || result then Some (ok (D.prepare c "SELECT 1")) else None in
+    let p = if schema then Some (schema_prepared c) else if result then Some (ok (D.prepare c "SELECT 1")) else None in
     let r = if result then Some (ok (D.execute_prepared (Option.value_exn p))) else None in
     gate point true; gate destructor true; selected_gate true;
     match r, p with
@@ -201,7 +210,7 @@ let returned_prepare ~schema owner =
   reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    let p = if schema then Some (ok (D.prepare c "SELECT 1")) else None in
+    let p = if schema then Some (schema_prepared c) else None in
     gate 19 true;
     let result = match p with
       | None -> Result.map (D.prepare c "SELECT 1") ~f:(fun _ -> ())
@@ -209,7 +218,7 @@ let returned_prepare ~schema owner =
     next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 19; ok (B.cancel request); gate 19 false; cancelled (join ());
-      check "Query post-prepare cancellation suppresses execution" (count 2 = 0 && count 4 = 0);
+      check "Query post-prepare cancellation suppresses execution" (count 2 = (if schema then 1 else 0) && count 4 = 0);
       one_controller ()))
 let prepare_error owner =
   reset (); gate 4 true; selected_gate true;

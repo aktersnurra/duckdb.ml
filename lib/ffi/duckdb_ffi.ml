@@ -78,6 +78,7 @@ module Native_request = struct
 end
 
 external live_resources : unit -> int = "ml_duckdb_live_resources" [@@noalloc]
+external schema_epoch : unit -> int = "ml_duckdb_schema_epoch" [@@noalloc]
 external fallback_reclaims : unit -> int = "ml_duckdb_fallback_reclaims" [@@noalloc]
 
 type prepared
@@ -124,6 +125,7 @@ external close_appender : appender -> bool -> unit = "ml_duckdb_close_appender"
 external finish_appender_close : appender -> unit = "ml_duckdb_finish_appender_close" [@@noalloc]
 external appender_is_closed : appender -> bool = "ml_duckdb_appender_is_closed" [@@noalloc]
 external prepared_kind : prepared -> int = "ml_duckdb_prepared_kind" [@@noalloc]
+external prepared_changes_schema : prepared -> bool = "ml_duckdb_prepared_changes_schema" [@@noalloc]
 external prepared_column_types : prepared -> int array = "ml_duckdb_prepared_column_types"
 type local_file_work
 external local_file_work : unit -> local_file_work = "ml_duckdb_local_file_work"

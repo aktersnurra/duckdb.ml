@@ -167,26 +167,34 @@ execution. Of the allowed kinds, only `CREATE`, `ALTER` and `DROP` change
 schemas. (`ATTACH`, `SET`, `COPY FROM DATABASE`, `PRAGMA`-with-effects, SQL
 `PREPARE` and transaction control are all rejected today.)
 
-- A process-wide atomic **schema epoch** is incremented when a `CREATE`,
-  `ALTER` or `DROP` is *admitted*, before it runs, on any connection of any
-  database. It also covers two handles on the same file within one process.
-- A prepared statement records the epoch at which its types were validated.
-- At execution, after the execution's transaction snapshot is established
-  (the point where today's re-prepare happens), the epoch is read. If it is
-  unchanged, no re-prepare happens. If it changed, the existing fresh
-  re-prepare runs, and on success the recorded epoch is updated. A mismatch
-  still returns `Parameter_schema_changed`, and the cache entry is evicted.
-- Soundness: the epoch is bumped before a schema change runs and read after
-  the reader's snapshot exists. So an unchanged epoch means no schema change
-  had started when the snapshot was taken, and none can be visible in it.
-  Rolled-back DDL only causes a needless re-check. Another *process* cannot
-  change the schema: DuckDB locks a read-write file exclusively, and read-only
-  handles cannot run DDL. Native code that bypasses `duckdb` through
-  `duckdb-ffi` is outside the safe API, as today.
+- A process-wide atomic **schema epoch** (C, `Duckdb_ffi.schema_epoch`)
+  advances *before and after* every `CREATE`/`ALTER`/`DROP` execution, and when
+  a transaction that ran one commits or rolls back (`BEGIN` clears that
+  per-connection flag, because autocommit DDL already advanced afterwards).
+- A prepared statement records the epoch only from a validation in a fresh
+  snapshot, meaning outside any explicit transaction, and only if the epoch
+  was equal before and after that validation. Statements prepared inside an
+  explicit transaction never record an epoch, so they always re-check.
+- At execution: a parameterless statement needs no check. Otherwise, if the
+  epoch equals the recorded one, the re-prepare is skipped. DuckDB starts a
+  snapshot lazily, at the first catalog access, which here is the execution
+  itself. So after a skipped check, the epoch is read again after execution.
+  If it moved (and not merely because this statement is itself DDL), the
+  fresh re-prepare runs in that same snapshot before anything is published. A
+  mismatch returns `Parameter_schema_changed`, and the snapshot owner rolls
+  back.
+- Soundness: every schema change advances the epoch before it runs and again
+  after it becomes visible (autocommit end, or settlement). So an unchanged
+  epoch across [validation] and across [check, execution] means no change
+  became visible in either window. Another *process* cannot change the
+  schema: DuckDB locks a read-write file exclusively, and read-only handles
+  cannot run DDL. Native code that bypasses `duckdb` through `duckdb-ffi` is
+  outside the safe API, as today.
 - This is an internal change in `Query`. It applies to L0 `execute_prepared`
   too, with the same documented outcome and no interface change, so L0 also
-  gets faster. A regression test (R4) and a mutation (bump removed → R4 must go
-  red) prove the detection path.
+  gets faster. Implemented first (step A): `test/test_schema_epoch.ml` covers
+  the epoch rules and the skip. `test_query_concurrency` races DDL against the
+  skip path, and disabling the post-execution re-check turns it red.
 - Adapters: Async and Eio retire the connection after every typed request,
   which discards the cache. The adapter instances therefore always behave as
   oneshot until that retirement policy changes. Changing it is out of scope.

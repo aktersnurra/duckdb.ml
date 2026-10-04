@@ -130,14 +130,18 @@ let () =
       Ok ()));
   clean (); Stdlib.print_endline "query: native-owned dynamic SQL/string lengths survive unlocked concurrent compaction=ok"
 
+(* [revalidate]: unrelated DDL first advances the schema epoch, so execution
+   re-prepares (points 3/5 pause inside that). Otherwise validation is skipped
+   and the post-execution check in the same snapshot must catch the race. *)
 let () =
-  List.iter [3; 5; 1; 6] ~f:(fun point ->
+  List.iter [true, 3; true, 5; true, 1; true, 6; false, 1; false, 6] ~f:(fun (revalidate, point) ->
     List.iter [false; true] ~f:(fun explicit ->
       ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
         D.with_connection db ~f:(fun ddl ->
           ok (D.execute c "CREATE TABLE t(x BIGINT)");
           let run prepare = prepare ~f:(fun p ->
             ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 9007199254740993L);
+            if revalidate then ok (D.execute ddl "CREATE TABLE unrelated(y BIGINT)");
             arm point;
             let worker = start D.execute_prepared p in
             Exn.protect ~finally:(fun () -> release ()) ~f:(fun () ->
@@ -147,7 +151,7 @@ let () =
               ok (D.execute ddl "ALTER TABLE t ALTER x TYPE DOUBLE"));
             let result = join worker in
             (match point, explicit, result with
-             | 3, false, Error (D.Data_error D.Scalar.Parameter_schema_changed) -> ()
+             | (1 | 3), false, Error (D.Data_error D.Scalar.Parameter_schema_changed) when point = 3 || not revalidate -> ()
              | 6, true, Ok r -> ok (D.close_result r)
              | 6, false, Error (D.Rollback_failed (D.Native_error primary, D.Native_error _)) ->
                assert (String.is_substring primary ~substring:"Failed to commit: Transaction conflict")
@@ -171,4 +175,5 @@ let () =
           ok (D.execute ddl "INSERT INTO t VALUES (42)");
           Ok ()))));
       clean ();
-      Stdlib.Printf.printf "query: schema race point=%d explicit=%b snapshot/conflict/no-insert/cleanup=ok\n%!" point explicit))
+      Stdlib.Printf.printf "query: schema race point=%d explicit=%b revalidate=%b snapshot/conflict/no-insert/cleanup=ok\n%!"
+        point explicit revalidate))

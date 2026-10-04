@@ -120,7 +120,9 @@ let next_file owner = with_directory (fun dir ->
   cancelled (B.run request owner ~f:(fun c ->
     D.Parquet.fold_rows c [file;missing] D.Row.(Column (Required Int64,Empty)) ~init:()
       ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ()))));
-  check "next file has no extraction/execute" (count 0 = 2 && count 2 = 1);
+  (* The first file's parameterless SELECT is extracted once (no validating
+     re-prepare) and executed once; the next file is never extracted. *)
+  check "next file has no extraction/execute" (count 0 = 1 && count 2 = 1);
   one_controller ())
 exception Primary_failure
 exception Rollback_failure

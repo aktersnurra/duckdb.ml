@@ -56,17 +56,10 @@ CONTROLS = {
             ("wait_at(1, first);", NEXT),
         ],
     ),
-    "select_premature_schema_validator": (
-        NATIVE,
-        "between_files",
-        "first file callbacks and actual children retired before cancellation",
-        [
-            (
-                "if (first) atomic_compare_exchange_strong(&first_prepared, &empty, (uintptr_t)*p);",
-                "if (first) atomic_store(&first_prepared, (uintptr_t)*p);",
-            )
-        ],
-    ),
+    # select_premature_schema_validator was retired with the schema epoch: a
+    # parameterless Parquet SELECT is no longer re-prepared for validation, so
+    # "select the last first-file prepare" equals "select the first" (an
+    # equivalent mutant that cannot go red).
     "bypass_selected_hold": (
         NATIVE,
         "between_files",

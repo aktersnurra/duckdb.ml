@@ -63,6 +63,7 @@ struct connection_owner {
     duckdb_ml_native_phase native_phase;
     bool native_closing;
     bool foreign_active;
+    bool schema_dirty; /* ran schema DDL since the last COMMIT/ROLLBACK */
     unsigned cleanup_depth;
     char *sql;
     duckdb_extracted_statements extracted;
@@ -376,6 +377,22 @@ CAMLprim value ml_duckdb_connect(value v) {
     caml_process_pending_actions();
     CAMLreturn(Val_unit);
 }
+static _Atomic long schema_epoch;
+bool duckdb_ml_changes_schema(duckdb_prepared_statement prepared) {
+    switch (duckdb_prepared_statement_type(prepared)) {
+    case DUCKDB_STATEMENT_TYPE_CREATE: case DUCKDB_STATEMENT_TYPE_ALTER:
+    case DUCKDB_STATEMENT_TYPE_DROP: return true;
+    default: return false;
+    }
+}
+bool duckdb_ml_schema_enter(connection_owner *owner, duckdb_prepared_statement prepared) {
+    if (!duckdb_ml_changes_schema(prepared)) return false;
+    owner->schema_dirty = true;
+    atomic_fetch_add(&schema_epoch, 1);
+    return true;
+}
+void duckdb_ml_schema_leave(bool changing) { if (changing) atomic_fetch_add(&schema_epoch, 1); }
+CAMLprim value ml_duckdb_schema_epoch(value unit) { (void)unit; return Val_long(atomic_load(&schema_epoch)); }
 int duckdb_ml_allowed_statement(duckdb_statement_type type) {
     /* A conservative allowlist: unknown future engine statements cannot bypass
        the transaction lease. PREPARE/EXECUTE/CALL/PRAGMA may hide control SQL. */
@@ -430,7 +447,9 @@ CAMLprim value ml_duckdb_execute(value v, value sql, value control) {
             else if (duckdb_ml_native_user_call_begin(owner) == DUCKDB_ML_CALL_CANCELLED) owner->status = DUCKDB_ML_STATUS_CANCELLED;
             else {
                 owner->has_result = 1; acquired();
+                bool changing = duckdb_ml_schema_enter(owner, owner->prepared);
                 duckdb_state executed = duckdb_execute_prepared(owner->prepared, &owner->result);
+                duckdb_ml_schema_leave(changing);
                 /* Final subcall completion enters cleanup directly. Publish
                    exclusion before error inspection and every destructor. */
                 duckdb_ml_native_cleanup_begin(owner, DUCKDB_ML_RUNTIME_RELEASED);
@@ -467,6 +486,11 @@ CAMLprim value ml_duckdb_execute_control(value v, value statement) {
     } else {
         owner->has_result = 1; acquired();
         duckdb_state result = duckdb_query(owner->connection, sql, &owner->result);
+        /* Settling (or failing to settle) a transaction that ran DDL may
+           publish or revert schema changes. */
+        /* Autocommit DDL already advanced after running; BEGIN starts afresh. */
+        if (control == 0) owner->schema_dirty = false;
+        else if (owner->schema_dirty) { owner->schema_dirty = false; duckdb_ml_schema_leave(true); }
         duckdb_ml_native_cleanup_begin(owner, DUCKDB_ML_RUNTIME_RELEASED);
         if (result != DuckDBSuccess) {
             owner->status = DUCKDB_ML_STATUS_ERROR; message(owner->message, duckdb_result_error(&owner->result));
