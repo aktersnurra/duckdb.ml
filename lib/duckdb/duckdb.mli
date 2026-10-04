@@ -296,7 +296,8 @@ module Request : sig
     string -> ('params, 'row, many) t
   val query : (_, _, _) t -> string
 
-  type context = Query of string | Table of { schema : string; name : string }
+  (** [Transaction]: BEGIN/COMMIT of a request-layer transaction. *)
+  type context = Query of string | Table of { schema : string; name : string } | Transaction
   type cause =
     | Core of error
     | Parameter_count of { expected : int; actual : int }
@@ -308,6 +309,9 @@ module Request : sig
     | Rollback_failed of { primary : request_error; rollback : error }
   and request_error = { context : context; cause : cause }
   val query_of_context : context -> string
+
+  (** A request error followed by an exceptional rollback; both are retained. *)
+  exception Cleanup_exception of request_error * exn
 
   (** Operations over one synchronous owner, or one adapter pool. A request is
       validated against engine metadata when first prepared on a connection. *)

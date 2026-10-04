@@ -139,5 +139,27 @@ val reject_nul : string -> (unit, error) result
    when [close] was interrupted. *)
 val release_native : close:('a -> unit) -> finish:('a -> unit) -> 'a -> unit
 
+(* Transaction scope over any error type: [lift] embeds connection errors and
+   [outcome] pairs a primary error with a rollback failure. [with_transaction]
+   is the core instance. *)
+type 'e outcome = { rollback_failed : 'e -> error -> 'e; cleanup_failed : 'e -> exn -> exn }
+val with_transaction_lifted : lift:(error -> 'e) -> outcome:'e outcome -> connection ->
+  f:(transaction -> ('a, 'e) result) -> ('a, 'e) result
+
+(* Per-connection statement cache, most recently used first, bounded by the
+   database's [statement_cache] (0 on request facades). Entries are children
+   that are not live children of the connection; the connection closes them
+   when it is destroyed. [cache_add] and [cache_remove] close evicted entries,
+   so they must not be called while holding admission. *)
+val cache_capacity : connection -> int
+val register_cached_child : connection -> cleanup:(unit -> unit) -> child
+val cache_find : connection -> 'a Base.Type_equal.Id.t -> key:int -> 'a option
+val cache_add : connection -> 'a Base.Type_equal.Id.t -> key:int -> 'a -> child -> unit
+val cache_remove : connection -> key:int -> unit
+
+(* A cached child runs one operation as a child of [transaction]. *)
+val lend_child : child -> transaction option -> (unit -> 'a) -> 'a
+val child_transaction : child -> transaction option
+
 (* Lifts a scalar validation failure into [Data_error]. *)
 val data : ('a, Scalar.error) result -> ('a, error) result

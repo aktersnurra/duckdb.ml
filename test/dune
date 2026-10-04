@@ -213,7 +213,7 @@
   (run timeout 120 ./%{exe:test_adapter_bridge_async.exe})
   (run timeout 120 ./%{exe:test_adapter_bridge_eio.exe}))))
 (alias (name runtest) (deps (alias adapter-bridge-responsiveness)))
-(test (name test_schema_epoch) (modules test_schema_epoch)
+(tests (names test_schema_epoch test_request) (modules test_schema_epoch test_request)
  (libraries base threads duckdb duckdb-ffi) (modes exe)
  (foreign_stubs (language c) (names epoch_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})

@@ -43,3 +43,16 @@ val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a st
 
 (* Private, engine-prepared SELECT metadata; no execution or result lease. *)
 val select_schema : prepared -> (int array, error) result
+
+(* Private typed-request seam. A cached statement is owned by its connection's
+   statement cache instead of being a live child. *)
+val prepare_cached : connection -> string -> (prepared, error) result
+val child : prepared -> child
+val parameter_types : prepared -> int array
+
+(* Engine result column types known at preparation (INVALID when unresolved). *)
+val column_types : prepared -> (int array, error) result
+
+(* [fold_chunks] after [validate] accepts the result's column types. *)
+val fold_validated : query_result -> validate:(int array -> (unit, error) result) -> init:'a ->
+  f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result

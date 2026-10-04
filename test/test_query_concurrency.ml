@@ -177,3 +177,39 @@ let () =
       clean ();
       Stdlib.Printf.printf "query: schema race point=%d explicit=%b revalidate=%b snapshot/conflict/no-insert/cleanup=ok\n%!"
         point explicit revalidate))
+
+(* A cached typed request lent to an explicit transaction skips validation; when
+   DDL becomes visible during its execution, the post-execution check fails and
+   poisons the transaction, so nothing it wrote can commit. *)
+let () =
+  List.iter [false, false; false, true; true, false] ~f:(fun (revalidate, ignore_error) ->
+    ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
+      D.with_connection db ~f:(fun ddl ->
+        let module R = D.Request in
+        let request_ok = function Ok x -> x | Error _ -> failwith "unexpected request error" in
+        let insert = R.exec D.Fields.[int64] "INSERT INTO t VALUES (?)" in
+        ok (D.execute c "CREATE TABLE t(x BIGINT)");
+        request_ok (R.Connection.exec c insert D.Args.[1L]);
+        if revalidate then ok (D.execute ddl "CREATE TABLE unrelated(y BIGINT)");
+        ok (D.execute c "DELETE FROM t");
+        arm 1;
+        let worker = start (fun () -> R.Connection.with_transaction c ~f:(fun tx ->
+          let outcome = R.Transaction.exec tx insert D.Args.[9007199254740993L] in
+          (* Ignoring the error must still not commit: the transaction is poisoned. *)
+          if ignore_error then Ok () else outcome)) () in
+        Exn.protect ~finally:(fun () -> release ()) ~f:(fun () ->
+          wait (fun () -> entered () = 1);
+          arm 0;
+          ok (D.execute ddl "ALTER TABLE t ALTER x TYPE DOUBLE"));
+        (match join worker, revalidate with
+         | Error { R.cause = R.Core (D.Data_error D.Scalar.Parameter_schema_changed); _ }, false -> ()
+         | Error { R.cause = R.Core (D.Native_error message); _ }, true ->
+           (* Re-validated in the transaction's own snapshot: the DDL conflicts instead. *)
+           assert (String.is_substring message ~substring:"onflict")
+         | Ok (), _ -> failwith "lent typed request committed across a schema change"
+         | Error _, _ -> failwith "lent typed request: unexpected outcome");
+        ok (D.execute ddl "SELECT CASE WHEN count(*)=0 THEN 1 ELSE error('rounded insert') END FROM t");
+        Ok ()))));
+    clean ();
+    Stdlib.Printf.printf "query: lent typed request schema race revalidate=%b ignore_error=%b poisons/rejects without insert=ok\n%!"
+      revalidate ignore_error)

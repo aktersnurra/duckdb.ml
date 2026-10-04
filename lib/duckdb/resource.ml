@@ -17,11 +17,12 @@ open Syntax
 module Config = struct
   type storage = Memory | File of string
   type access = Read_write | Read_only
-  type t = { path : string; threads : int; memory_limit_bytes : int; read_only : bool; statement_cache : int [@warning "-69"] }
+  type t = { path : string; threads : int; memory_limit_bytes : int; read_only : bool; statement_cache : int }
   let create ?(threads = 1) ?(memory_limit_bytes = 0) ?(statement_cache = 64) ?(access = Read_write) storage =
     let invalid s = Error (Invalid_configuration s) in
     if threads <= 0 then invalid "threads must be positive"
     else if memory_limit_bytes < 0 then invalid "memory_limit_bytes must be nonnegative (0 = engine default)"
+    else if statement_cache < 0 then invalid "statement_cache must be nonnegative (0 disables caching)"
     else match storage, access with
       | Memory, Read_only -> invalid "in-memory databases cannot be read-only"
       | File path, _ when String.is_empty path || String.contains path '\000' || String.contains path ':' ->
@@ -45,14 +46,21 @@ type request = { interrupt_mutex : Stdlib.Mutex.t; mutable request_state : reque
                  mutable controller : Thread.t option; mutable controller_stop : bool;
                  mutable interrupted : bool;
                  mutable controller_failure : (exn * Stdlib.Printexc.raw_backtrace) option }
-type database = { native_database : F.database; database_gate : gate; mutable children : connection list }
+type database = { native_database : F.database; database_gate : gate; mutable children : connection list;
+                  statement_cache : int }
 and owner = { native_connection : F.connection; parent : database; connection_gate : gate;
               mutable lease : transaction option; mutable request_lease : request option;
-              mutable prepared_children : child list; mutable result_owner : child option }
+              mutable prepared_children : child list; mutable result_owner : child option;
+              mutable cached : cached list }
 and connection = { owner : owner; request : request option }
 and transaction = { connection : connection; mutable active : bool; mutable failure : error option }
-and child = { connection : connection; transaction : transaction option;
+(* [transaction] is fixed for ordinary children; a cached child is lent to a
+   transaction for the duration of one operation. *)
+and child = { connection : connection; mutable transaction : transaction option;
               mutable child_state : state; cleanup : unit -> unit }
+(* Statement cache entries, most recently used first. Typed by a witness so the
+   cache stays independent of the statement representation. *)
+and cached = Cached : { key : int; witness : 'a Type_equal.Id.t; value : 'a; child : child } -> cached
 
 (* Exceptions captured with their backtraces. *)
 type raised = exn * Stdlib.Printexc.raw_backtrace
@@ -225,13 +233,15 @@ let raw_commit c begin_attempted =
   begin_attempted := false;
   checkpoint c
 let rollback_if_begun c begin_attempted = if !begin_attempted then raw_control c F.Rollback else Ok ()
-(* BEGIN, [body], COMMIT. [begin_attempted] tells the caller whether a rollback is owed. *)
-let in_native_transaction c begin_attempted body =
-  let* () = checkpoint c in
-  let* () = raw_begin c begin_attempted in
+(* BEGIN, [body], COMMIT. [begin_attempted] tells the caller whether a rollback
+   is owed. [lift] embeds connection errors in the body's error type. *)
+let in_native_transaction ~lift c begin_attempted body =
+  let core result = Result.map_error result ~f:lift in
+  let* () = core (checkpoint c) in
+  let* () = core (raw_begin c begin_attempted) in
   let* value = body () in
-  let* () = checkpoint c in
-  let+ () = raw_commit c begin_attempted in
+  let* () = core (checkpoint c) in
+  let+ () = core (raw_commit c begin_attempted) in
   value
 let raw_execute c sql =
   let* () = checkpoint c in
@@ -241,26 +251,30 @@ let raw_execute c sql =
       let* () = connection_result c.owner.native_connection in
       checkpoint c))
 
-(* A failed primary outcome and its rollback are both retained. *)
-type failure = Failed of error | Raised of raised
-let combine failure rolled_back = match failure, rolled_back with
+(* A failed primary outcome and its rollback are both retained. [outcome] says
+   how a primary of the body's error type is paired with a rollback failure. *)
+type 'e failure = Failed of 'e | Raised of raised
+type 'e outcome = { rollback_failed : 'e -> error -> 'e; cleanup_failed : 'e -> exn -> exn }
+let core_outcome = { rollback_failed = (fun primary secondary -> Rollback_failed (primary, secondary));
+                     cleanup_failed = (fun primary secondary -> Cleanup_exception (primary, secondary)) }
+let combine outcome failure rolled_back = match failure, rolled_back with
   | Failed primary, Ok (Ok ()) -> Error primary
   | Raised primary, Ok (Ok ()) -> reraise primary
-  | Failed primary, Ok (Error secondary) -> Error (Rollback_failed (primary, secondary))
+  | Failed primary, Ok (Error secondary) -> Error (outcome.rollback_failed primary secondary)
   | Raised (primary, backtrace), Ok (Error secondary) ->
     Stdlib.Printexc.raise_with_backtrace (Rollback_exception (primary, secondary)) backtrace
   | Failed primary, Error (secondary, backtrace) ->
-    Stdlib.Printexc.raise_with_backtrace (Cleanup_exception (primary, secondary)) backtrace
+    Stdlib.Printexc.raise_with_backtrace (outcome.cleanup_failed primary secondary) backtrace
   | Raised (primary, backtrace), Error (secondary, _) ->
     Stdlib.Printexc.raise_with_backtrace (Exn.Finally (primary, secondary)) backtrace
 (* Runs [work]; any error or exception rolls back. A rollback that fails or
    raises also discards the owner before the combined outcome is reported. *)
-let settle ~rollback ~discard work =
+let settle ~outcome ~rollback ~discard work =
   let recover failure =
     let rolled_back = attempt rollback in
     match rolled_back with
-    | Ok (Ok ()) -> combine failure rolled_back
-    | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:(fun () -> combine failure rolled_back) in
+    | Ok (Ok ()) -> combine outcome failure rolled_back
+    | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:(fun () -> combine outcome failure rolled_back) in
   match capture_all work with
   | Ok (Ok value) -> Ok value
   | Ok (Error error) -> recover (Failed error)
@@ -271,7 +285,7 @@ let open_database config =
   acquiring ~release:(fun () -> native_close_database native) (fun () ->
     F.open_database native config.Config.path config.threads config.memory_limit_bytes config.read_only;
     let+ () = native_status (F.database_status native) ~message:(fun () -> F.database_message native) in
-    { native_database = native; database_gate = gate (); children = [] })
+    { native_database = native; database_gate = gate (); children = []; statement_cache = config.statement_cache })
 let connect db =
   let db_gate = db.database_gate in
   let* () = admit db_gate [ available db_gate; require (idle db_gate) Busy ] ~claim:(claim_busy db_gate) in
@@ -281,7 +295,7 @@ let connect db =
       F.connect native;
       let+ () = connection_result native in
       let owner = { native_connection = native; parent = db; connection_gate = gate (); lease = None;
-                    request_lease = None; prepared_children = []; result_owner = None } in
+                    request_lease = None; prepared_children = []; result_owner = None; cached = [] } in
       let c = { owner; request = None } in
       locked db_gate (fun () -> db.children <- c :: db.children);
       c))
@@ -340,14 +354,19 @@ let release_result (child : child) = locked child.connection.owner.connection_ga
   match child.connection.owner.result_owner with
   | Some owner when phys_equal child owner -> child.connection.owner.result_owner <- None
   | None | Some _ -> ())
+let rec destroy_each = function
+  | [] -> ()
+  | child :: rest ->
+    Exn.protect ~finally:(fun () -> unregister_child child; destroy_each rest)
+      ~f:(fun () -> complete_cleanup child.cleanup)
 let destroy_children c predicate =
-  let children = locked c.owner.connection_gate (fun () -> List.filter c.owner.prepared_children ~f:predicate) in
-  let rec destroy = function
-    | [] -> ()
-    | child :: rest ->
-      Exn.protect ~finally:(fun () -> unregister_child child; destroy rest)
-        ~f:(fun () -> complete_cleanup child.cleanup) in
-  destroy children
+  destroy_each (locked c.owner.connection_gate (fun () -> List.filter c.owner.prepared_children ~f:predicate))
+(* Caller owns destruction of the whole connection. *)
+let destroy_cached c =
+  destroy_each (locked c.owner.connection_gate (fun () ->
+    let entries = c.owner.cached in
+    c.owner.cached <- [];
+    List.map entries ~f:(fun (Cached entry) -> entry.child)))
 let force_close_child (child : child) =
   let gate = child.connection.owner.connection_gate in
   (* A transaction's BEGIN/settlement uses the lease rather than busy.
@@ -368,6 +387,38 @@ let force_close_child (child : child) =
   if destroy then
     Exn.protect ~finally:(fun () -> unregister_child child; finish_operation gate)
       ~f:(fun () -> complete_cleanup (fun () -> admit_cleanup child.connection; child.cleanup ()))
+(* Statement cache. Request facades never cache: their children are revoked
+   with the request. Entries are not live children of the connection. *)
+let cache_capacity c = match c.request with Some _ -> 0 | None -> c.owner.parent.statement_cache
+let register_cached_child connection ~cleanup =
+  { connection; transaction = None; cleanup; child_state = Open }
+let cached_value (type a) (Cached entry) (witness : a Type_equal.Id.t) : a option =
+  match Type_equal.Id.same_witness entry.witness witness with Some T -> Some entry.value | None -> None
+let cache_find c witness ~key =
+  locked c.owner.connection_gate (fun () ->
+    match List.partition_tf c.owner.cached ~f:(fun (Cached entry) -> entry.key = key) with
+    | [ found ], rest -> c.owner.cached <- found :: rest; cached_value found witness
+    | _ -> None)
+(* Must not be called while holding admission: eviction closes statements. *)
+let cache_add c witness ~key value child =
+  let evicted = locked c.owner.connection_gate (fun () ->
+    let entries = Cached { key; witness; value; child } :: c.owner.cached in
+    let #(kept, evicted) = List.split_n entries (cache_capacity c) in
+    c.owner.cached <- kept;
+    evicted) in
+  List.iter evicted ~f:(fun (Cached entry) -> force_close_child entry.child)
+let cache_remove c ~key =
+  let removed = locked c.owner.connection_gate (fun () ->
+    let removed, kept = List.partition_tf c.owner.cached ~f:(fun (Cached entry) -> entry.key = key) in
+    c.owner.cached <- kept;
+    removed) in
+  List.iter removed ~f:(fun (Cached entry) -> force_close_child entry.child)
+let lend_child (child : child) transaction f =
+  let gate = child.connection.owner.connection_gate in
+  locked gate (fun () -> child.transaction <- transaction);
+  Exn.protect ~finally:(fun () -> locked gate (fun () -> child.transaction <- None)) ~f
+let child_transaction (child : child) = locked child.connection.owner.connection_gate (fun () -> child.transaction)
+
 (* Join before removing cancellation access or native ownership. Zero tickets
    alone is not foreign completion; the caller also owns drained admission. *)
 let detach_request request =
@@ -394,7 +445,7 @@ let destroy_connection c =
     ~finally:(fun () -> mark_closed c.owner.connection_gate; unregister c)
     ~f:(fun () ->
       Exn.protect ~finally:(fun () -> detach_owner_request c; native_close_connection c.owner.native_connection)
-        ~f:(fun () -> destroy_children c (fun _ -> true)))
+        ~f:(fun () -> Exn.protect ~finally:(fun () -> destroy_cached c) ~f:(fun () -> destroy_children c (fun _ -> true))))
 let destroy_database db =
   Exn.protect ~finally:(fun () -> mark_closed db.database_gate)
     ~f:(fun () -> native_close_database db.native_database)
@@ -470,10 +521,11 @@ let with_connection db ~f =
   let* c = connect db in
   scope (fun () -> f c) (fun () -> force_close_connection c)
 
-let with_transaction c ~f =
+let with_transaction_lifted ~lift ~outcome c ~f =
   let gate = c.owner.connection_gate in
   let tx = { connection = c; active = true; failure = None } in
-  let* () = admit gate
+  let core result = Result.map_error result ~f:lift in
+  let* () = core @@ admit gate
     [ (fun () -> facade_access c)
     ; (fun () -> checkpoint c)
     ; available gate
@@ -488,13 +540,14 @@ let with_transaction c ~f =
   let rollback () = complete_cleanup (fun () -> revoke_and_drain (); rollback_if_begun c begin_attempted) in
   let discard () = begin_discard gate; release (); complete_cleanup (fun () -> destroy_connection c) in
   Exn.protect ~finally:release ~f:(fun () ->
-    settle ~rollback ~discard (fun () ->
-      in_native_transaction c begin_attempted (fun () ->
-        let result = without_escaping_effects (fun () -> f tx) in
+    settle ~outcome ~rollback ~discard (fun () ->
+      in_native_transaction ~lift c begin_attempted (fun () ->
+        let result = without_escaping_effects (fun () -> Ok (f tx)) in
         revoke_and_drain ();
-        let* value = result in
-        let+ () = poisoned tx in
+        let* value = Result.join (core result) in
+        let+ () = core (poisoned tx) in
         value)))
+let with_transaction c ~f = with_transaction_lifted ~lift:Fn.id ~outcome:core_outcome c ~f
 
 let with_child_snapshot (child : child) work =
   match child.transaction with
@@ -504,10 +557,10 @@ let with_child_snapshot (child : child) work =
     (* child_operation already owns exclusive admission. No public token or
        callback can use this internal transaction; materialization precedes COMMIT. *)
     let begin_attempted = ref false in
-    settle
+    settle ~outcome:core_outcome
       ~rollback:(fun () -> complete_cleanup (fun () -> admit_cleanup c; rollback_if_begun c begin_attempted))
       ~discard:(fun () -> complete_cleanup (fun () -> destroy_connection c))
-      (fun () -> in_native_transaction c begin_attempted (fun () ->
+      (fun () -> in_native_transaction ~lift:Fn.id c begin_attempted (fun () ->
         let* () = checkpoint c in
         work ()))
 

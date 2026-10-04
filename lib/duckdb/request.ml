@@ -1,5 +1,6 @@
 open! Base
 open Resource
+open Syntax
 
 type zero = [ `Zero ]
 type one = [ `One ]
@@ -25,7 +26,7 @@ let zero_or_one ?oneshot params fields ~row sql = make ?oneshot At_most_one para
 let many ?oneshot params fields ~row sql = make ?oneshot Any_count params (Rows (fields, row)) sql
 let query r = r.sql
 
-type context = Query of string | Table of { schema : string; name : string }
+type context = Query of string | Table of { schema : string; name : string } | Transaction
 type cause =
   | Core of error
   | Parameter_count of { expected : int; actual : int }
@@ -39,6 +40,8 @@ and request_error = { context : context; cause : cause }
 let query_of_context = function
   | Query sql -> sql
   | Table { schema; name } -> schema ^ "." ^ name
+  | Transaction -> "transaction"
+exception Cleanup_exception of request_error * exn
 
 module type QUERY = sig
   type owner
@@ -61,26 +64,196 @@ module type CONNECTION = sig
     (unit, error) result future
 end
 
-let unimplemented () = failwith "Duckdb.Request: not implemented"
+let with_context context result = Result.map_error result ~f:(fun cause -> { context; cause })
+let core context result = Result.map_error result ~f:(fun error -> { context; cause = Core error })
+
+(* Encoding: each value becomes one bindable scalar, checked by its codec. *)
+type bound = Bound : 'b Scalar.field * 'b -> bound
+let encode_value : type a n. (a, n) Codec.t -> a -> bound Or_error.t = fun codec value ->
+  match codec with
+  | Codec.Non_null (Codec.Plan plan) -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (Scalar.Required plan.scalar, b))
+  | Codec.Nullable (Codec.Plan plan) ->
+    match value with
+    | None -> Ok (Bound (Scalar.Nullable plan.scalar, None))
+    | Some value -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (Scalar.Nullable plan.scalar, Some b))
+let rec encode_args : type l f r. (l, f, r) Fields.t -> l Args.t -> index:int ->
+  (bound list, cause) Result.t = fun fields args ~index ->
+  match fields, args with
+  | Fields.[], Args.[] -> Ok []
+  | Fields.(codec :: fields), Args.(value :: args) ->
+    match encode_value codec value with
+    | Error reason -> Error (Encode_rejected { index; reason })
+    | Ok bound -> Result.map (encode_args fields args ~index:(index + 1)) ~f:(fun rest -> bound :: rest)
+
+(* The base scalar each declared position crosses the boundary as. *)
+let scalar_id : type a n. (a, n) Codec.t -> int * string = function
+  | Codec.Non_null (Codec.Plan plan) -> Scalar.native_id plan.scalar, Scalar.name plan.scalar
+  | Codec.Nullable (Codec.Plan plan) -> Scalar.native_id plan.scalar, Scalar.name plan.scalar
+let rec scalar_ids : type l f r. (l, f, r) Fields.t -> (int * string) list = function
+  | Fields.[] -> []
+  | Fields.(codec :: fields) -> scalar_id codec :: scalar_ids fields
+
+(* Unresolved engine types (ANY/INVALID) accept the declaration, as [bind] does. *)
+let unresolved actual = actual = Duckdb_ffi.Type_id.invalid || actual = Duckdb_ffi.Type_id.any
+let check_types ~declared ~actual ~count_error =
+  if Array.length actual <> List.length declared then Error (count_error (List.length declared) (Array.length actual))
+  else
+    List.foldi declared ~init:(Ok ()) ~f:(fun i acc (id, name) ->
+      let* () = acc in
+      if unresolved actual.(i) || actual.(i) = id then Ok ()
+      else Error (Core (Data_error (Scalar.Type_mismatch { index = i; expected = name; actual = actual.(i) }))))
+let check_parameters params p =
+  check_types ~declared:(scalar_ids params) ~actual:(Query.parameter_types p)
+    ~count_error:(fun expected actual -> Parameter_count { expected; actual })
+(* Statements without declared rows (exec) are not constrained: DuckDB reports
+   e.g. a Count column for INSERT. *)
+let check_columns : type row. row rows -> int array -> (unit, cause) Result.t = fun (Rows (fields, _)) actual ->
+  match fields with
+  | Fields.[] -> Ok ()
+  | Fields.(_ :: _) ->
+    check_types ~declared:(scalar_ids fields) ~actual
+      ~count_error:(fun expected actual -> Core (Data_error (Scalar.Column_count { expected; actual })))
+let validate r p =
+  let Params params = r.params in
+  let* () = check_parameters params p in
+  let* columns = Result.map_error (Query.column_types p) ~f:(fun e -> Core e) in
+  check_columns r.rows columns
+
+(* Decoding a borrowed row into an owned value through the declared codecs. *)
+let decode_value : type a n. (a, n) Codec.t -> Query.chunk @ local -> column:int -> row:int -> seen:int ->
+  (a, cause) Result.t = fun codec chunk ~column ~row ~seen ->
+  let decoded decode b = Result.map_error (decode b) ~f:(fun reason -> Decode_rejected { column; row = seen + row; reason }) in
+  match codec with
+  | Codec.Non_null (Codec.Plan plan) ->
+    (match Query.column chunk ~column ~row (Scalar.Required plan.scalar) with
+     | Error e -> Error (Core e)
+     | Ok b -> decoded plan.decode b)
+  | Codec.Nullable (Codec.Plan plan) ->
+    match Query.column chunk ~column ~row (Scalar.Nullable plan.scalar) with
+    | Error e -> Error (Core e)
+    | Ok None -> Ok None
+    | Ok (Some b) -> Result.map (decoded plan.decode b) ~f:Option.some
+let rec decode_row : type l f r. (l, f, r) Fields.t -> f -> Query.chunk @ local ->
+  column:int -> row:int -> seen:int -> (r, cause) Result.t = fun fields fn chunk ~column ~row ~seen ->
+  match fields with
+  | Fields.[] -> Ok fn
+  | Fields.(codec :: fields) ->
+    match decode_value codec chunk ~column ~row ~seen with
+    | Error cause -> Error cause
+    | Ok value -> decode_row fields (fn value) chunk ~column:(column + 1) ~row ~seen
+
+(* Folds decoded rows. The accumulator carries a request failure as an early
+   Stop so the core fold still closes the result on every exit. *)
+let fold_result context (Rows (fields, fn) as rows) result ~init ~f =
+  let validate types = Result.map_error (check_columns rows types) ~f:(function
+    | Core e -> e | _ -> Data_error (Scalar.Column_count { expected = 0; actual = Array.length types })) in
+  let+ outcome, _ = core context (Query.fold_validated result ~validate ~init:(Ok init, 0)
+    ~f:(fun (chunk @ local) (acc, seen) ->
+      let length = Query.chunk_length chunk in
+      let rec loop row acc =
+        if row = length then Ok (Query.Continue (Ok acc, seen + length))
+        else match decode_row fields fn chunk ~column:0 ~row ~seen with
+          | Error cause -> Ok (Query.Stop (Error { context; cause }, seen + row))
+          | Ok value ->
+            match f value acc with
+            | Error e -> Ok (Query.Stop (Error e, seen + row))
+            | Ok (Query.Stop acc) -> Ok (Query.Stop (Ok acc, seen + row + 1))
+            | Ok (Query.Continue acc) -> loop (row + 1) acc in
+      match acc with
+      | Error _ -> Ok (Query.Stop (acc, seen))
+      | Ok acc -> loop 0 acc [@nontail])) in
+  outcome
+let fold_result context rows result ~init ~f = Result.join (fold_result context rows result ~init ~f)
+
+let witness : Query.prepared Type_equal.Id.t = Type_equal.Id.create ~name:"Duckdb.Request.prepared" (fun _ -> Sexp.Atom "<prepared>")
+
+(* Runs [use] on a validated statement for [r]: cached when allowed (populated
+   only outside explicit transactions), otherwise prepared for this call. *)
+let with_statement c within r ~use =
+  let context = Query r.sql in
+  let validated p = with_context context (validate r p) in
+  let scoped prepare =
+    let* p = core context prepare in
+    Exn.protect ~finally:(fun () -> force_close_child (Query.child p)) ~f:(fun () ->
+      let* () = validated p in
+      use p) in
+  let cached p = lend_child (Query.child p) within (fun () ->
+    let outcome = use p in
+    (match outcome with
+     | Error { cause = Core (Data_error Scalar.Parameter_schema_changed); _ } -> cache_remove c ~key:r.id
+     | Ok _ | Error _ -> ());
+    outcome) in
+  if r.oneshot || cache_capacity c = 0 then
+    match within with
+    | None -> scoped (Query.prepare c r.sql)
+    | Some tx -> scoped (Query.prepare_transaction tx r.sql)
+  else
+    match cache_find c witness ~key:r.id, within with
+    | Some p, _ -> cached p
+    | None, Some tx -> scoped (Query.prepare_transaction tx r.sql)
+    | None, None ->
+      let* p = core context (Query.prepare_cached c r.sql) in
+      match validated p with
+      | Error _ as error -> force_close_child (Query.child p); error
+      | Ok () -> cache_add c witness ~key:r.id p (Query.child p); cached p
+
+let bind_all context p bounds =
+  List.foldi bounds ~init:(Ok ()) ~f:(fun i acc (Bound (field, value)) ->
+    let* () = acc in core context (Query.bind p (i + 1) field value))
+
+let run c within r args ~consume =
+  let context = Query r.sql in
+  let Params params = r.params in
+  let* bounds = with_context context (encode_args params args ~index:1) in
+  with_statement c within r ~use:(fun p ->
+    let* () = bind_all context p bounds in
+    let* result = core context (Query.execute_prepared p) in
+    consume context result)
+
+let collect_rows c within r args =
+  run c within r args ~consume:(fun context result ->
+    Result.map (fold_result context r.rows result ~init:[] ~f:(fun row rows -> Ok (Query.Continue (row :: rows))))
+      ~f:List.rev)
+(* Stops at a second row: its presence is all that is needed. *)
+let at_most_one c within r args ~expected =
+  run c within r args ~consume:(fun context result ->
+    fold_result context r.rows result ~init:None ~f:(fun row -> function
+      | None -> Ok (Query.Continue (Some row))
+      | Some _ -> Error { context; cause = Row_count { expected; actual = `More_than_one } }))
+let run_exec c within r args = run c within r args ~consume:(fun context result -> core context (Query.close_result result))
+let run_find c within r args =
+  let* row = at_most_one c within r args ~expected:`One in
+  match row with
+  | Some row -> Ok row
+  | None -> Error { context = Query r.sql; cause = Row_count { expected = `One; actual = `Zero } }
+let run_fold c within r args ~init ~f =
+  run c within r args ~consume:(fun context result -> fold_result context r.rows result ~init ~f)
+
+let transaction_outcome =
+  { rollback_failed = (fun primary rollback -> { context = primary.context; cause = Rollback_failed { primary; rollback } });
+    cleanup_failed = (fun primary exn -> Cleanup_exception (primary, exn)) }
+
 module Connection = struct
   type owner = connection
   type error = request_error
   type 'a future = 'a
-  let exec _ _ _ = unimplemented ()
-  let find _ _ _ = unimplemented ()
-  let find_opt _ _ _ = unimplemented ()
-  let collect _ _ _ = unimplemented ()
-  let fold _ _ _ ~init:_ ~f:_ = unimplemented ()
-  let with_transaction _ ~f:_ = unimplemented ()
-  let ingest _ _ _ ~flush:_ = unimplemented ()
+  let exec c r args = run_exec c None r args
+  let find c r args = run_find c None r args
+  let find_opt c r args = at_most_one c None r args ~expected:`Zero_or_one
+  let collect c r args = collect_rows c None r args
+  let fold c r args ~init ~f = run_fold c None r args ~init ~f
+  let with_transaction c ~f =
+    with_transaction_lifted ~lift:(fun error -> { context = Transaction; cause = Core error })
+      ~outcome:transaction_outcome c ~f
+  let ingest _ _ _ ~flush:_ = failwith "Duckdb.Request.Connection.ingest: not implemented"
 end
 module Transaction = struct
   type owner = transaction
   type error = request_error
   type 'a future = 'a
-  let exec _ _ _ = unimplemented ()
-  let find _ _ _ = unimplemented ()
-  let find_opt _ _ _ = unimplemented ()
-  let collect _ _ _ = unimplemented ()
-  let fold _ _ _ ~init:_ ~f:_ = unimplemented ()
+  let exec tx r args = run_exec (transaction_connection tx) (Some tx) r args
+  let find tx r args = run_find (transaction_connection tx) (Some tx) r args
+  let find_opt tx r args = at_most_one (transaction_connection tx) (Some tx) r args ~expected:`Zero_or_one
+  let collect tx r args = collect_rows (transaction_connection tx) (Some tx) r args
+  let fold tx r args ~init ~f = run_fold (transaction_connection tx) (Some tx) r args ~init ~f
 end

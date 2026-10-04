@@ -27,7 +27,7 @@ val many : ?oneshot:bool -> ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t 
   string -> ('params, 'row, many) t
 val query : (_, _, _) t -> string
 
-type context = Query of string | Table of { schema : string; name : string }
+type context = Query of string | Table of { schema : string; name : string } | Transaction
 type cause =
   | Core of error
   | Parameter_count of { expected : int; actual : int }
@@ -39,6 +39,7 @@ type cause =
   | Rollback_failed of { primary : request_error; rollback : error }
 and request_error = { context : context; cause : cause }
 val query_of_context : context -> string
+exception Cleanup_exception of request_error * exn
 
 module type QUERY = sig
   type owner

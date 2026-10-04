@@ -6,7 +6,7 @@ module S = Scalar
 type prepared = { native : F.prepared; child : child; connection : connection; sql : string;
                   parameter_types : int array;
                   bound : bool array; mutable result : query_result option;
-                  in_transaction : bool; mutable validated_epoch : int option }
+                  mutable validated_epoch : int option }
 and query_result = { prepared : prepared; mutable closed : bool }
 type chunk = Borrowed_chunk.t
 type 'a step = Continue of 'a | Stop of 'a
@@ -40,17 +40,17 @@ let destroy_result r =
     ~f:(fun () -> native_close_result r.prepared.connection r.prepared.native)
 
 (* The parent owns this cleanup even if the caller drops every alias. *)
-let register c tx native ~sql ~parameter_types ~validated_epoch =
+let register c tx native ~cached ~sql ~parameter_types ~validated_epoch =
   let self = ref None in
-  let child = register_child c tx ~cleanup:(fun () ->
+  let cleanup () =
     Exn.protect ~finally:(fun () -> Option.iter !self ~f:revoke_result)
-      ~f:(fun () -> native_close c native)) in
+      ~f:(fun () -> native_close c native) in
+  let child = if cached then register_cached_child c ~cleanup else register_child c tx ~cleanup in
   let bound = Array.create ~len:(Array.length parameter_types) false in
-  let p = { native; child; connection = c; sql; parameter_types; bound; result = None;
-            in_transaction = Option.is_some tx; validated_epoch } in
+  let p = { native; child; connection = c; sql; parameter_types; bound; result = None; validated_epoch } in
   self := Some p;
   p
-let prepare_on c tx sql =
+let prepare_on ?(cached = false) c tx sql =
   let* () = reject_nul sql in
   with_admission c tx (fun () ->
     let native = F.prepared_owner (native_connection c) in
@@ -60,8 +60,9 @@ let prepare_on c tx sql =
         settled c native) in
       let parameter_types = Array.init (F.parameter_count native) ~f:(fun i -> F.parameter_type native (i + 1)) in
       let+ () = checkpoint c in
-      register c tx native ~sql ~parameter_types ~validated_epoch))
+      register c tx native ~cached ~sql ~parameter_types ~validated_epoch))
 let prepare c sql = prepare_on c None sql
+let prepare_cached c sql = prepare_on ~cached:true c None sql
 let prepare_transaction tx sql = prepare_on (transaction_connection tx) (Some tx) sql
 
 let without_result ?(cleanup = false) p work = child_operation ~cleanup p.child ~allow_result:true (fun () ->
@@ -128,7 +129,8 @@ let validate_parameter_schema p =
   if Array.is_empty p.parameter_types then Ok No_parameters
   else if Option.equal Int.equal p.validated_epoch (Some current) then Ok (Skipped current)
   else
-    let+ validated = stable_epoch ~fresh:(not p.in_transaction) (fun () -> check_parameter_schema p) in
+    let fresh = Option.is_none (child_transaction p.child) in
+    let+ validated = stable_epoch ~fresh (fun () -> check_parameter_schema p) in
     Option.iter validated ~f:(fun epoch -> p.validated_epoch <- Some epoch);
     Checked
 (* The engine snapshot may begin only at execution. After a skipped check, a
@@ -139,7 +141,13 @@ let recheck_after_execution p = function
   | No_parameters | Checked -> Ok ()
   | Skipped epoch ->
     if F.schema_epoch () = epoch || F.prepared_changes_schema p.native then Ok ()
-    else check_parameter_schema p
+    else
+      (* Only a cached statement lent to an explicit transaction skips there; its
+         effects stay in that transaction, so the transaction must not commit. *)
+      let checked = check_parameter_schema p in
+      Result.iter_error checked ~f:(fun error -> Option.iter (child_transaction p.child) ~f:(fun tx ->
+        poison_transaction tx error));
+      checked
 let execute_prepared p = without_result p (fun () ->
   match Array.findi p.bound ~f:(fun _ bound -> not bound) with
   | Some (i, _) -> Error (Data_error (S.Unbound_parameter (i + 1)))
@@ -204,6 +212,8 @@ let fold_internal r validate ~init ~f =
       loop init)
       (fun () -> destroy_result r))
 let fold_chunks r ~init ~f = fold_internal r (fun _ -> Ok ()) ~init ~f
+let fold_validated r ~validate ~init ~f =
+  fold_internal r (fun native -> validate (F.prepared_column_types native)) ~init ~f
 let fold_rows r decoder ~init ~f =
   fold_internal r (fun native -> Borrowed_chunk.validate_schema native decoder) ~init
     ~f:(fun (chunk @ local) acc ->
@@ -227,3 +237,10 @@ let select_schema p = without_result p (fun () ->
     let types = F.prepared_column_types p.native in
     let+ () = checkpoint p.connection in
     types)
+
+let child p = p.child
+let parameter_types p = p.parameter_types
+let column_types p = child_operation p.child ~allow_result:true (fun () ->
+  let types = F.prepared_column_types p.native in
+  let+ () = checkpoint p.connection in
+  types)
