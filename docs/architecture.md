@@ -26,5 +26,20 @@ resources in dependency order. Async callers observe completion through its
 request interface; Eio callers retain their own cancellation context while
 protected cleanup drains.
 
+Above that core sits an optional typed layer
+([design](design/typed-requests.md)). A `Request` is a value: SQL text, typed
+parameters, typed rows, and a multiplicity phantom that decides whether
+`exec`, `find`, `find_opt`, `collect` or `fold` accept it. It is checked
+against engine metadata when first prepared, and prepared statements are
+cached per connection (LRU, `Config ?statement_cache`). A `Table` declaration
+drives typed appender rows, a typed SELECT and INSERT, and Parquet decoding,
+and is checked against the catalog by column name. `Request.CONNECTION` is
+implemented by the synchronous connection and by each adapter's
+`Request.Generic`. The low-level API is unchanged; the typed layer only adds.
+
+Parameterized statements are re-validated only when a schema change may have
+become visible. A process-wide schema epoch advances around every
+CREATE/ALTER/DROP and on settlement of a transaction that ran one.
+
 Typed rows, appender ingestion, transactions, and local Parquet import/export
 are supported. Remote storage, credentials, and a SQL DSL are not supported.

@@ -1,7 +1,8 @@
 # Typed requests (design note)
 
-Status: proposal for review. No code exists yet. Base revision:
-`refactor/composable-core` at `7d8eafbe`.
+Status: approved and implemented (Phase 2, on top of `refactor/composable-core`
+at `7d8eafbe`). [Implementation notes](#implementation-notes) lists where the
+implementation differs from this proposal.
 
 A throwaway prototype of `Codec`/`Fields`/`Args`/`Request`/`Table.Columns`
 (stub bodies, the signatures below) was compiled with the project-local OxCaml
@@ -551,30 +552,57 @@ D.Parquet.fold_table connection [path] example ~init:[] ~f:(fun row rows -> Ok (
 The existing `error_name` is unchanged: the new causes live in
 `Request.cause`.
 
-## Implementation plan (Phase 2, after approval)
+## Implementation notes
 
-On a new bookmark based on `7d8eafbe`. Interfaces first, then fixtures (red
-against stub implementations), then implementation:
+Where the implementation differs from the proposal above, or settles a
+detail the proposal left open:
 
-1. `duckdb.mli` additions plus private modules `codec`, `fields`,
-   `request`, `statement_cache`, `table`. Stubs raise `assert false` so the
-   fixtures compile against the real `.mli`.
-2. `test/request_compile/` and the driver: F1–F19 red-for-reason, positive
-   green.
-3. Internal core changes (private, behaviour-preserving for L0):
-   - `Resource`: a cache slot on the connection owner, excluded from
-     `Live_children`, closed first by `destroy_connection`.
-   - `Resource.with_transaction`: an error-injection parameter.
-   - `Query`: `execute_cached` under transaction admission, and a fallible
-     decoder for fields.
-4. FFI: `duckdb_table_description_{create_ext,get_column_count,get_column_name,destroy}`
-   for R7. These exist in the pinned DuckDB 1.5.5 header.
-5. L1 sync instances, then R1–R6 and R10–R13.
-6. L2 `Table`, then R7–R9 and F15–F18.
-7. Worker functor additions, Async/Eio instances, F20–F21 and R14. Mutation
-   anchors remain in `lib/worker/duckdb_worker.ml`.
-8. Install smoke updates, full CI sequence and mutation scripts, evidence
-   recorded as in Phase 0.
+- **Interface layout.** The abstract table type lives in `Request` as
+  `('columns, 'row) Request.table`, and `Table.t` is an alias for it. This
+  avoids a dependency cycle between `Request.CONNECTION.ingest` and `Table`.
+  The typed appender is implemented in `request.ml` for the same reason.
+- **Errors.** `context` has an extra `Transaction` case, for BEGIN/COMMIT of a
+  request-layer transaction. `Request.Cleanup_exception of request_error * exn`
+  retains a request error when the rollback cleanup that follows it raises. It
+  is the counterpart of the core `Cleanup_exception`. `Resource.settle` and
+  `combine` take the error-injection `outcome` needed for this.
+- **Statement cache.** Bridge facades never cache (their children are revoked
+  with the request), so adapter instances always prepare per call. Only the
+  connection instance, outside explicit transactions, inserts entries. The
+  transaction instance reuses a hit by lending the cached statement to the
+  transaction for one operation; on a miss it prepares a one-off statement in
+  the transaction. A failed post-execution schema check on a lent statement
+  poisons the transaction. `Parameter_schema_changed` evicts the entry.
+- **Schema epoch.** It advances before and after the DDL statement itself, and
+  on COMMIT/ROLLBACK of a transaction that ran DDL (`BEGIN` clears the flag).
+  The post-execution re-check is skipped for parameterless statements and for
+  a statement that is itself DDL.
+- **Catalog checks.** These read `duckdb_columns()` (name and whether a default
+  exists) through a typed request in the appender's own transaction snapshot,
+  instead of the `duckdb_table_description` API. One new C entry point
+  (`appender_select_columns`) applies a declared subset or order through
+  `duckdb_appender_add_column`. A nullable column without a default must be
+  declared; `DEFAULT NULL` allows omitting it.
+- **Codec rejections in `Table.append`** reject the whole batch before any
+  native row and do not poison the appender. Core validation failures in
+  `append_rows` still do.
+- **Adapters.** Each adapter's `Request` exposes its operations with concrete
+  result types. The backend-generic instance is `Request.Generic`; with an
+  alias at `Request.future`, compiler messages printed `Async.Deferred.t` as
+  `Duckdb_async.Request.future`, which the install smoke test caught.
+- **Base in the public interface.** `Base.Error.t` and `Base.Or_error.t` appear
+  in `duckdb.mli`, so the standalone interface drivers now add Base's include
+  directory.
+- **Fixtures.** F1–F19 are in `test/request_compile`
+  (`test/check_request_types.sh`; F14 is split into `forge_request` and
+  `forge_codec`, giving 20). F20 is `test/async/compile/request_raw_connection`.
+  Note that `test/async/check_interfaces.sh` is not wired into any Dune rule
+  or CI step; that gap predates this work. F21 is
+  `test/eio/compile/request_promise`: Eio results are not promises.
+- **Runtime tests.** `test/test_request.ml` (R1–R6, R10–R13),
+  `test/test_table.ml` (R7–R9, Parquet), `test/test_schema_epoch.ml`, and the
+  lent-statement race in `test/test_query_concurrency.ml`.
+  `test/async/typed_request_async.ml` and `test/eio/request_eio.ml` cover R14.
 
 ## Decisions
 
