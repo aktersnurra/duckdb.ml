@@ -118,6 +118,7 @@ external appender_status : appender -> int = "ml_duckdb_appender_status" [@@noal
 external appender_message : appender -> string = "ml_duckdb_appender_message"
 external appender_types : appender -> int array = "ml_duckdb_appender_types"
 external appender_nullable : appender -> bool array = "ml_duckdb_appender_nullable"
+external appender_select_columns : appender -> string array -> int array -> unit = "ml_duckdb_appender_select_columns"
 external append_rows : appender -> append_cell array array -> unit = "ml_duckdb_append_rows"
 external clear_appender_input : appender -> unit = "ml_duckdb_clear_appender_input" [@@noalloc]
 external flush_appender : appender -> unit = "ml_duckdb_flush_appender"

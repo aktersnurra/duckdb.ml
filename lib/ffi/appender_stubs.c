@@ -300,6 +300,39 @@ CAMLprim value ml_duckdb_close_appender(value v, value flush) {
     caml_enter_blocking_section(); close_native(p, do_flush, DUCKDB_ML_RUNTIME_RELEASED);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
+/* Restricts the appender to [names] (catalog columns at physical [indices]);
+   omitted columns take their defaults. Types and NULL-ability are remapped to
+   the active order. On failure the physical schema is kept. */
+CAMLprim value ml_duckdb_appender_select_columns(value v, value names, value indices) {
+    CAMLparam3(v, names, indices); appender_owner *p = Appender(v);
+    idx_t n = Wosize_val(names);
+    char **copies = calloc(n ? n : 1, sizeof(char *));
+    int *types = calloc(n ? n : 1, sizeof(int));
+    bool *nullable = calloc(n ? n : 1, sizeof(bool));
+    if (!copies || !types || !nullable) { free(copies); free(types); free(nullable); caml_raise_out_of_memory(); }
+    duckdb_ml_acquired(); duckdb_ml_acquired(); duckdb_ml_acquired();
+    for (idx_t i = 0; i < n; ++i) {
+        idx_t index = (idx_t)Long_val(Field(indices, i));
+        if (index >= p->columns) { error(p, "Declared column index outside the catalog"); break; }
+        types[i] = p->types[index]; nullable[i] = p->nullable[index];
+        copies[i] = copy_string(Field(names, i)); duckdb_ml_acquired();
+    }
+    caml_enter_blocking_section();
+    duckdb_ml_native_work_begin(p->parent);
+    for (idx_t i = 0; i < n && admit_scalar(p); ++i)
+        check(p, duckdb_appender_add_column(p->appender, copies[i]), DUCKDB_ML_RUNTIME_RELEASED);
+    duckdb_ml_native_work_end(p->parent);
+    caml_leave_blocking_section();
+    for (idx_t i = 0; i < n; ++i) if (copies[i]) { free(copies[i]); duckdb_ml_released(); }
+    free(copies); duckdb_ml_released();
+    if (p->status) { free(types); free(nullable); }
+    else {
+        free(p->types); free(p->nullable);
+        p->types = types; p->nullable = nullable; p->columns = n;
+    }
+    duckdb_ml_released(); duckdb_ml_released();
+    caml_process_pending_actions(); CAMLreturn(Val_unit);
+}
 CAMLprim value ml_duckdb_finish_appender_close(value v) { delete_owner(Appender(v)); Appender(v) = NULL; return Val_unit; }
 CAMLprim value ml_duckdb_appender_is_closed(value v) { return Val_bool(Appender(v) == NULL); }
 CAMLprim value ml_duckdb_clear_appender_input(value v) { clear_input(Appender(v)); return Val_unit; }

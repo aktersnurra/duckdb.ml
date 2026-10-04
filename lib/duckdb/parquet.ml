@@ -91,5 +91,22 @@ let export c ~query destination =
          publication admission has returned. Its lease owns this cleanup. *)
       (fun () -> admit_cleanup c; remove temporary))
 
-let fold (_ : connection) (_ : path list) _ ~row:_ ~init:_ ~f:_ = failwith "Duckdb.Parquet.fold: not implemented"
-let fold_table (_ : connection) (_ : path list) _ ~init:_ ~f:_ = failwith "Duckdb.Parquet.fold_table: not implemented"
+(* Typed decoding: each file is one oneshot request over the same columns. *)
+let fold c paths fields ~row ~init ~f =
+  let read p = "SELECT * FROM read_parquet(" ^ literal p ^ ")" in
+  let core sql result = Result.map_error result ~f:(fun error -> { Request.context = Request.Query sql; cause = Request.Core error }) in
+  let rec loop paths acc =
+    match paths with
+    | [] -> Ok acc
+    | p :: rest ->
+      let sql = read p in
+      let* () = core sql (checkpoint c) in
+      let stopped = ref false in
+      let* acc = Request.fold_on c (Request.many ~oneshot:true Fields.[] fields ~row sql) ~init:acc
+        ~f:(fun value acc -> Result.map (f value acc) ~f:(fun step ->
+          (match step with Query.Stop _ -> stopped := true | Query.Continue _ -> ()); step)) in
+      if !stopped then Ok acc else loop rest acc in
+  if List.is_empty paths then core "read_parquet" (Error (Invalid_configuration "Parquet read requires at least one file"))
+  else loop paths init
+let fold_table c paths (Request.Table_def t : (_, _) Request.table) ~init ~f =
+  fold c paths (Request.fields_of_columns t.columns) ~row:t.row ~init ~f

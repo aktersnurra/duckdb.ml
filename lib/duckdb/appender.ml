@@ -5,7 +5,7 @@ module F = Duckdb_ffi
 module S = Scalar
 type cell = Cell : 'a S.field * 'a -> cell
 type appender = { native : F.appender; child : child; tx : transaction;
-                  types : int array; nullable : bool array; mutable failure : error option }
+                  mutable types : int array; mutable nullable : bool array; mutable failure : error option }
 let status native = native_status (F.appender_status native) ~message:(fun () -> F.appender_message native)
 let connection a = transaction_connection a.tx
 (* The first failure sticks to the appender; every failure poisons the transaction. *)
@@ -135,3 +135,11 @@ let with_appender_transaction tx ?schema table ~f =
   | Error raised -> poison_transaction tx interrupted; reraise raised
 let with_appender c ?schema table ~f =
   with_transaction c ~f:(fun tx -> with_appender_transaction tx ?schema table ~f)
+
+let child a = a.child
+let types a = a.types
+let select_columns a ~names ~indices = operation a (fun () ->
+  F.appender_select_columns a.native names indices;
+  let+ () = status a.native in
+  a.types <- F.appender_types a.native;
+  a.nullable <- F.appender_nullable a.native)

@@ -1,15 +1,13 @@
 open! Base
-open Resource
 
 type ('columns, 'row) t = ('columns, 'row) Request.table
 module Columns = Columns
 
-let unimplemented () = failwith "Duckdb.Table: not implemented"
-let declare ?(schema = "main") name columns ~row = Request.Table_def { schema; name; columns; row }
-let select _ = unimplemented ()
-let insert _ = unimplemented ()
-type ('columns, 'row) appender = { table : ('columns, 'row) t; core : Appender.appender }
-let with_appender (_ : connection) _ ~f:_ = unimplemented ()
-let with_appender_transaction (_ : transaction) _ ~f:_ = unimplemented ()
-let append (_ : (_, _) appender) _ = unimplemented ()
-let flush (_ : (_, _) appender) = unimplemented ()
+let declare = Request.declare_table
+let select (Request.Table_def t : (_, _) t) = t.select
+let insert (Request.Table_def t : (_, _) t) = t.insert
+type ('columns, 'row) appender = ('columns, 'row) Request.appender
+let with_appender c table ~f = Request.Connection.with_transaction c ~f:(fun tx -> Request.with_appender_transaction tx table ~f)
+let with_appender_transaction = Request.with_appender_transaction
+let append = Request.append
+let flush = Request.flush

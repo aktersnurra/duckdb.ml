@@ -174,6 +174,10 @@ val appender_status : appender -> int
 val appender_message : appender -> string
 val appender_types : appender -> int array
 val appender_nullable : appender -> bool array
+
+(** Restricts the appender to the named catalog columns, given with their
+    physical indices; omitted columns take defaults. Status reports failure. *)
+val appender_select_columns : appender -> string array -> int array -> unit
 val append_rows : appender -> append_cell array array -> unit
 val clear_appender_input : appender -> unit
 val flush_appender : appender -> unit

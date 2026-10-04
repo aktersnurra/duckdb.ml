@@ -222,3 +222,4 @@
 (rule (alias runtest)
  (deps check_request_types.sh ../lib/duckdb/duckdb.mli (glob_files request_compile/*))
  (action (run bash %{dep:check_request_types.sh} %{ocamlc})))
+(test (name test_table) (modules test_table) (libraries base duckdb duckdb-ffi))

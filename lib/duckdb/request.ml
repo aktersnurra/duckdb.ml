@@ -12,8 +12,11 @@ type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows
 type ('params, 'row, 'multiplicity) t =
   { id : int; sql : string; oneshot : bool; multiplicity : multiplicity;
     params : 'params params; rows : 'row rows }
+(* A declared table; its SELECT and INSERT are built once so that they share
+   statement-cache entries. *)
 type ('columns, 'row) table =
-  Table_def : { schema : string; name : string; columns : ('columns, 'fn, 'row) Columns.t; row : 'fn }
+  Table_def : { schema : string; name : string; columns : ('columns, 'fn, 'row) Columns.t; row : 'fn;
+                select : (unit, 'row, many) t; insert : ('columns, unit, zero) t }
     -> ('columns, 'row) table
 
 (* Cache identity: two requests never share a statement, even with equal SQL. *)
@@ -229,6 +232,91 @@ let run_find c within r args =
 let run_fold c within r args ~init ~f =
   run c within r args ~consume:(fun context result -> fold_result context r.rows result ~init ~f)
 
+let fold_on c r ~init ~f = run_fold c None r Args.[] ~init ~f
+
+(* Declared tables. *)
+let rec fields_of_columns : type l f r. (l, f, r) Columns.t -> (l, f, r) Fields.t = function
+  | Columns.[] -> Fields.[]
+  | Columns.((_, codec) :: columns) -> Fields.(codec :: fields_of_columns columns)
+let rec column_names : type l f r. (l, f, r) Columns.t -> string list = function
+  | Columns.[] -> []
+  | Columns.((name, _) :: columns) -> name :: column_names columns
+let quote name = "\"" ^ String.substr_replace_all name ~pattern:"\"" ~with_:"\"\"" ^ "\""
+let declare_table ?(schema = "main") name columns ~row =
+  let names = column_names columns and fields = fields_of_columns columns in
+  let target = quote schema ^ "." ^ quote name in
+  let listed = String.concat ~sep:", " (List.map names ~f:quote) in
+  let select = many Fields.[] fields ~row ("SELECT " ^ listed ^ " FROM " ^ target) in
+  let insert = exec fields ("INSERT INTO " ^ target ^ " (" ^ listed ^ ") VALUES ("
+    ^ String.concat ~sep:", " (List.map names ~f:(fun _ -> "?")) ^ ")") in
+  Table_def { schema; name; columns; row; select; insert }
+
+(* Typed appender: the declaration is checked against the catalog, in the
+   appender's own transaction snapshot, before any row is accepted. *)
+type ('columns, 'row) appender = { table : ('columns, 'row) table; core : Appender.appender }
+let table_context (Table_def t) = Table { schema = t.schema; name = t.name }
+(* Poisons a transaction whose typed table operation failed without a core error. *)
+let typed_failure = Native_error "Typed table operation failed; transaction must roll back"
+let catalog_columns = many Fields.[string; string] Fields.[string; bool] ~row:(fun name default -> name, default)
+  "SELECT column_name, column_default IS NOT NULL FROM duckdb_columns() \
+   WHERE database_name = current_database() AND schema_name = ? AND table_name = ? ORDER BY column_index"
+let check_declaration names catalog =
+  let position name = List.findi catalog ~f:(fun _ (catalog_name, _) -> String.equal name catalog_name) in
+  match List.find names ~f:(fun name -> Option.is_none (position name)) with
+  | Some name -> Error (Unknown_column { name })
+  | None ->
+    match List.find catalog ~f:(fun (name, has_default) ->
+      not has_default && not (List.mem names name ~equal:String.equal)) with
+    | Some (name, _) -> Error (Missing_column { name })
+    | None -> Ok (List.map names ~f:(fun name -> fst (Option.value_exn (position name))))
+let open_typed tx (Table_def t as table) =
+  let context = table_context table in
+  let c = transaction_connection tx in
+  let in_table result = Result.map_error result ~f:(fun e -> { e with context }) in
+  let* catalog = in_table (collect_rows c (Some tx) catalog_columns Args.[t.schema; t.name]) in
+  let names = column_names t.columns in
+  let* indices = match catalog with
+    | [] -> Ok [] (* opening the appender reports the missing table *)
+    | _ :: _ ->
+      Result.map_error (check_declaration names catalog) ~f:(fun cause ->
+        poison_transaction tx typed_failure; { context; cause }) in
+  let* a = core context (Appender.open_appender tx ~schema:t.schema t.name) in
+  let checked =
+    let* () =
+      if List.equal Int.equal indices (List.init (List.length catalog) ~f:Fn.id) then Ok ()
+      else core context (Appender.select_columns a ~names:(Array.of_list names) ~indices:(Array.of_list indices)) in
+    with_context context (check_types ~declared:(scalar_ids (fields_of_columns t.columns))
+      ~actual:(Appender.types a)
+      ~count_error:(fun expected actual -> Core (Data_error (Scalar.Column_count { expected; actual })))) in
+  match checked with
+  | Ok () -> Ok { table; core = a }
+  | Error _ as error -> poison_transaction tx typed_failure; force_close_child (Appender.child a); error
+let with_appender_transaction tx table ~f =
+  let context = table_context table in
+  let* a = open_typed tx table in
+  let primary = ref None in
+  let work () =
+    match f a with
+    | Error e -> primary := Some e; poison_transaction tx typed_failure; Ok (Error e)
+    | Ok x -> Ok (Result.map (core context (Appender.close_appender a.core)) ~f:(fun () -> x)) in
+  match capture_all (fun () -> scope work (fun () -> force_close_child (Appender.child a.core))) with
+  | Ok (Ok outcome) -> outcome
+  | Ok (Error e) -> poison_transaction tx e; Error { context; cause = Core e }
+  | Error (exn, backtrace) ->
+    poison_transaction tx typed_failure;
+    match !primary with
+    | Some e -> Stdlib.Printexc.raise_with_backtrace (Cleanup_exception (e, exn)) backtrace
+    | None -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+(* A codec rejection rejects the whole batch before any native row. *)
+let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
+  let (Table_def t) = a.table in
+  let context = table_context a.table in
+  let fields = fields_of_columns t.columns in
+  let* rows = with_context context (Result.all (List.map rows ~f:(fun args -> encode_args fields args ~index:1))) in
+  let cells = List.map rows ~f:(List.map ~f:(fun (Bound (field, value)) -> Appender.Cell (field, value))) in
+  core context (Appender.append_rows a.core cells)
+let flush a = core (table_context a.table) (Appender.flush_appender a.core)
+
 let transaction_outcome =
   { rollback_failed = (fun primary rollback -> { context = primary.context; cause = Rollback_failed { primary; rollback } });
     cleanup_failed = (fun primary exn -> Cleanup_exception (primary, exn)) }
@@ -245,7 +333,10 @@ module Connection = struct
   let with_transaction c ~f =
     with_transaction_lifted ~lift:(fun error -> { context = Transaction; cause = Core error })
       ~outcome:transaction_outcome c ~f
-  let ingest _ _ _ ~flush:_ = failwith "Duckdb.Request.Connection.ingest: not implemented"
+  let ingest c table batches ~flush:explicit =
+    with_transaction c ~f:(fun tx -> with_appender_transaction tx table ~f:(fun a ->
+      let* () = List.fold batches ~init:(Ok ()) ~f:(fun acc rows -> let* () = acc in append a rows) in
+      if explicit then flush a else Ok ()))
 end
 module Transaction = struct
   type owner = transaction

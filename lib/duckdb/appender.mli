@@ -31,3 +31,10 @@ val close_appender : appender -> (unit, error) result
     drained on exit; a Busy implicit close rolls back rather than committing. *)
 val with_appender : connection -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
 val with_appender_transaction : transaction -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
+
+(* Private typed-table seam. [select_columns] restricts an open appender to the
+   named catalog columns (with their physical indices); omitted columns take
+   their defaults and [types] then follows the active order. *)
+val child : appender -> child
+val types : appender -> int array
+val select_columns : appender -> names:string array -> indices:int array -> (unit, error) result
