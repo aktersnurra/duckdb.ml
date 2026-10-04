@@ -83,3 +83,24 @@ val parquet_export : t -> query:string -> destination:string -> (unit, error) re
     failed replacement initiates the same single drain, without retry. Waiter
     cancellation cannot abandon it; repeated callers see the shared outcome. *)
 val shutdown : t -> (unit, error) result
+
+(** Typed requests over the pool, with the admission, retirement, cancellation
+    and shutdown rules of [query]. A typed request always retires its
+    connection, so the statement cache never applies. A request error is
+    [Request]; an adapter error is [Adapter]; caller cancellation raises as for
+    every other operation. *)
+module Request : sig
+  type nonrec error = Adapter of error | Request of Duckdb.Request.request_error
+  val exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result
+  val find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result
+  val find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row option, error) result
+  val collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    ('row list, error) result
+  val fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
+    f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) -> ('a, error) result
+  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) -> ('a, error) result
+  val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
+
+  (** The same operations as an instance, for code generic over backends. *)
+  module Generic : Duckdb.Request.CONNECTION with type owner = t and type error = error and type 'a future = 'a
+end

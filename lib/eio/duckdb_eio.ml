@@ -296,3 +296,33 @@ let shutdown t =
       let bt = Stdlib.Printexc.get_raw_backtrace () in
       let result = protected (fun () -> Eio.Promise.await t.shutdown_done) in
       propagate_cancellation cancellation bt (errors result))
+
+module Request = struct
+  type nonrec error = Adapter of error | Request of Duckdb.Request.request_error
+  (* A typed request's own outcome is the worker payload; cancellation and
+     lifecycle failures keep the adapter's rules. Retires its connection. *)
+  let typed pool work =
+    match submit pool ~reuse:false (fun slot bridge -> Ok (work slot bridge)) with
+    | Ok (Ok value) -> Ok value
+    | Ok (Error e) -> Error (Request e)
+    | Error e -> Error (Adapter e)
+  let exec pool r args = typed pool (fun slot bridge -> W.request_exec slot bridge r args)
+  let find pool r args = typed pool (fun slot bridge -> W.request_find slot bridge r args)
+  let find_opt pool r args = typed pool (fun slot bridge -> W.request_find_opt slot bridge r args)
+  let collect pool r args = typed pool (fun slot bridge -> W.request_collect slot bridge r args)
+  let fold pool r args ~init ~f = typed pool (fun slot bridge -> W.request_fold slot bridge r args ~init ~f)
+  let with_transaction pool ~f = typed pool (fun slot bridge -> W.request_transaction slot bridge ~f)
+  let ingest pool table batches ~flush = typed pool (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
+  module Generic = struct
+    type owner = t
+    type nonrec error = error
+    type 'a future = 'a
+    let exec = exec
+    let find = find
+    let find_opt = find_opt
+    let collect = collect
+    let fold = fold
+    let with_transaction = with_transaction
+    let ingest = ingest
+  end
+end

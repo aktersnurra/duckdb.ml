@@ -12,7 +12,7 @@ compile() {
 }
 compile -o "$out/owned.cmi" "$root/test/eio/compile/owned.mli"
 compile -o "$out/owned.cmo" "$root/test/eio/compile/owned.ml"
-for name in borrowed_escape borrowed_domain forge_pool private_worker private_resource; do
+for name in borrowed_escape borrowed_domain forge_pool private_worker private_resource request_promise; do
   cp "$root/test/eio/compile/$name.ml.fail" "$out/$name.ml"
   if compile -o "$out/$name.cmo" "$out/$name.ml" >"$out/$name.log" 2>&1; then
     echo "unexpected Eio mode acceptance: $name" >&2
@@ -34,6 +34,10 @@ for name in borrowed_escape borrowed_domain forge_pool private_worker private_re
   forge_pool) grep -Fq 'type "unit"' "$out/$name.log" ;;
   private_worker) grep -Fq 'Unbound module "Duckdb_eio__Worker_owner"' "$out/$name.log" ;;
   private_resource) grep -Fq 'Unbound module "Duckdb__Resource"' "$out/$name.log" ;;
+  request_promise)
+    grep -Fq 'Eio.Promise.t' "$out/$name.log"
+    grep -Fq 'result' "$out/$name.log"
+    ;;
   esac
 done
-echo "Eio modes: owned transaction result compiles; borrowed callback escape/domain handoff and private/opaque forgeries reject"
+echo "Eio modes: owned transaction result compiles; borrowed callback escape/domain handoff, private/opaque forgeries and typed results awaited as promises reject"

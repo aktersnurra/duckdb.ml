@@ -1,0 +1,6 @@
+(* Eio typed requests return plain results in the calling fiber, not promises. *)
+let one pool =
+  Eio.Promise.await
+    (Duckdb_eio.Request.find pool
+       (Duckdb.Request.one Duckdb.Fields.[] Duckdb.Fields.[int64] ~row:(fun x -> x) "SELECT 1::BIGINT")
+       Duckdb.Args.[])

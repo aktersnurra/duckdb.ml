@@ -113,3 +113,43 @@ val cancel : 'a request -> (cancel_ack, error) result
     join guarantee. OOM/asynchronous bookkeeping, arbitrary signals, unsafe
     concurrency and finalizer/whole-process leak guarantees are outside scope. *)
 val shutdown : t -> ((unit, failure) result Async.Deferred.t, error) result
+
+(** Typed requests over the pool. Each is one dispatched request with the same
+    admission, retirement, cancellation and shutdown rules as [query]; a typed
+    request always retires its connection, so the statement cache never applies.
+    The generic instance awaits completion; a request error is [Request], an
+    adapter failure (including cancellation) is [Adapter]. *)
+module Request : sig
+  (** Cancellable forms (below): the existing [request], [completion] and
+      [cancel] apply, and the request's own outcome is the payload. *)
+  type 'a submitted = (('a, Duckdb.Request.request_error) result request, error) result
+
+  type nonrec error = Adapter of failure | Request of Duckdb.Request.request_error
+  val exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result Async.Deferred.t
+  val find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result Async.Deferred.t
+  val find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    ('row option, error) result Async.Deferred.t
+  val collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    ('row list, error) result Async.Deferred.t
+  val fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
+    f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) -> ('a, error) result Async.Deferred.t
+  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) ->
+    ('a, error) result Async.Deferred.t
+  val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
+    (unit, error) result Async.Deferred.t
+
+  (** The same operations as an instance, for code generic over backends. *)
+  module Generic : Duckdb.Request.CONNECTION
+    with type owner = t and type error = error and type 'a future = 'a Async.Deferred.t
+
+  val submit_exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> unit submitted
+  val submit_find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> 'row submitted
+  val submit_find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    'row option submitted
+  val submit_collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    'row list submitted
+  val submit_fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    init:'a -> f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) -> 'a submitted
+  val submit_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) -> 'a submitted
+  val submit_ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> unit submitted
+end

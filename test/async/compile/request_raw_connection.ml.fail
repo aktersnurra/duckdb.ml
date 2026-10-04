@@ -1,0 +1,5 @@
+(* The Async typed-request instance runs on a pool, never a raw core owner. *)
+let all (c : Duckdb.connection) =
+  Duckdb_async.Request.collect c
+    (Duckdb.Request.many Duckdb.Fields.[] Duckdb.Fields.[int64] ~row:(fun x -> x) "SELECT 1::BIGINT")
+    Duckdb.Args.[]

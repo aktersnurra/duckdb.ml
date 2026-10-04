@@ -41,6 +41,10 @@ type _ operation =
   | Ingest : string option * string * Duckdb.cell list list list * bool -> unit operation
   | Parquet_fold_rows : string list * 'row Duckdb.Row.t * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
   | Parquet_export : string * string -> unit operation
+  (* A typed request: its own outcome is the payload, so request errors reach
+     the caller as values and cancellation/failures keep the adapter's rules. *)
+  | Typed : (W.slot -> Duckdb.Bridge.request -> ('a, Duckdb.Request.request_error) result)
+      -> ('a, Duckdb.Request.request_error) result operation
 
 type t =
   { limits : Limits.t
@@ -260,7 +264,8 @@ and dispatch : type a. t -> slot -> a request -> unit = fun pool slot r ->
           | Fold_rows (sql, row, init, f) -> W.fold_rows owner bridge sql row ~init ~f
           | Ingest (schema, table, batches, flush) -> W.ingest owner bridge ~schema ~table ~batches ~flush
           | Parquet_fold_rows (names, row, init, f) -> W.parquet_fold_rows owner bridge names row ~init ~f
-          | Parquet_export (query, destination) -> W.parquet_export owner bridge ~query ~destination in
+          | Parquet_export (query, destination) -> W.parquet_export owner bridge ~query ~destination
+          | Typed work -> Ok (work owner bridge) in
         core (fun () -> run operation) in
     with_gate gate (fun () -> gate.execution <- Returned);
     result in
@@ -380,3 +385,45 @@ let shutdown pool =
       Option.iter (Ivar.peek pool.shutdown_result) ~f:(notify observer));
     under_producer pool (fun () -> stop pool);
     Ok (Ivar.read pool.shutdown_result))
+
+module Request = struct
+  (* Submission errors are the adapter's own admission errors. *)
+  type 'a submitted = (('a, Duckdb.Request.request_error) result request, error) result
+  type nonrec error = Adapter of failure | Request of Duckdb.Request.request_error
+  let typed pool work = admit pool (Typed work)
+  let submit_exec pool r args = typed pool (fun slot bridge -> W.request_exec slot bridge r args)
+  let submit_find pool r args = typed pool (fun slot bridge -> W.request_find slot bridge r args)
+  let submit_find_opt pool r args = typed pool (fun slot bridge -> W.request_find_opt slot bridge r args)
+  let submit_collect pool r args = typed pool (fun slot bridge -> W.request_collect slot bridge r args)
+  let submit_fold pool r args ~init ~f = typed pool (fun slot bridge -> W.request_fold slot bridge r args ~init ~f)
+  let submit_transaction pool ~f = typed pool (fun slot bridge -> W.request_transaction slot bridge ~f)
+  let submit_ingest pool table batches ~flush =
+    typed pool (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
+  (* Admission is checked before any Async value is created. *)
+  let await = function
+    | Error e -> return (Error (Adapter (Expected e)))
+    | Ok r ->
+      Ivar.read r.result >>| function
+      | Ok (Ok value) -> Ok value
+      | Ok (Error e) -> Error (Request e)
+      | Error failure -> Error (Adapter failure)
+  let exec pool r args = await (submit_exec pool r args)
+  let find pool r args = await (submit_find pool r args)
+  let find_opt pool r args = await (submit_find_opt pool r args)
+  let collect pool r args = await (submit_collect pool r args)
+  let fold pool r args ~init ~f = await (submit_fold pool r args ~init ~f)
+  let with_transaction pool ~f = await (submit_transaction pool ~f)
+  let ingest pool table batches ~flush = await (submit_ingest pool table batches ~flush)
+  module Generic = struct
+    type owner = t
+    type nonrec error = error
+    type 'a future = 'a Deferred.t
+    let exec = exec
+    let find = find
+    let find_opt = find_opt
+    let collect = collect
+    let fold = fold
+    let with_transaction = with_transaction
+    let ingest = ingest
+  end
+end

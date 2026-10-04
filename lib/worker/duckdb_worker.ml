@@ -28,6 +28,24 @@ module type S = sig
   val parquet_fold_rows : slot -> D.Bridge.request -> string list -> 'row D.Row.t -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.error) result) -> ('a, D.error) result
   val parquet_export : slot -> D.Bridge.request -> query:string -> destination:string -> (unit, D.error) result
+
+  (** Typed requests (each one bridged request). Bridge failures are reported
+      as [Core] request errors; row callbacks run inside the callback marker. *)
+  val request_exec : slot -> D.Bridge.request -> ('p, unit, [< `Zero ]) D.Request.t -> 'p D.Args.t ->
+    (unit, D.Request.request_error) result
+  val request_find : slot -> D.Bridge.request -> ('p, 'row, [< `One ]) D.Request.t -> 'p D.Args.t ->
+    ('row, D.Request.request_error) result
+  val request_find_opt : slot -> D.Bridge.request -> ('p, 'row, [< `Zero | `One ]) D.Request.t -> 'p D.Args.t ->
+    ('row option, D.Request.request_error) result
+  val request_collect : slot -> D.Bridge.request -> ('p, 'row, [< `Zero | `One | `Many ]) D.Request.t ->
+    'p D.Args.t -> ('row list, D.Request.request_error) result
+  val request_fold : slot -> D.Bridge.request -> ('p, 'row, [< `Zero | `One | `Many ]) D.Request.t ->
+    'p D.Args.t -> init:'a -> f:('row -> 'a -> ('a D.step, D.Request.request_error) result) ->
+    ('a, D.Request.request_error) result
+  val request_transaction : slot -> D.Bridge.request ->
+    f:(D.transaction -> ('a, D.Request.request_error) result) -> ('a, D.Request.request_error) result
+  val table_ingest : slot -> D.Bridge.request -> ('c, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
+    (unit, D.Request.request_error) result
   val is_in_callback : unit -> bool
 end
 
@@ -83,4 +101,27 @@ module Make (Probe : Probe) = struct
     bridged slot request (fun c ->
       let* path = D.Parquet.path destination in
       D.Parquet.export c ~query path)
+
+  module R = D.Request
+  let typed slot request ~context work =
+    match bridged slot request (fun c -> Ok (work c)) with
+    | Ok result -> result
+    | Error error -> Error { R.context; cause = R.Core error }
+  let in_query r = R.Query (R.query r)
+  let request_exec slot request r args = typed slot request ~context:(in_query r) (fun c -> R.Connection.exec c r args)
+  let request_find slot request r args = typed slot request ~context:(in_query r) (fun c -> R.Connection.find c r args)
+  let request_find_opt slot request r args =
+    typed slot request ~context:(in_query r) (fun c -> R.Connection.find_opt c r args)
+  let request_collect slot request r args =
+    typed slot request ~context:(in_query r) (fun c -> R.Connection.collect c r args)
+  let request_fold slot request r args ~init ~f =
+    typed slot request ~context:(in_query r) (fun c -> R.Connection.fold c r args ~init ~f:(in_callback f))
+  let request_transaction slot request ~f =
+    typed slot request ~context:R.Transaction (fun c ->
+      R.Connection.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
+  let table_ingest slot request table batches ~flush =
+    typed slot request ~context:R.Transaction (fun c ->
+      R.Connection.with_transaction c ~f:(fun tx -> D.Table.with_appender_transaction tx table ~f:(fun appender ->
+        let* () = List.fold_result batches ~init:() ~f:(fun () batch -> D.Table.append appender batch) in
+        if flush then (Probe.explicit_flush (); D.Table.flush appender) else Ok ())))
 end

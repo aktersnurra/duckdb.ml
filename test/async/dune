@@ -37,3 +37,5 @@
 (rule (alias runtest) (action (run timeout 120 ./%{exe:test_duckdb_async.exe})))
 (rule (alias runtest) (deps run_negative_controls.sh)
  (action (run bash %{dep:run_negative_controls.sh} ./%{exe:test_duckdb_async.exe})))
+(test (name typed_request_async) (modules typed_request_async)
+ (libraries core core_unix async duckdb duckdb-async duckdb-ffi))

@@ -36,7 +36,8 @@
  (deps check_modes.sh
        compile/owned.mli compile/owned.ml
        compile/borrowed_escape.ml.fail compile/borrowed_domain.ml.fail
-       compile/forge_pool.ml.fail compile/private_worker.ml.fail compile/private_resource.ml.fail)
+       compile/forge_pool.ml.fail compile/private_worker.ml.fail compile/private_resource.ml.fail
+       compile/request_promise.ml.fail)
  (action (run bash %{dep:check_modes.sh})))
 
 
@@ -62,3 +63,6 @@
   -cclib -Wl,--wrap=caml_sys_getcwd
 ))
 (rule (alias runtest) (action (run timeout 90 ./%{exe:parquet_eio.exe})))
+
+(test (name request_eio) (modules request_eio)
+ (libraries base eio_main unix duckdb duckdb-eio duckdb-ffi))

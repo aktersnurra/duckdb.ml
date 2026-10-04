@@ -34,6 +34,24 @@ module type S = sig
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, Duckdb.error) result
   val parquet_export : slot -> Duckdb.Bridge.request -> query:string -> destination:string -> (unit, Duckdb.error) result
 
+  (** Typed requests (each one bridged request). Bridge failures are reported
+      as [Core] request errors; row callbacks run inside the callback marker. *)
+  val request_exec : slot -> Duckdb.Bridge.request -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    (unit, Duckdb.Request.request_error) result
+  val request_find : slot -> Duckdb.Bridge.request -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    ('row, Duckdb.Request.request_error) result
+  val request_find_opt : slot -> Duckdb.Bridge.request -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+    ('row option, Duckdb.Request.request_error) result
+  val request_collect : slot -> Duckdb.Bridge.request -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t ->
+    'p Duckdb.Args.t -> ('row list, Duckdb.Request.request_error) result
+  val request_fold : slot -> Duckdb.Bridge.request -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t ->
+    'p Duckdb.Args.t -> init:'a -> f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) ->
+    ('a, Duckdb.Request.request_error) result
+  val request_transaction : slot -> Duckdb.Bridge.request ->
+    f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) -> ('a, Duckdb.Request.request_error) result
+  val table_ingest : slot -> Duckdb.Bridge.request -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
+    (unit, Duckdb.Request.request_error) result
+
   (** Thread-local callback marker; reading it never touches a scheduler. *)
   val is_in_callback : unit -> bool
 end
