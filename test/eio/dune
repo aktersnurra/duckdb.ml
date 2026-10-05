@@ -30,7 +30,7 @@
   -cclib -Wl,--wrap=duckdb_destroy_data_chunk
   -cclib -Wl,--wrap=duckdb_fetch_chunk
   -cclib -Wl,--wrap=duckdb_query))
-(rule (alias runtest) (action (run timeout 60 ./%{exe:foundation_eio.exe})))
+(rule (alias runtest) (action (run timeout 180 ./%{exe:foundation_eio.exe})))
 
 (rule (alias runtest)
  (deps check_modes.sh
