@@ -12,7 +12,7 @@ let rec is_break = function
   | Rollback_exception (e,_) | Cleanup_exception (_,e) -> is_break e
   | Exn.Finally (a,b) -> is_break a || is_break b
   | _ -> false
-let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_rows (ok (execute_prepared p)) Row.(Column (Required Int64,Empty)) ~init:0L ~f:(fun (n,()) _ -> Ok (Stop n))))
+let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_rows (ok (execute_prepared p)) Row.(Column (Codec.Values.int64,Empty)) ~init:0L ~f:(fun (n,()) _ -> Ok (Stop n))))
 let () =
   let mode = Stdlib.Sys.argv.(1) in
   let leave = String.is_suffix mode ~suffix:"-leave" in
@@ -38,7 +38,7 @@ let () =
             inject "create";
             with_appender_transaction tx "a" ~f:(fun a ->
               inject "append";
-              ok (append_rows a [[Cell (Required String,String.make 10000 'x' ^ "\000end")]]);
+              ok (append_rows a [[Cell (String, Some (String.make 10000 'x' ^ "\000end"))]]);
               inject "flush"; ok (flush_appender a);
               if String.equal mode "callback" then (trigger ();Stdlib.Gc.minor ());
               if String.is_prefix mode ~prefix:"discard" then (

@@ -14,10 +14,10 @@ let test () =
         Result.map (Duckdb.execute_transaction tx "INSERT INTO installed VALUES (2)") ~f:(fun () -> 42)))) in
     require "installed completion shared" (phys_equal (ok (A.completion r)) (ok (A.completion r)));
     ok (A.completion r) >>= fun result -> require "installed owned transaction" (ok result = 42);
-    let row = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+    let row = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
     await (A.query p "SELECT i::BIGINT FROM installed ORDER BY i" row) >>= fun decoded ->
     require "installed owned typed query" (List.length (ok decoded) = 2);
-    let batches = [[ [Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 3L)] ]] in
+    let batches = [[ [Duckdb.Cell (Duckdb.Scalar.Int64, Some 3L)] ]] in
     await (A.ingest p ~schema:None ~table:"installed" ~batches ~flush:true) >>= fun result -> ok result;
     await (A.fold_rows p "SELECT i::BIGINT FROM installed ORDER BY i" row ~init:0L
       ~f:(fun (value, ()) total -> Ok (Duckdb.Continue Int64.(total + value)))) >>= fun total ->

@@ -3,7 +3,7 @@ module E = Duckdb_eio
 
 let unwrap = function Ok value -> value | Error _ -> failwith "Eio adapter error"
 let ok = function Ok value -> value | Error _ -> failwith "DuckDB error"
-let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty))
+let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
 let equal_rows = List.equal (fun (left, ()) (right, ()) -> Int64.equal left right)
 
 let run () =
@@ -13,8 +13,8 @@ let run () =
       let pool = unwrap (E.create ~sw limits (ok (Duckdb.Config.create Duckdb.Config.Memory))) in
       assert (Result.is_ok (E.execute pool "CREATE TABLE typed(i BIGINT)"));
       let batches =
-        [ [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L) ]
-          ; [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 2L) ]
+        [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
+          ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ]
           ] ] in
       assert (Result.is_ok (E.ingest pool ~schema:None ~table:"typed" ~batches ~flush:true));
       assert (equal_rows (unwrap (E.query pool "SELECT i FROM typed ORDER BY i" rows)) [1L, (); 2L, ()]);

@@ -12,8 +12,8 @@ let read : type a. t @ local -> int -> int -> a S.t -> a = fun (chunk @ local) c
   | S.Integer { decode; _ } -> decode (F.box_int64 (F.chunk_int64 chunk.native column row))
   | S.Floating { decode; _ } -> decode (F.chunk_float chunk.native column row)
   | S.Bytes -> F.chunk_string chunk.native column row
-let column : type a. t @ local -> column:int -> row:int -> a S.field -> (a, Resource.error) result =
-  fun (chunk @ local) ~column ~row field ->
+let column : type a n. t @ local -> column:int -> row:int -> (a, n) Codec.t -> (a, Resource.error) result =
+  fun (chunk @ local) ~column ~row codec ->
     let columns = F.column_count chunk.native in
     if column < 0 || column >= columns then Error (Resource.Data_error (S.Index { index = column; length = columns }))
     else if row < 0 || row >= length chunk then Error (Resource.Data_error (S.Index { index = row; length = length chunk }))
@@ -22,12 +22,19 @@ let column : type a. t @ local -> column:int -> row:int -> a S.field -> (a, Reso
         match check_type chunk.native column typ with
         | Error e -> Error e
         | Ok () -> if F.chunk_valid chunk.native column row then Ok (Some (read chunk column row typ)) else Ok None in
-      match field with
-      | S.Nullable typ -> get typ [@nontail]
-      | S.Required typ ->
-        (match get typ with
-         | Error e -> Error e | Ok (Some x) -> Ok x
-         | Ok None -> Error (Resource.Data_error (S.Null { column; row })))
+      let decoded decode b = Result.map_error (decode b) ~f:(fun reason ->
+        Resource.Data_error (S.Decode_rejected { column; row; reason })) in
+      match codec with
+      | Codec.Nullable (Codec.Plan plan) ->
+        (match get plan.scalar with
+         | Error e -> Error e
+         | Ok None -> Ok None
+         | Ok (Some b) -> Result.map (decoded plan.decode b) ~f:Option.some)
+      | Codec.Non_null (Codec.Plan plan) ->
+        (match get plan.scalar with
+         | Error e -> Error e
+         | Ok None -> Error (Resource.Data_error (S.Null { column; row }))
+         | Ok (Some b) -> decoded plan.decode b)
 let rec width : type a. a Row.t -> int = function
   | Row.Empty -> 0 | Row.Column (_, rest) -> 1 + width rest | Row.Map (inner, _) -> width inner
 let validate_schema native decoder =
@@ -37,7 +44,9 @@ let validate_schema native decoder =
     let rec loop : type a. int -> a Row.t -> (unit, Resource.error) result = fun index -> function
       | Row.Empty -> Ok () | Row.Map (inner, _) -> loop index inner
       | Row.Column (field, rest) ->
-        let checked = match S.witness field with S.Packed typ -> check_type native index typ in
+        let checked = match field with
+          | Codec.Non_null (Codec.Plan p) -> check_type native index p.scalar
+          | Codec.Nullable (Codec.Plan p) -> check_type native index p.scalar in
         Result.bind checked ~f:(fun () -> loop (index + 1) rest) in
     loop 0 decoder
 let decode (chunk @ local) row decoder =

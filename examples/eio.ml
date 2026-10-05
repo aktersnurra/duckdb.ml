@@ -50,10 +50,10 @@ let run () =
           | Error error -> failwith ("Eio shutdown: " ^ error_name error))
         ~f:(fun () ->
           require "create example table" (E.execute pool "CREATE TABLE example(i BIGINT)");
-          let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 40L) ]
-                            ; [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 2L) ] ] ] in
+          let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 40L) ]
+                            ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ] ] ] in
           require "ingest owned rows" (E.ingest pool ~schema:None ~table:"example" ~batches ~flush:true);
-          let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+          let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
           (match E.query pool "SELECT i FROM example ORDER BY i" rows with
            | Ok values when List.length values = 2 -> ()
            | Ok _ -> failwith "typed query returned an unexpected row count"

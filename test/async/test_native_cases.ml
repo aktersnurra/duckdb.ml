@@ -146,7 +146,7 @@ let replacement_stop () = with_pool (fun p ->
 let count_rows tx =
   Duckdb.with_prepared_transaction tx "select count(*)::BIGINT from t" ~f:(fun prepared ->
     Result.bind (Duckdb.execute_prepared prepared) ~f:(fun result ->
-      Duckdb.fold_rows result Duckdb.Row.(Column (Required Int64, Empty)) ~init:0L
+      Duckdb.fold_rows result Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) ~init:0L
         ~f:(fun (count, ()) _ -> Ok (Duckdb.Stop count))))
 let transaction_exclusion () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
@@ -197,7 +197,7 @@ let heartbeat_typed seam ~cancel () = with_pool (fun p ->
           Ok (Duckdb.Stop ())))
     | Appender_clear | Appender_destroy ->
       Duckdb.with_appender_transaction tx "t" ~f:(fun appender ->
-        ok (Duckdb.append_rows appender [[Duckdb.Cell (Required Int64, 42L)]]);
+        ok (Duckdb.append_rows appender [[Duckdb.Cell (Duckdb.Scalar.Int64, Some 42L)]]);
         native_hold seam;
         if cancel then Error (Duckdb.Native_error "intentional rollback") else Ok ())
     | _ -> assert false)) in
@@ -251,7 +251,7 @@ let result_error () = with_pool (fun p ->
   let r = ok (A.transaction p ~f:(fun tx ->
     Duckdb.with_prepared_transaction tx "select 'text'::VARCHAR" ~f:(fun prepared ->
       Result.bind (Duckdb.execute_prepared prepared) ~f:(fun result ->
-        Duckdb.fold_rows result Duckdb.Row.(Column (Required Int64, Empty)) ~init:()
+        Duckdb.fold_rows result Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) ~init:()
           ~f:(fun _ () -> Ok (Duckdb.Stop ())))))) in
   complete r >>| fun result ->
   require "typed result error retained" (match result with Error (A.Expected (A.Core (Duckdb.Data_error _))) -> true | _ -> false);

@@ -27,12 +27,12 @@ let () =
             else if String.is_prefix mode ~prefix:"bind-float" then "DOUBLE" else "VARCHAR" in
           D.with_prepared c ("SELECT ?::" ^ bind_kind ^ ", i FROM range(5000) t(i)") ~f:(fun p ->
             if String.is_prefix mode ~prefix:"bind-int" then (
-              inject "bind-int"; ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 42L))
+              inject "bind-int"; ok (D.bind p 1 D.Codec.Values.int64 42L))
             else if String.is_prefix mode ~prefix:"bind-float" then (
-              inject "bind-float"; ok (D.bind p 1 (D.Scalar.Required D.Scalar.Float64) 0.1))
+              inject "bind-float"; ok (D.bind p 1 D.Codec.Values.float64 0.1))
             else if String.is_prefix mode ~prefix:"bind-null" then (
-              inject "bind-null"; ok (D.bind p 1 (D.Scalar.Nullable D.Scalar.String) None))
-            else (inject "bind"; ok (D.bind p 1 (D.Scalar.Required D.Scalar.String) (String.make 10000 'b')));
+              inject "bind-null"; ok (D.bind p 1 (D.Codec.Values.(nullable string)) None))
+            else (inject "bind"; ok (D.bind p 1 D.Codec.Values.string (String.make 10000 'b')));
             if String.is_prefix mode ~prefix:"reset" then (inject "reset"; ok (D.reset p))
             else if String.is_prefix mode ~prefix:"prepared-close" then (
               inject "prepared-close";

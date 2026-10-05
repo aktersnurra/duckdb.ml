@@ -87,23 +87,33 @@ let bind_value : type a. prepared -> int -> a S.t -> a -> unit = fun p index typ
   | S.Bytes -> F.bind_string p.native index id value
 (* Unresolved parameters accept whichever witness the caller supplies. *)
 let accepts actual typ = actual = F.Type_id.invalid || actual = F.Type_id.any || actual = S.native_id typ
-let bind : type a. prepared -> int -> a S.field -> a -> (unit, error) result = fun p index field value ->
+let bind_scalar : type b. prepared -> int -> b S.t -> b option -> (unit, error) result = fun p index typ value ->
   without_result p (fun () ->
     let count = Array.length p.bound in
     if index < 1 || index > count then Error (Data_error (S.Index { index; length = count }))
     else
-      let apply : type b. b S.t -> b option -> (unit, error) result = fun typ value ->
-        let actual = p.parameter_types.(index - 1) in
-        let* () =
-          if accepts actual typ then Ok ()
-          else Error (Data_error (S.Type_mismatch { index; expected = S.name typ; actual })) in
-        p.bound.(index - 1) <- false;
-        Exn.protect ~finally:(fun () -> F.clear_prepared_input p.native)
-          ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
-            (match value with None -> F.bind_null p.native index | Some x -> bind_value p index typ x);
-            let+ () = settled p.connection p.native in
-            p.bound.(index - 1) <- true)) in
-      match field with S.Required typ -> apply typ (Some value) | S.Nullable typ -> apply typ value)
+      let actual = p.parameter_types.(index - 1) in
+      let* () =
+        if accepts actual typ then Ok ()
+        else Error (Data_error (S.Type_mismatch { index; expected = S.name typ; actual })) in
+      p.bound.(index - 1) <- false;
+      Exn.protect ~finally:(fun () -> F.clear_prepared_input p.native)
+        ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
+          (match value with None -> F.bind_null p.native index | Some x -> bind_value p index typ x);
+          let+ () = settled p.connection p.native in
+          p.bound.(index - 1) <- true)))
+
+(* User encoders run before connection admission. *)
+let bind : type a n. prepared -> int -> (a, n) Codec.t -> a -> (unit, error) result = fun p index codec value ->
+  let encoded encode value = Result.map_error (encode value) ~f:(fun reason ->
+    Data_error (S.Encode_rejected { index; reason })) in
+  match codec with
+  | Codec.Non_null (Codec.Plan plan) ->
+    let* b = encoded plan.encode value in bind_scalar p index plan.scalar (Some b)
+  | Codec.Nullable (Codec.Plan plan) ->
+    match value with
+    | None -> bind_scalar p index plan.scalar None
+    | Some v -> let* b = encoded plan.encode v in bind_scalar p index plan.scalar (Some b)
 
 let check_parameter_schema p =
   let fresh = F.prepared_owner (native_connection p.connection) in

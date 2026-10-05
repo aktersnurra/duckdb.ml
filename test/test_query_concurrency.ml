@@ -28,11 +28,11 @@ let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fal
 let () =
   connected (fun c ->
     D.with_prepared c "select ?::BIGINT" ~f:(fun p ->
-      ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 1L);
+      ok (D.bind p 1 (D.Codec.Values.int64) 1L);
       fail_bind ();
-      (match D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 2L with Error (D.Native_error _) -> () | _ -> assert false);
+      (match D.bind p 1 (D.Codec.Values.int64) 2L with Error (D.Native_error _) -> () | _ -> assert false);
       (match D.execute_prepared p with Error (D.Data_error (D.Scalar.Unbound_parameter 1)) -> () | _ -> assert false);
-      ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 3L);
+      ok (D.bind p 1 (D.Codec.Values.int64) 3L);
       let r = ok (D.execute_prepared p) in
       fail_fetch ();
       (match D.fold_chunks r ~init:() ~f:(fun _ () -> assert false) with Error (D.Native_error _) -> () | _ -> assert false);
@@ -66,7 +66,7 @@ let () =
           busy (D.close_result r); busy (D.close_prepared p); busy (D.reset p);
           busy (D.fold_chunks r ~init:() ~f:(fun _ () -> Ok (D.Stop ()))); outcome := Some ()) () in
         join thread; assert (Option.is_some !outcome);
-        assert (Int64.equal (ok (D.column chunk ~column:0 ~row:0 (D.Scalar.Required D.Scalar.Int64))) 42L);
+        assert (Int64.equal (ok (D.column chunk ~column:0 ~row:0 (D.Codec.Values.int64))) 42L);
         Ok (D.Stop ())) in
       result));
   clean (); Stdlib.print_endline "query: live borrowed callback allows concurrent fail-fast aliases without mutex deadlock=ok"
@@ -117,10 +117,10 @@ let () =
           | Some p -> p
           | None -> ok (D.prepare c ("select ?::VARCHAR /*" ^ String.make 100000 'x' ^ "*/")) in
         let text = String.init 200000 ~f:(fun i -> if i % 17 = 0 then '\000' else 'a') in
-        ok (D.bind p 1 (D.Scalar.Required D.Scalar.String) text);
+        ok (D.bind p 1 (D.Codec.Values.string) text);
         let r = ok (D.execute_prepared p) in
         ok (D.fold_chunks r ~init:() ~f:(fun chunk () ->
-          assert (String.equal text (ok (D.column chunk ~column:0 ~row:0 (D.Scalar.Required D.Scalar.String))));
+          assert (String.equal text (ok (D.column chunk ~column:0 ~row:0 (D.Codec.Values.string))));
           Ok (D.Stop ())));
         ok (D.close_prepared p)) () in
       Exn.protect ~finally:(fun () -> release (); join worker; arm 0) ~f:(fun () ->
@@ -140,7 +140,7 @@ let () =
         D.with_connection db ~f:(fun ddl ->
           ok (D.execute c "CREATE TABLE t(x BIGINT)");
           let run prepare = prepare ~f:(fun p ->
-            ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 9007199254740993L);
+            ok (D.bind p 1 (D.Codec.Values.int64) 9007199254740993L);
             if revalidate then ok (D.execute ddl "CREATE TABLE unrelated(y BIGINT)");
             arm point;
             let worker = start D.execute_prepared p in

@@ -12,9 +12,9 @@ let scalar : type a. connection -> string -> a Scalar.t -> a list -> (a -> a -> 
   let p = ok (Parquet.path file) in
   ok (execute c ("CREATE OR REPLACE TABLE scalars(x " ^ Scalar.name typ ^ ")"));
   let expected = None :: List.map values ~f:Option.some in
-  ok (with_appender c "scalars" ~f:(fun a -> append_rows a (List.map expected ~f:(fun x -> [Cell (Nullable typ,x)]))));
+  ok (with_appender c "scalars" ~f:(fun a -> append_rows a (List.map expected ~f:(fun x -> [Cell (typ, x)]))));
   ok (Parquet.export c ~query:"SELECT x FROM scalars ORDER BY rowid" p);
-  let decode paths = ok (Parquet.fold_rows c paths Row.(Column (Nullable typ,Empty)) ~init:[]
+  let decode paths = ok (Parquet.fold_rows c paths Row.(Column (Codec.Values.(nullable (of_scalar typ)),Empty)) ~init:[]
     ~f:(fun (x,()) xs -> Ok (Continue (x::xs)))) |> List.rev in
   assert (List.equal (Option.equal equal) (decode [p]) expected);
   assert (List.equal (Option.equal equal) (decode [p;p]) (expected @ expected));
@@ -52,7 +52,7 @@ let () =
           ~f:(fun () ->
             Stdlib.Sys.chdir unusual_cwd;
             ignore (error (Parquet.path "relative.parquet")));
-        let decoder = Row.(Column (Required Int64,Empty)) in
+        let decoder = Row.(Column (Codec.Values.int64,Empty)) in
         let consume paths = Parquet.fold_rows c paths decoder ~init:0 ~f:(fun _ n -> Ok (Continue (n+1))) in
         ignore (error (consume [])); ignore (error (consume [p]));
         write file ""; ignore (error (consume [p])); write file "PAR1corrupt"; ignore (error (consume [p])); Stdlib.Sys.remove file;
@@ -68,7 +68,7 @@ let () =
         assert (not (Stdlib.Sys.file_exists file)); assert (Array.length (Stdlib.Sys.readdir dir) = 0);
         ok (Parquet.export c ~query:"SELECT 1::BIGINT AS \"quote' ; --\" WHERE false" p);
         assert (ok (consume [p;p]) = 0);
-        ignore (error (Parquet.fold_rows c [p] Row.(Column (Required Float64,Empty)) ~init:() ~f:(fun _ () -> Ok (Continue ()))));
+        ignore (error (Parquet.fold_rows c [p] Row.(Column (Codec.Values.float64,Empty)) ~init:() ~f:(fun _ () -> Ok (Continue ()))));
         Stdlib.Sys.remove file;
         ok (Parquet.export c ~query:"SELECT i AS x FROM range(5000) t(i) -- safe trailing comment" p);
         assert (ok (consume [p;p]) = 10000);

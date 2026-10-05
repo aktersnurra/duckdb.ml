@@ -51,7 +51,7 @@ let callback_cancel () = with_pool (fun sw p ->
     if controlled "release" then require "release invariant" false;
     Stdlib.Atomic.set release true;
     require "callback cancellation settles" (Eio.Promise.await_exn request);
-    let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+    let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
     require "callback cancellation suppresses commit" (match E.query p "SELECT count(*)::BIGINT FROM stage5_callback" rows with Ok [0L, ()] -> true | _ -> false);
     require "callback cancellation settles before reuse" (Result.is_ok (E.execute p "SELECT 1"));
     unwrap (E.shutdown p)))
@@ -137,7 +137,7 @@ let shared_shutdown () = with_pool (fun sw p ->
   require "shared shutdown second settles" (Result.is_ok (Eio.Promise.await_exn second)))
 
 let typed_then_shutdown () = with_pool (fun _ p ->
-  let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+  let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
   require "typed owned result" (match E.query p "SELECT 42::BIGINT" rows with Ok [42L, ()] -> true | _ -> false);
   unwrap (E.shutdown p);
   require "typed post-shutdown rejection" (match E.query p "SELECT 1::BIGINT" rows with Error E.Pool_shutdown -> true | _ -> false))

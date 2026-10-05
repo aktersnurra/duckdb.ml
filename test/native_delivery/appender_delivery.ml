@@ -17,7 +17,7 @@ let release () = for i = 1 to 63 do gate i false done; selected_gate false
 let wait id = E.await ~label:("Appender native boundary " ^ Int.to_string id) (fun () -> entered id > 0)
 let wait_count id n = E.await ~label:("Appender count " ^ Int.to_string id) (fun () -> count id >= n)
 let one_controller () = check "Appender sole controller joined" (count 10 = 1 && count 12 = 1)
-let row = [D.Cell (D.Scalar.Required D.Scalar.Int64, 1L)]
+let row = [D.Cell (D.Scalar.Int64, Some 1L)]
 (* Raw execute accepts exactly one statement. The sequence does not roll back:
    observing its next value proves no flush, unlike transactional row counts. *)
 let setup owner =
@@ -27,7 +27,7 @@ let scalar owner sql =
   let p = ok (D.prepare owner sql) in
   Exn.protect ~finally:(fun () -> ok (D.close_prepared p)) ~f:(fun () ->
     let r = ok (D.execute_prepared p) in
-    ok (D.fold_rows r D.Row.(Column (D.Scalar.Required D.Scalar.Int64, Empty)) ~init:0L
+    ok (D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:0L
       ~f:(fun (n, ()) _ -> Ok (D.Continue n))))
 let no_flush owner = check "Appender cancelled cleanup never flushes sequence" (Int64.equal (scalar owner "SELECT nextval('app_flush')") 1L)
 let next_suppressed c = cancelled (D.execute c "SELECT 42")
@@ -256,7 +256,7 @@ let temporal_value owner =
   ok (D.execute owner "CREATE TABLE app(i TIMESTAMP_S)"); reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c -> D.with_appender c "app" ~f:(fun a ->
-    gate 26 true; D.append_rows a [[D.Cell (D.Scalar.Required D.Scalar.Timestamp_s, 1L)]])))
+    gate 26 true; D.append_rows a [[D.Cell (D.Scalar.Timestamp_s, Some 1L)]])))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 26; ok (B.cancel request); gate 26 false; cancelled (join ());
       check "Appender temporary value second admission suppresses append" (count 30 = 0 && count 26 = 1);

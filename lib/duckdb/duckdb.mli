@@ -10,8 +10,6 @@ type _ t =
   | Date : int32 t | Timestamp_s : int64 t | Timestamp_ms : int64 t
   | Timestamp_us : int64 t | Timestamp_ns : int64 t | Timestamp_tz : int64 t
 
-type _ field = Required : 'a t -> 'a field | Nullable : 'a t -> 'a option field
-
 type error =
   | Type_mismatch of { index : int; expected : string; actual : int }
   | Null of { column : int; row : int }
@@ -19,18 +17,59 @@ type error =
   | Column_count of { expected : int; actual : int }
   | Unbound_parameter of int
   | Parameter_schema_changed
+  | Encode_rejected of { index : int; reason : Base.Error.t }
+  | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
 
 val name : 'a t -> string
 
 end
+
+(** Typed values for request parameters, result columns and table columns.
+    A codec is a base scalar witness, optionally NULL-able, optionally mapped
+    to a user type. The nullability index rules out [nullable (nullable _)]
+    and keeps NULL away from custom conversions. *)
+module Codec : sig
+  type non_null
+  type nullable
+  type ('a, 'nullability) t
+
+  (** Shorthands; included by [Fields] and [Table.Columns] for list literals. *)
+  module Values : sig
+    val bool : (bool, non_null) t
+    val int8 : (int8, non_null) t
+    val int16 : (int16, non_null) t
+    val int32 : (int32, non_null) t
+    val int64 : (int64, non_null) t
+    val float32 : (float32, non_null) t
+    val float64 : (float, non_null) t
+    val string : (string, non_null) t
+    val blob : (string, non_null) t
+    val date : (int32, non_null) t
+    val timestamp_s : (int64, non_null) t
+    val timestamp_ms : (int64, non_null) t
+    val timestamp_us : (int64, non_null) t
+    val timestamp_ns : (int64, non_null) t
+    val timestamp_tz : (int64, non_null) t
+    val of_scalar : 'a Scalar.t -> ('a, non_null) t
+
+    (** NULL is [None]. Only a non-null codec can be made nullable. *)
+    val nullable : ('a, non_null) t -> ('a option, nullable) t
+
+    (** [encode] runs before binding/appending, [decode] after the base value
+        is read; their errors are reported as [Encode_rejected]/[Decode_rejected]. *)
+    val custom : encode:('a -> 'b Base.Or_error.t) -> decode:('b -> 'a Base.Or_error.t) ->
+      ('b, non_null) t -> ('a, non_null) t
+  end
+end
+
 module Row : sig
 
 (** An owned decoder describes every result column in order. Schema types are
-    checked before fetching (even for an empty result). Required fields reject
+    checked before fetching (even for an empty result). Non-null codecs reject
     NULL per row; DuckDB arbitrary-SQL metadata does not prove non-nullability. *)
 type _ t =
   | Empty : unit t
-  | Column : 'a Scalar.field * 'b t -> ('a * 'b) t
+  | Column : ('a, _) Codec.t * 'b t -> ('a * 'b) t
   | Map : 'a t * ('a -> 'b) -> 'b t
 end
 
@@ -141,10 +180,12 @@ val parameter_count : prepared -> (int, error) result
 
 (** One-based parameter indices; known engine parameter types must match exactly.
     Unresolved ANY/INVALID parameters accept the supplied witness. Rebinding is
-    allowed; NULL is supplied as [Nullable witness, None]. Index/type/range errors
+    allowed; NULL is supplied as [None] to a nullable codec. The codec's encoder
+    runs first, outside connection admission, so an [Encode_rejected] takes
+    precedence over index/Busy/Closed/type errors. Encode/index/type/range errors
     leave previous bindings unchanged; native bind failure/interruption marks
     that parameter unbound. Reset failure/interruption marks all unbound. *)
-val bind : prepared -> int -> 'a Scalar.field -> 'a -> (unit, error) result
+val bind : prepared -> int -> ('a, _) Codec.t -> 'a -> (unit, error) result
 val reset : prepared -> (unit, error) result
 
 (** Executes with the current bindings and materializes the result.
@@ -171,20 +212,20 @@ val with_prepared_transaction : transaction -> string -> f:(prepared -> ('a, err
     rejects without consuming it. The callback is synchronous, local,
     and guarded against outward effects. No owner transition is exposed through
     a chunk. Aliases attempting mutation/fetch/close during a callback get Busy.
-    Required NULL fields fail on access, not on empty-result schema validation. *)
+    Non-null codecs reject NULL on access, not on empty-result schema validation. *)
 val fold_chunks : query_result -> init:'a -> f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result
 val chunk_length : chunk @ local -> int
 
 (** Zero-based column and row indices, checked before reading. Each access
     validates the exact engine type; returned strings/blobs/scalars are owned. *)
-val column : chunk @ local -> column:int -> row:int -> 'a Scalar.field -> ('a, error) result
+val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, error) result
 val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
 
 
 (** Complete owned rows, not a decoder. Every cell carries its exact witness.
-    Required cells cannot represent NULL. Entire batches are checked before any
-    native row mutation, including table NOT NULL constraints. *)
-type cell = Cell : 'a Scalar.field * 'a -> cell
+    [None] is NULL. Entire batches are checked before any native row mutation;
+    NOT NULL columns reject [None] there. *)
+type cell = Cell : 'a Scalar.t * 'a option -> cell
 type appender
 
 (** Opens a bulk-insert appender on [table] inside the transaction.
@@ -213,44 +254,6 @@ val close_appender : appender -> (unit, error) result
     drained on exit; a Busy implicit close rolls back rather than committing. *)
 val with_appender : connection -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
 val with_appender_transaction : transaction -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
-
-(** Typed values for request parameters, result columns and table columns.
-    A codec is a base scalar witness, optionally NULL-able, optionally mapped
-    to a user type. The nullability index rules out [nullable (nullable _)]
-    and keeps NULL away from custom conversions. *)
-module Codec : sig
-  type non_null
-  type nullable
-  type ('a, 'nullability) t
-
-  (** Shorthands; included by [Fields] and [Table.Columns] for list literals. *)
-  module Values : sig
-    val bool : (bool, non_null) t
-    val int8 : (int8, non_null) t
-    val int16 : (int16, non_null) t
-    val int32 : (int32, non_null) t
-    val int64 : (int64, non_null) t
-    val float32 : (float32, non_null) t
-    val float64 : (float, non_null) t
-    val string : (string, non_null) t
-    val blob : (string, non_null) t
-    val date : (int32, non_null) t
-    val timestamp_s : (int64, non_null) t
-    val timestamp_ms : (int64, non_null) t
-    val timestamp_us : (int64, non_null) t
-    val timestamp_ns : (int64, non_null) t
-    val timestamp_tz : (int64, non_null) t
-    val of_scalar : 'a Scalar.t -> ('a, non_null) t
-
-    (** NULL is [None]. Only a non-null codec can be made nullable. *)
-    val nullable : ('a, non_null) t -> ('a option, nullable) t
-
-    (** [encode] runs before binding/appending, [decode] after the base value
-        is read; their errors are reported as [Encode_rejected]/[Decode_rejected]. *)
-    val custom : encode:('a -> 'b Base.Or_error.t) -> decode:('b -> 'a Base.Or_error.t) ->
-      ('b, non_null) t -> ('a, non_null) t
-  end
-end
 
 (** Declared parameters or result columns, e.g. [Fields.[int64; nullable string]].
     ['list] identifies the values; ['fn] is the curried row constructor type

@@ -20,7 +20,7 @@ let transaction () =
         Duckdb.with_prepared_transaction tx "SELECT s FROM t" ~f:(fun p ->
           let r = ok (Duckdb.execute_prepared p) in
           Duckdb.fold_chunks r ~init:[] ~f:(fun chunk rows ->
-            let text = ok (Duckdb.column chunk ~column:0 ~row:0 (Duckdb.Scalar.Required Duckdb.Scalar.String)) in
+            let text = ok (Duckdb.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
             Ok (Duckdb.Continue (text :: rows)))))))) in
   (match Duckdb.execute_transaction (Option.value_exn !escaped) "SELECT 1" with
    | Error Duckdb.Closed -> () | _ -> failwith "escaped token usable");

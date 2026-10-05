@@ -78,7 +78,7 @@ let work seam request =
         | Appender_clear | Appender_destroy ->
           ok (D.execute facade "CREATE TABLE t(x BIGINT)");
           D.with_appender facade "t" ~f:(fun a ->
-            ok (D.append_rows a [[D.Cell (D.Scalar.Required D.Scalar.Int64, 42L)]]);
+            ok (D.append_rows a [[D.Cell (D.Scalar.Int64, Some 42L)]]);
             activate (); ok (B.cancel request); Ok ())
         | Publication | Unlink ->
           let destination = Stdlib.Filename.temp_file "bridge-heartbeat-" ".parquet" in

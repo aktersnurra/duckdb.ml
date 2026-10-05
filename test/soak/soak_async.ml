@@ -58,7 +58,7 @@ let callback_cancel () = with_pool (fun pool ->
     Stdlib.Atomic.set release true;
     completion request >>= fun result ->
     require "callback cancellation settles" (cancelled result);
-    let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+    let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
     completion (ok (A.query pool "SELECT count(*)::BIGINT FROM stage5_callback" rows)) >>= fun count ->
     require "callback cancellation suppresses commit" (match count with Ok [0L, ()] -> true | _ -> false);
     completion (ok (A.execute pool "SELECT 1")) >>| fun next -> require "callback cancellation retires before reuse" (Result.is_ok next)))
@@ -124,7 +124,7 @@ let shared_shutdown () = with_pool (fun pool ->
   first >>| fun result -> require "shared shutdown outcome" (Result.is_ok result))
 
 let typed_then_shutdown () = with_pool (fun pool ->
-  let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+  let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
   completion (ok (A.query pool "SELECT 42::BIGINT" rows)) >>= fun result ->
   require "typed result is owned" (match result with Ok [42L, ()] -> true | _ -> false);
   shutdown pool >>= fun stopped ->

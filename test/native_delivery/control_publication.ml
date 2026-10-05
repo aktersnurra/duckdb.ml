@@ -21,7 +21,7 @@ let wait id = E.await ~label:("control-publication boundary " ^ Int.to_string id
 let one_controller () = check "control-publication sole controller joined" (count 10 = 1 && count 12 = 1)
 let scalar c sql = ok (D.with_prepared c sql ~f:(fun p ->
   Result.bind (D.execute_prepared p) ~f:(fun r ->
-    D.fold_rows r D.Row.(Column (Required Int64, Empty)) ~init:0L
+    D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:0L
       ~f:(fun (n, ()) _ -> Ok (D.Stop n)))))
 let with_pair f = ok (D.with_database (ok (D.Config.create Memory)) ~f:(fun db ->
   D.with_connection db ~f:(fun owner -> D.with_connection db ~f:(fun observer ->
@@ -118,7 +118,7 @@ let next_file owner = with_directory (fun dir ->
   reset ();
   let request = B.create () in
   cancelled (B.run request owner ~f:(fun c ->
-    D.Parquet.fold_rows c [file;missing] D.Row.(Column (Required Int64,Empty)) ~init:()
+    D.Parquet.fold_rows c [file;missing] D.Row.(Column (D.Codec.Values.int64,Empty)) ~init:()
       ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ()))));
   (* The first file's parameterless SELECT is extracted once (no validating
      re-prepare) and executed once; the next file is never extracted. *)

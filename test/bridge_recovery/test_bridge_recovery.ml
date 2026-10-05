@@ -8,7 +8,7 @@ let ok = function Ok value -> value | Error _ -> failwith "expected Ok"
 let rows connection =
   D.with_prepared connection "SELECT i FROM recovery_rows ORDER BY i" ~f:(fun prepared ->
     Result.bind (D.execute_prepared prepared) ~f:(fun result ->
-      D.fold_rows result D.Row.(Column (D.Scalar.Required D.Scalar.Int64, Empty))
+      D.fold_rows result D.Row.(Column (D.Codec.Values.int64, Empty))
         ~init:[] ~f:(fun (value, ()) values -> Ok (D.Continue (value :: values)))))
 let still_admitted request owner =
   check "ordinary rollback leaves the same request Pending"

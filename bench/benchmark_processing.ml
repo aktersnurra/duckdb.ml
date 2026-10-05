@@ -32,8 +32,8 @@ let check (config : config) totals =
 
 let row_decoder =
   Duckdb.Row.Column
-    (Duckdb.Scalar.Required Duckdb.Scalar.Int64,
-     Duckdb.Row.Column (Duckdb.Scalar.Nullable Duckdb.Scalar.Int64, Duckdb.Row.Empty))
+    (Duckdb.Codec.Values.int64,
+     Duckdb.Row.Column (Duckdb.Codec.Values.(nullable int64), Duckdb.Row.Empty))
 
 let owned result =
   fail_error (Duckdb.fold_rows result row_decoder ~init:{ rows = 0; nulls = 0; checksum = 0L }
@@ -46,9 +46,9 @@ let borrowed result =
                     if index = Duckdb.chunk_length chunk then Ok (Duckdb.Continue totals)
                     else
                       let required = fail_error (Duckdb.column chunk ~column:0 ~row:index
-                                                   (Duckdb.Scalar.Required Duckdb.Scalar.Int64)) in
+                                                   Duckdb.Codec.Values.int64) in
                       let nullable = fail_error (Duckdb.column chunk ~column:1 ~row:index
-                                                   (Duckdb.Scalar.Nullable Duckdb.Scalar.Int64)) in
+                                                   Duckdb.Codec.Values.(nullable int64)) in
                       rows (index + 1) (add required nullable totals)
                   in
                   rows 0 totals [@nontail]))

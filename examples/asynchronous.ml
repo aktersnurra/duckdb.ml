@@ -64,12 +64,12 @@ let example () =
     (fun () ->
     await (A.execute pool "CREATE TABLE example(i BIGINT)") >>= fun () ->
     let batches =
-      [ [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L) ]
-        ; [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 2L) ]
+      [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
+        ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ]
         ] ]
     in
     await (A.ingest pool ~schema:None ~table:"example" ~batches ~flush:true) >>= fun () ->
-    let row = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+    let row = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
     await (A.query pool "SELECT i FROM example ORDER BY i" row) >>= fun values ->
     (* This worker fold is synchronous; do not call or suspend Async here. *)
     await (A.fold_rows pool "SELECT i FROM example ORDER BY i" row ~init:0L

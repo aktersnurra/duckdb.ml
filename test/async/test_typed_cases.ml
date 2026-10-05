@@ -6,7 +6,7 @@ let config () = ok (Duckdb.Config.create Memory)
 let limits () = ok (A.Limits.create ~connections:1 ~queue_capacity:2)
 let complete request = ok (A.completion request)
 let close pool = ok (A.shutdown pool) >>| ok
-let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty))
+let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
 let equal_rows = List.equal (fun (left, ()) (right, ()) -> Int64.equal left right)
 let typed_requests () =
   reset (-1);
@@ -15,10 +15,10 @@ let typed_requests () =
   Monitor.protect ~finally:(fun () -> close pool) (fun () ->
     complete (ok (A.execute pool "CREATE TABLE typed(i BIGINT)")) >>= fun result -> ok result;
     let batches =
-      [ [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L) ]
-        ; [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 2L) ]
+      [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
+        ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ]
         ]
-      ; [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 3L) ] ]
+      ; [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 3L) ] ]
       ] in
     complete (ok (A.ingest pool ~schema:None ~table:"typed" ~batches ~flush:true)) >>= fun result -> ok result;
     complete (ok (A.query pool "SELECT i FROM typed ORDER BY i" rows)) >>= fun result ->
@@ -42,9 +42,9 @@ let typed_requests () =
       (match A.query pool "SELECT 1::BIGINT" rows with Error A.Pool_shutdown -> true | _ -> false);
     return ())
 let wide_rows =
-  Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int8,
-    Column (Duckdb.Scalar.Nullable Duckdb.Scalar.String,
-      Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty))))
+  Duckdb.Row.(Column (Duckdb.Codec.Values.int8,
+    Column (Duckdb.Codec.Values.(nullable string),
+      Column (Duckdb.Codec.Values.int64, Empty))))
 let wide_and_multichunk () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
@@ -113,7 +113,7 @@ let ingest_rollback_and_auto_flush () =
   let pool = ok created in
   Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
     complete (ok (A.execute pool "CREATE TABLE batches(i BIGINT NOT NULL)")) >>= fun result -> ok result;
-    let good = [ [ [Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L)] ] ] in
+    let good = [ [ [Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L)] ] ] in
     let bad = good @ [[[]]] in
     complete (ok (A.ingest pool ~schema:None ~table:"batches" ~batches:bad ~flush:false)) >>= fun result ->
     require "later batch failure retained" (Result.is_error result);
@@ -146,7 +146,7 @@ let ingest_rollback_and_auto_flush () =
     complete (ok (A.execute pool "CREATE TABLE automatic_flush(i BIGINT PRIMARY KEY)")) >>= fun result -> ok result;
     let rows_of value =
       [List.init automatic_flush_control_rows ~f:(fun _ ->
-        [Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, value)])] in
+        [Duckdb.Cell (Duckdb.Scalar.Int64, Some value)])] in
     let control_rows_before = appender_end_rows () in
     let control_errors_before = appender_end_row_errors () in
     let control_commits_before = commits () in
@@ -168,7 +168,7 @@ let ingest_rollback_and_auto_flush () =
     native_hold Appender_end_row;
     let automatic_cancel = ok (A.ingest pool ~schema:None ~table:"automatic_flush"
       ~batches:[List.init automatic_flush_end_row ~f:(fun i ->
-        [Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Int64.of_int i)])] ~flush:false) in
+        [Duckdb.Cell (Duckdb.Scalar.Int64, Some (Int64.of_int i))])] ~flush:false) in
     wait_scheduler (fun () -> native_entered Appender_end_row > 0) >>= fun () ->
     ignore (ok (A.cancel automatic_cancel)); native_release Appender_end_row;
     complete automatic_cancel >>= fun result ->
@@ -198,8 +198,8 @@ let ingest_rollback_and_auto_flush () =
     require "concurrent metadata ingestion suppresses COMMIT" (commits () = commits_before_concurrent);
     let commits_before_success = commits () in
     let many = List.init 2048 ~f:(fun i ->
-      [[ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Int64.of_int i)
-       ; Duckdb.Cell (Duckdb.Scalar.Nullable Duckdb.Scalar.Int64, None)
+      [[ Duckdb.Cell (Duckdb.Scalar.Int64, Some (Int64.of_int i))
+       ; Duckdb.Cell (Duckdb.Scalar.Int64, None)
        ]]) in
     let admissions = dispatch_count () in
     complete (ok (A.ingest pool ~schema:None ~table:"batches" ~batches:many ~flush:false)) >>= fun result -> ok result;
@@ -249,7 +249,7 @@ let heartbeat_and_cancel_ingest () =
   Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
     complete (ok (A.execute pool "CREATE TABLE cancel_ingest(i BIGINT)")) >>= fun result -> ok result;
     native_hold Appender_clear;
-    let batches = [[ [Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L)] ]] in
+    let batches = [[ [Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L)] ]] in
     let request = ok (A.ingest pool ~schema:None ~table:"cancel_ingest" ~batches ~flush:false) in
     wait_scheduler (fun () -> native_entered Appender_clear > 0) >>= fun () ->
     Scheduler.yield () >>= fun () ->

@@ -25,7 +25,7 @@ let connected ?(statement_cache = 64) f =
   clean ()
 let count c table = core_ok (D.with_prepared c ("SELECT count(*)::BIGINT FROM " ^ table) ~f:(fun p ->
   let* r = D.execute_prepared p in
-  D.fold_rows r D.Row.(Column (Required Int64, Empty)) ~init:0L ~f:(fun (n, ()) _ -> Ok (D.Stop n))))
+  D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:0L ~f:(fun (n, ()) _ -> Ok (D.Stop n))))
 
 let create = R.exec D.Fields.[] "CREATE TABLE t(id BIGINT, note VARCHAR, score DOUBLE)"
 let insert = R.exec D.Fields.[int64; nullable string; nullable float64] "INSERT INTO t VALUES (?, ?, ?)"

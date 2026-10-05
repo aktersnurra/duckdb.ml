@@ -23,7 +23,7 @@ let next_suppressed facade = cancelled (D.execute facade "SELECT 42")
    one execute to the raw counts. *)
 let schema_prepared c =
   let p = ok (D.prepare c "SELECT ?::BIGINT") in
-  ok (D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 1L);
+  ok (D.bind p 1 (D.Codec.Values.int64) 1L);
   ok (D.execute c "CREATE TEMP TABLE IF NOT EXISTS schema_epoch_bump(x BIGINT)");
   p
 let before_prepare owner =
@@ -63,11 +63,11 @@ let bind_case ~before kind owner =
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
     let sql, work = match kind with
       | "reset" -> "SELECT ?::BIGINT", (fun p -> D.reset p)
-      | "null" -> "SELECT ?::BIGINT", (fun p -> D.bind p 1 (D.Scalar.Nullable D.Scalar.Int64) None)
-      | "float" -> "SELECT ?::DOUBLE", (fun p -> D.bind p 1 (D.Scalar.Required D.Scalar.Float64) 1.)
-      | "string" -> "SELECT ?::VARCHAR", (fun p -> D.bind p 1 (D.Scalar.Required D.Scalar.String) "x")
-      | "temporal" -> "SELECT ?::TIMESTAMP_S", (fun p -> D.bind p 1 (D.Scalar.Required D.Scalar.Timestamp_s) 1L)
-      | _ -> "SELECT ?::BIGINT", (fun p -> D.bind p 1 (D.Scalar.Required D.Scalar.Int64) 1L) in
+      | "null" -> "SELECT ?::BIGINT", (fun p -> D.bind p 1 (D.Codec.Values.(nullable int64)) None)
+      | "float" -> "SELECT ?::DOUBLE", (fun p -> D.bind p 1 (D.Codec.Values.float64) 1.)
+      | "string" -> "SELECT ?::VARCHAR", (fun p -> D.bind p 1 (D.Codec.Values.string) "x")
+      | "temporal" -> "SELECT ?::TIMESTAMP_S", (fun p -> D.bind p 1 (D.Codec.Values.timestamp_s) 1L)
+      | _ -> "SELECT ?::BIGINT", (fun p -> D.bind p 1 (D.Codec.Values.int64) 1L) in
     let p = ok (D.prepare c sql) in
     let point = if before then (if String.equal kind "reset" then 15 else 16)
       else if String.equal kind "reset" then 24 else if String.equal kind "temporal" then 26 else 22 in

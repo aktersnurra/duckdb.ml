@@ -1,9 +1,9 @@
 module Scalar = Scalar
+module Codec = Codec
 module Row = Row
 include Resource
 include Query
 include Appender
-module Codec = Codec
 module Fields = Fields
 module Args = Args
 module Request = Request

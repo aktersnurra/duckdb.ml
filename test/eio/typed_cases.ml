@@ -6,10 +6,10 @@ exception Requested
 exception Callback_failure
 let check name condition = if not condition then failwith name
 let unwrap = function Ok value -> value | Error _ -> failwith "unexpected typed adapter error"
-let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty))
-let wide_rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int8,
-  Column (Duckdb.Scalar.Nullable Duckdb.Scalar.String,
-    Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty))))
+let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
+let wide_rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int8,
+  Column (Duckdb.Codec.Values.(nullable string),
+    Column (Duckdb.Codec.Values.int64, Empty))))
 let equal_rows = List.equal (fun (x, ()) (y, ()) -> Int64.equal x y)
 let pause clock = Eio.Time.sleep clock 0.001
 let until clock name condition =
@@ -22,7 +22,7 @@ let until clock name condition =
 let pool ?(connections = 1) sw =
   unwrap (E.create ~sw (unwrap (E.limits ~connections ~queue_capacity:1))
     (unwrap (Duckdb.Config.create Duckdb.Config.Memory)))
-let cell value = Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, value)
+let cell value = Duckdb.Cell (Duckdb.Scalar.Int64, Some value)
 let whole name f =
   let before = P.operations () and native = H.execute_entries 3 in
   let disconnects = H.execute_entries 1 in

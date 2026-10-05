@@ -15,10 +15,14 @@ val parameter_count : prepared -> (int, error) result
 
 (** One-based parameter indices; known engine parameter types must match exactly.
     Unresolved ANY/INVALID parameters accept the supplied witness. Rebinding is
-    allowed; NULL is supplied as [Nullable witness, None]. Index/type/range errors
+    allowed; NULL is supplied as [None] to a nullable codec. The codec's encoder
+    runs first, outside connection admission, so an [Encode_rejected] takes
+    precedence over index/Busy/Closed/type errors. Encode/index/type/range errors
     leave previous bindings unchanged; native bind failure/interruption marks
     that parameter unbound. Reset failure/interruption marks all unbound. *)
-val bind : prepared -> int -> 'a Scalar.field -> 'a -> (unit, error) result
+val bind : prepared -> int -> ('a, _) Codec.t -> 'a -> (unit, error) result
+(* Private: binds an already-encoded base value ([None] is NULL). *)
+val bind_scalar : prepared -> int -> 'a Scalar.t -> 'a option -> (unit, error) result
 val reset : prepared -> (unit, error) result
 
 (** All parameters must be bound. The result exclusively leases the connection
@@ -32,13 +36,14 @@ val with_prepared_transaction : transaction -> string -> f:(prepared -> ('a, err
     rejects without consuming it. The callback is synchronous, local,
     and guarded against outward effects. No owner transition is exposed through
     a chunk. Aliases attempting mutation/fetch/close during a callback get Busy.
-    Required NULL fields fail on access, not on empty-result schema validation. *)
+    Non-null codecs reject NULL on access, not on empty-result schema validation. *)
 val fold_chunks : query_result -> init:'a -> f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result
 val chunk_length : chunk @ local -> int
 
 (** Zero-based column and row indices, checked before reading. Each access
-    validates the exact engine type; returned strings/blobs/scalars are owned. *)
-val column : chunk @ local -> column:int -> row:int -> 'a Scalar.field -> ('a, error) result
+    validates the exact engine type; returned strings/blobs/scalars are owned.
+    [Decode_rejected.row] and [Null.row] are chunk-relative. *)
+val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, error) result
 val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
 
 (* Private, engine-prepared SELECT metadata; no execution or result lease. *)

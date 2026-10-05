@@ -5,8 +5,6 @@ type _ t =
   | Date : int32 t | Timestamp_s : int64 t | Timestamp_ms : int64 t
   | Timestamp_us : int64 t | Timestamp_ns : int64 t | Timestamp_tz : int64 t
 
-type _ field = Required : 'a t -> 'a field | Nullable : 'a t -> 'a option field
-
 type error =
   | Type_mismatch of { index : int; expected : string; actual : int }
   | Null of { column : int; row : int }
@@ -14,6 +12,8 @@ type error =
   | Column_count of { expected : int; actual : int }
   | Unbound_parameter of int
   | Parameter_schema_changed
+  | Encode_rejected of { index : int; reason : Base.Error.t }
+  | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
 
 
 let name : type a. a t -> string = function
@@ -59,4 +59,3 @@ let repr : type a. a t -> a repr = function
   | Float32 -> Floating { encode = F32.to_float; decode = F32.of_float }
   | Float64 -> Floating { encode = Fn.id; decode = Fn.id }
   | String -> Bytes | Blob -> Bytes
-let witness : type a. a field -> packed = function Required typ -> Packed typ | Nullable typ -> Packed typ

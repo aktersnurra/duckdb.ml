@@ -7,7 +7,7 @@ let rejected = function
   | _ -> failwith "expected Parameter_schema_changed"
 let count c = ok (with_prepared c "SELECT count(*)::BIGINT FROM t" ~f:(fun p ->
   Result.bind (execute_prepared p) ~f:(fun r ->
-    fold_rows r Row.(Column (S.Required S.Int64, Empty)) ~init:0L
+    fold_rows r Row.(Column (Codec.Values.int64, Empty)) ~init:0L
       ~f:(fun (n, ()) _ -> Ok (Continue n)))))
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
@@ -21,7 +21,7 @@ let () =
             let alter () = ok (execute (if other_connection then other else c)
               "ALTER TABLE t ALTER x TYPE DOUBLE") in
             if String.equal phase "before-bind" then alter ();
-            ok (bind p 1 (S.Required S.Int64) 9007199254740993L);
+            ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
             if String.equal phase "reuse" then (
               ok (close_result (ok (execute_prepared p)));
               ok (execute c "DELETE FROM t"));
@@ -31,7 +31,7 @@ let () =
             assert (Int64.equal (count c) 0L);
             ok (reset p); ok (close_prepared p);
             ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun fresh ->
-              ok (bind fresh 1 (S.Required S.Float64) 42.0);
+              ok (bind fresh 1 (Codec.Values.float64) 42.0);
               Result.bind (execute_prepared fresh) ~f:close_result));
             assert (Int64.equal (count c) 1L);
             Ok ()));
@@ -44,7 +44,7 @@ let () =
     ok (execute c "CREATE TABLE t(x BIGINT)");
     (match with_transaction c ~f:(fun tx ->
       with_prepared_transaction tx "INSERT INTO t VALUES (?)" ~f:(fun p ->
-        ok (bind p 1 (S.Required S.Int64) 9007199254740993L);
+        ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
         ok (close_result (ok (execute_prepared p)));
         ok (execute_transaction tx "DELETE FROM t");
         ok (execute_transaction tx "ALTER TABLE t ALTER x TYPE DOUBLE");
@@ -55,7 +55,7 @@ let () =
     assert (Int64.equal (count c) 0L);
     (* Outer rollback restores BIGINT, not just rows; no internal COMMIT occurred. *)
     ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
-      ok (bind p 1 (S.Required S.Int64) 9007199254740993L);
+      ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
       ok (close_result (ok (execute_prepared p))); Ok ()));
     Ok ())));
   clean ();

@@ -15,10 +15,10 @@ let run () =
         ~finally:(fun () -> ok (E.shutdown pool))
         ~f:(fun () ->
           ok (E.execute pool "CREATE TABLE installed(i BIGINT)");
-          let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 1L) ]
-                            ; [ Duckdb.Cell (Duckdb.Scalar.Required Duckdb.Scalar.Int64, 2L) ] ] ] in
+          let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
+                            ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ] ] ] in
           ok (E.ingest pool ~schema:None ~table:"installed" ~batches ~flush:true);
-          let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty)) in
+          let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
           require "installed typed query" (match E.query pool "SELECT i FROM installed ORDER BY i" rows with
             | Ok [1L, (); 2L, ()] -> true | _ -> false);
           let path = Stdlib.Filename.temp_file "duckdb_installed_eio" ".parquet" in

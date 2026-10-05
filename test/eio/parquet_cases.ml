@@ -6,7 +6,7 @@ exception Requested
 exception Callback_failure
 let check name condition = if not condition then failwith name
 let unwrap = function Ok value -> value | Error _ -> failwith "unexpected Parquet error"
-let rows = Duckdb.Row.(Column (Duckdb.Scalar.Required Duckdb.Scalar.Int64, Empty))
+let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
 let equal_rows = List.equal (fun (x, ()) (y, ()) -> Int64.equal x y)
 let pool sw = unwrap (E.create ~sw (unwrap (E.limits ~connections:1 ~queue_capacity:1))
   (unwrap (Duckdb.Config.create Duckdb.Config.Memory)))

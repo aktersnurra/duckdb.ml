@@ -71,7 +71,7 @@ let reserve_temporary c tx destination =
 let copy_to tx ~query temporary =
   Query.with_prepared_transaction tx
     ("COPY (\n" ^ query ^ "\n) TO $__duckdb_ml_destination (FORMAT PARQUET)") ~f:(fun p ->
-      let* () = Query.bind p 1 (Scalar.Required Scalar.String) temporary in
+      let* () = Query.bind p 1 Codec.Values.string temporary in
       let* result = Query.execute_prepared p in
       Query.close_result result)
 let export c ~query destination =

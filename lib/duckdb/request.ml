@@ -69,14 +69,14 @@ let with_context context result = Result.map_error result ~f:(fun cause -> { con
 let core context result = Result.map_error result ~f:(fun error -> { context; cause = Core error })
 
 (* Encoding: each value becomes one bindable scalar, checked by its codec. *)
-type bound = Bound : 'b Scalar.field * 'b -> bound
+type bound = Bound : 'b Scalar.t * 'b option -> bound
 let encode_value : type a n. (a, n) Codec.t -> a -> bound Or_error.t = fun codec value ->
   match codec with
-  | Codec.Non_null (Codec.Plan plan) -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (Scalar.Required plan.scalar, b))
+  | Codec.Non_null (Codec.Plan plan) -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (plan.scalar, Some b))
   | Codec.Nullable (Codec.Plan plan) ->
     match value with
-    | None -> Ok (Bound (Scalar.Nullable plan.scalar, None))
-    | Some value -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (Scalar.Nullable plan.scalar, Some b))
+    | None -> Ok (Bound (plan.scalar, None))
+    | Some value -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (plan.scalar, Some b))
 let rec encode_args : type l f r. (l, f, r) Fields.t -> l Args.t -> index:int ->
   (bound list, cause) Result.t = fun fields args ~index ->
   match fields, args with
@@ -123,17 +123,10 @@ let validate r p =
 (* Decoding a borrowed row into an owned value through the declared codecs. *)
 let decode_value : type a n. (a, n) Codec.t -> Query.chunk @ local -> column:int -> row:int -> seen:int ->
   (a, cause) Result.t = fun codec chunk ~column ~row ~seen ->
-  let decoded decode b = Result.map_error (decode b) ~f:(fun reason -> Decode_rejected { column; row = seen + row; reason }) in
-  match codec with
-  | Codec.Non_null (Codec.Plan plan) ->
-    (match Query.column chunk ~column ~row (Scalar.Required plan.scalar) with
-     | Error e -> Error (Core e)
-     | Ok b -> decoded plan.decode b)
-  | Codec.Nullable (Codec.Plan plan) ->
-    match Query.column chunk ~column ~row (Scalar.Nullable plan.scalar) with
-    | Error e -> Error (Core e)
-    | Ok None -> Ok None
-    | Ok (Some b) -> Result.map (decoded plan.decode b) ~f:Option.some
+  match Query.column chunk ~column ~row codec with
+  | Ok value -> Ok value
+  | Error (Data_error (Scalar.Decode_rejected { reason; _ })) -> Error (Decode_rejected { column; row = seen + row; reason })
+  | Error e -> Error (Core e)
 let rec decode_row : type l f r. (l, f, r) Fields.t -> f -> Query.chunk @ local ->
   column:int -> row:int -> seen:int -> (r, cause) Result.t = fun fields fn chunk ~column ~row ~seen ->
   match fields with
@@ -199,8 +192,8 @@ let with_statement c within r ~use =
       | Ok () -> cache_add c witness ~key:r.id p (Query.child p); cached p
 
 let bind_all context p bounds =
-  List.foldi bounds ~init:(Ok ()) ~f:(fun i acc (Bound (field, value)) ->
-    let* () = acc in core context (Query.bind p (i + 1) field value))
+  List.foldi bounds ~init:(Ok ()) ~f:(fun i acc (Bound (typ, value)) ->
+    let* () = acc in core context (Query.bind_scalar p (i + 1) typ value))
 
 let run c within r args ~consume =
   let context = Query r.sql in
@@ -311,7 +304,7 @@ let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
   let context = table_context a.table in
   let fields = fields_of_columns t.columns in
   let* rows = with_context context (Result.all (List.map rows ~f:(fun args -> encode_args fields args ~index:1))) in
-  let cells = List.map rows ~f:(List.map ~f:(fun (Bound (field, value)) -> Appender.Cell (field, value))) in
+  let cells = List.map rows ~f:(List.map ~f:(fun (Bound (typ, value)) -> Appender.Cell (typ, value))) in
   core context (Appender.append_rows a.core cells)
 let flush a = core (table_context a.table) (Appender.flush_appender a.core)
 

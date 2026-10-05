@@ -17,7 +17,7 @@ let signal_case ~revalidate operation boundary ordinal expected_live =
     with_connection db ~f:(fun observer ->
       ok (execute c "CREATE TABLE t(x BIGINT)");
       with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
-        ok (bind p 1 (Scalar.Required Scalar.Int64) 9007199254740993L);
+        ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
         let rollback = String.equal operation "rollback" in
         let rejection_close = String.equal operation "rejection-close" in
         if rollback || rejection_close then ok (execute c "ALTER TABLE t ALTER x TYPE DOUBLE");
@@ -69,7 +69,7 @@ let () =
         ok (execute c "CREATE TABLE t(x BIGINT)");
         let sql = if fault = 4 then "SELECT error('primary snapshot query')" else "INSERT INTO t VALUES (?)" in
         with_prepared c sql ~f:(fun p ->
-          if fault <> 4 then ok (bind p 1 (Scalar.Required Scalar.Int64) 9007199254740993L);
+          if fault <> 4 then ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
           if fault = 2 then ok (execute c "ALTER TABLE t ALTER x TYPE DOUBLE");
           fail_control (if fault = 4 then 2 else fault);
           let result = execute_prepared p in

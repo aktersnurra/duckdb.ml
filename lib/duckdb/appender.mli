@@ -1,9 +1,9 @@
 open Resource
 
 (** Complete owned rows, not a decoder. Every cell carries its exact witness.
-    Required cells cannot represent NULL. Entire batches are checked before any
-    native row mutation, including table NOT NULL constraints. *)
-type cell = Cell : 'a Scalar.field * 'a -> cell
+    [None] is NULL. Entire batches are checked before any native row mutation;
+    NOT NULL columns reject [None] there. *)
+type cell = Cell : 'a Scalar.t * 'a option -> cell
 type appender
 
 (** Opens a child in the current database and explicit schema (default main).

@@ -18,7 +18,7 @@ let memory f = ok (D.with_database (ok (D.Config.create D.Config.Memory)) ~f)
 let connection db f = D.with_connection db ~f
 let rows c sql = D.with_prepared c sql ~f:(fun p ->
   Result.bind (D.execute_prepared p) ~f:(fun r ->
-    D.fold_rows r D.Row.(Column (D.Scalar.Required D.Scalar.Int64, Empty)) ~init:[]
+    D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:[]
       ~f:(fun (x, ()) xs -> Ok (D.Continue (x :: xs)))))
 exception Callback_failure
 let callback_failure () = raise Callback_failure
@@ -126,14 +126,14 @@ let transactions db = connection db (fun owner -> connection db (fun observer ->
   let request = B.create () in
   expect D.Cancelled (B.run request owner ~f:(fun facade ->
     D.with_appender facade "discarded_buffer" ~f:(fun a ->
-      ok (D.append_rows a [[D.Cell (D.Scalar.Required D.Scalar.Int64, 9L)]]);
+      ok (D.append_rows a [[D.Cell (D.Scalar.Int64, Some 9L)]]);
       ok (B.cancel request); ignore (D.flush_appender a); Ok ())));
   check "appender discarded" (Poly.equal (ok (rows observer "SELECT count(*) FROM discarded_buffer")) [0L]);
   (* Sequences are not rolled back: this distinguishes discard from a flush
      followed by rollback, without an unsafe appender/test FFI entry point. *)
   check "cancelled appender never flushed" (Poly.equal (ok (rows observer "SELECT nextval('appender_flush_probe')")) [1L]);
   ok (D.with_appender owner "discarded_buffer" ~f:(fun a ->
-    D.append_rows a [[D.Cell (D.Scalar.Required D.Scalar.Int64, 10L)]]));
+    D.append_rows a [[D.Cell (D.Scalar.Int64, Some 10L)]]));
   check "ordinary appender flush control" (match ok (rows observer "SELECT nextval('appender_flush_probe')") with [n] -> Int64.(n > 2L) | _ -> false);
   let request = B.create () in
   expect D.Cancelled (B.run request owner ~f:(fun facade ->
@@ -253,7 +253,7 @@ let parquet db = connection db (fun owner ->
     let request = B.create () in
     reset_counts ();
     expect D.Cancelled (B.run request owner ~f:(fun facade ->
-      D.Parquet.fold_rows facade [path; missing] D.Row.(Column (D.Scalar.Required D.Scalar.Int64, Empty))
+      D.Parquet.fold_rows facade [path; missing] D.Row.(Column (D.Codec.Values.int64, Empty))
         ~init:() ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ()))));
     check "next parquet suppressed" (count 0 = 1); Ok ()))
 exception Native_create_failure

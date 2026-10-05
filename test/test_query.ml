@@ -12,8 +12,8 @@ let closed result = error (function Closed -> true | _ -> false) result
 let children result = error (function Live_children -> true | _ -> false) result
 let index result = error (function Data_error (S.Index _) -> true | _ -> false) result
 let schema result = error (function Data_error (S.Type_mismatch _) -> true | _ -> false) result
-let required typ = S.Required typ
-let decode typ = Row.Column (required typ, Row.Empty)
+let non_null typ = Codec.Values.of_scalar typ
+let decode typ = Row.Column (non_null typ, Row.Empty)
 let rows r decoder = fold_rows r decoder ~init:[] ~f:(fun x xs -> Ok (Continue (x :: xs)))
 let query c sql decoder = with_prepared c sql ~f:(fun p -> rows (ok (execute_prepared p)) decoder)
 let config = ok (Config.create Memory)
@@ -23,11 +23,11 @@ let roundtrip c typ equal values =
   ok (with_prepared c ("SELECT ?::" ^ S.name typ) ~f:(fun p ->
     assert (ok (parameter_count p) = 1);
     error (function Data_error (S.Unbound_parameter 1) -> true | _ -> false) (execute_prepared p);
-    index (bind p (-1) (required typ) (List.hd_exn values));
-    index (bind p 0 (required typ) (List.hd_exn values));
-    index (bind p 2 (required typ) (List.hd_exn values));
+    index (bind p (-1) (non_null typ) (List.hd_exn values));
+    index (bind p 0 (non_null typ) (List.hd_exn values));
+    index (bind p 2 (non_null typ) (List.hd_exn values));
     List.iter values ~f:(fun value ->
-      ok (bind p 1 (required typ) value);
+      ok (bind p 1 (non_null typ) value);
       for _ = 1 to 2 do
         let r = ok (execute_prepared p) in
         children (reset p); children (close_prepared p); children (execute_prepared p);
@@ -37,8 +37,8 @@ let roundtrip c typ equal values =
         ok (close_result r); ok (close_result r);
         closed (rows r (decode typ))
       done);
-    ok (bind p 1 (S.Nullable typ) None);
-    let nullable = ok (rows (ok (execute_prepared p)) (Row.Column (S.Nullable typ, Row.Empty))) in
+    ok (bind p 1 Codec.Values.(nullable (of_scalar typ)) None);
+    let nullable = ok (rows (ok (execute_prepared p)) (Row.Column (Codec.Values.(nullable (of_scalar typ)), Row.Empty))) in
     assert (List.for_all nullable ~f:(fun (x, ()) -> Option.is_none x));
     error (function Data_error (S.Null { column = 0; row = 0 }) -> true | _ -> false)
       (rows (ok (execute_prepared p)) (decode typ));
@@ -76,12 +76,12 @@ let () =
         Ok ()))
     done;
     let p = ok (prepare c "SELECT ?::TINYINT, ?::FLOAT") in
-    schema (bind p 1 (required S.Int64) 1L);
+    schema (bind p 1 (non_null S.Int64) 1L);
     ok (close_prepared p); ok (close_prepared p); closed (reset p);
     ok (with_prepared c "SELECT ?" ~f:(fun p ->
-      ok (bind p 1 (required S.Int8) 2s);
+      ok (bind p 1 (non_null S.Int8) 2s);
       assert (List.length (ok (rows (ok (execute_prepared p)) (decode S.Int8))) = 1);
-      ok (reset p); ok (bind p 1 (required S.String) "changed type");
+      ok (reset p); ok (bind p 1 (non_null S.String) "changed type");
       assert (List.length (ok (rows (ok (execute_prepared p)) (decode S.String))) = 1); Ok ()));
     assert (List.is_empty (ok (query c "SELECT 1::BIGINT WHERE false" (decode S.Int64))));
     schema (query c "SELECT 1::INTEGER WHERE false" (decode S.Int64));
@@ -101,14 +101,14 @@ let () =
         busy (close_result r); busy (close_prepared p); busy (reset p); busy (execute_prepared p);
         busy (close_connection c); busy (execute c "select 1");
         busy (fold_chunks r ~init:() ~f:(fun _ () -> Ok (Continue ())));
-        index (column chunk ~column:(-1) ~row:0 (required S.Int64));
-        index (column chunk ~column:2 ~row:0 (required S.Int64));
-        index (column chunk ~column:0 ~row:(-1) (required S.Int64));
-        index (column chunk ~column:0 ~row:(chunk_length chunk) (required S.Int64));
-        schema (column chunk ~column:0 ~row:0 (required S.Int32));
+        index (column chunk ~column:(-1) ~row:0 (non_null S.Int64));
+        index (column chunk ~column:2 ~row:0 (non_null S.Int64));
+        index (column chunk ~column:0 ~row:(-1) (non_null S.Int64));
+        index (column chunk ~column:0 ~row:(chunk_length chunk) (non_null S.Int64));
+        schema (column chunk ~column:0 ~row:0 (non_null S.Int32));
         let rec copy row acc = if row = chunk_length chunk then acc else
-          let value = ok (column chunk ~column:0 ~row (S.Nullable S.Int64)) in
-          assert (String.equal (ok (column chunk ~column:1 ~row (required S.String))) "a\000b");
+          let value = ok (column chunk ~column:0 ~row Codec.Values.(nullable int64)) in
+          assert (String.equal (ok (column chunk ~column:1 ~row (non_null S.String))) "a\000b");
           copy (row + 1) (value :: acc) in
         let copied = copy 0 acc in
         Stdlib.Gc.compact ();
@@ -174,7 +174,7 @@ let () =
       let values = ok (query c sql (decode typ)) in
       assert (List.equal (fun (a, ()) (b, ()) -> equal a b) values [expected, ()]) in
     ok (with_prepared c "SELECT ?::TIMESTAMP_S" ~f:(fun p ->
-      schema (bind p 1 (required S.Timestamp_us) 1000000L); Ok ()));
+      schema (bind p 1 (non_null S.Timestamp_us) 1000000L); Ok ()));
     schema (query c "SELECT TIMESTAMP_S '1970-01-01 00:00:01'" (decode S.Timestamp_us));
     check "SELECT DATE '1969-12-31'" S.Date Int32.equal (-1l);
     check "SELECT TIMESTAMP_S '1970-01-01 00:00:01'" S.Timestamp_s Int64.equal 1L;
@@ -198,7 +198,7 @@ let () =
 let () =
   connected (fun c ->
     (* DuckDB 1.5.5 materializes bare NULL as INTEGER, not logical SQLNULL. *)
-    let decoder = Row.Column (S.Nullable S.Int32, Row.Empty) in
+    let decoder = Row.Column (Codec.Values.(nullable int32), Row.Empty) in
     let copied = ok (query c "SELECT NULL" decoder) in
     assert (List.for_all copied ~f:(fun (value, ()) -> Option.is_none value));
     assert (List.is_empty (ok (query c "SELECT NULL WHERE false" decoder)));
@@ -227,3 +227,47 @@ let () =
       assert (handled = 42); assert (chunk_length chunk = 1); Ok (Stop ())));
     Ok ());
   clean (); Stdlib.print_endline "query: effect unwind/catch-reperform/composite exception/inner handler=ok"
+
+(* Low-level bind/column take codecs, including custom ones. *)
+let () =
+  let ( let* ) x f = Result.bind x ~f in
+  connected (fun c ->
+    let parity = Codec.Values.custom Codec.Values.int64
+      ~encode:(fun b -> Ok (if b then 1L else 0L)) ~decode:(fun n -> Ok (Int64.equal n 1L)) in
+    ok (with_prepared c "SELECT ?::BIGINT AS x, NULL::VARCHAR AS y" ~f:(fun p ->
+      let* () = bind p 1 parity true in
+      let* r = execute_prepared p in
+      fold_chunks r ~init:() ~f:(fun chunk () ->
+        let x = ok (column chunk ~column:0 ~row:0 parity) in
+        let y = ok (column chunk ~column:1 ~row:0 Codec.Values.(nullable string)) in
+        assert x; assert (Option.is_none y);
+        Ok (Stop ()))));
+    Ok ());
+  Stdlib.print_endline "query: codec-typed bind/column incl. custom=ok"
+
+(* Encoder/decoder rejections surface at the low level without disturbing state. *)
+let () =
+  connected (fun c ->
+    let no_seven which = Codec.Values.custom Codec.Values.int64
+      ~encode:(fun n -> if Int64.equal n 7L then Or_error.error_string "seven" else Ok n)
+      ~decode:(fun n -> if Int64.equal n 3L && which then Or_error.error_string "three" else Ok n) in
+    let codec = no_seven true in
+    ok (with_prepared c "SELECT ?::BIGINT" ~f:(fun p ->
+      ok (bind p 1 codec 5L);
+      error (function Data_error (S.Encode_rejected { index = 1; _ }) -> true | _ -> false) (bind p 1 codec 7L);
+      let r = ok (execute_prepared p) in
+      assert (List.equal (fun (a, ()) (b, ()) -> Int64.equal a b) (ok (rows r (decode S.Int64))) [5L, ()]);
+      ok (close_result r); Ok ()));
+    ok (with_prepared c "SELECT * FROM (VALUES (1::BIGINT),(2),(3))" ~f:(fun p ->
+      let r = ok (execute_prepared p) in
+      error (function Data_error (S.Decode_rejected { column = 0; row = 2; _ }) -> true | _ -> false)
+        (fold_chunks r ~init:() ~f:(fun chunk () ->
+          let outcome = ref (Ok (Continue ())) in
+          for row = 0 to chunk_length chunk - 1 do
+            if Result.is_ok !outcome then
+              match column chunk ~column:0 ~row codec with Error e -> outcome := Error e | Ok _ -> ()
+          done;
+          !outcome));
+      ok (close_result r); Ok ()));
+    Ok ());
+  Stdlib.print_endline "query: low-level encode/decode rejection=ok"

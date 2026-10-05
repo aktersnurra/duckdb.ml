@@ -9,7 +9,7 @@ let rejected = function
   | _ -> failwith "expected Parameter_schema_changed"
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
-let insert p x = ok (bind p 1 (S.Required S.Int64) x); Result.bind (execute_prepared p) ~f:close_result
+let insert p x = ok (bind p 1 (Codec.Values.int64) x); Result.bind (execute_prepared p) ~f:close_result
 let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
   with_connection db ~f:(fun other -> f c other; Ok ()))))
 let advanced f =
