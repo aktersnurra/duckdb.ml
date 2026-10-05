@@ -146,3 +146,11 @@ let () =
         | R.Core (D.Data_error (D.Scalar.Column_count _)) -> true | _ -> false)
         (D.Parquet.fold c [path] D.Fields.[int64] ~row:Fn.id ~init:() ~f:(fun _ () -> Ok (D.Continue ()))))));
   Stdlib.print_endline "table: Parquet fold/fold_table across files, Stop, empty list, file shape=ok"
+
+(* Columns and Fields share one structure: a table's columns decode the
+   same rows as the equivalent Fields list. *)
+let () =
+  let module T = Duckdb.Table in
+  let t = T.declare "s" T.Columns.["a", int64; "b", nullable string] ~row:(fun a b -> (a, b)) in
+  assert (String.equal (Duckdb.Request.query (T.select t)) "SELECT \"a\", \"b\" FROM \"main\".\"s\"");
+  Stdlib.print_endline "table: spine-backed columns render=ok"

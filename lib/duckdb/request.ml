@@ -236,9 +236,8 @@ let fold_on c r ~init ~f = run_fold c None r Args.[] ~init ~f
 let rec fields_of_columns : type l f r. (l, f, r) Columns.t -> (l, f, r) Fields.t = function
   | Columns.[] -> Fields.[]
   | Columns.((_, codec) :: columns) -> Fields.(codec :: fields_of_columns columns)
-let rec column_names : type l f r. (l, f, r) Columns.t -> string list = function
-  | Columns.[] -> []
-  | Columns.((name, _) :: columns) -> name :: column_names columns
+let column_names columns =
+  List.rev (Columns.fold columns ~init:[] { g = (fun (name, _) acc -> name :: acc) })
 let quote name = "\"" ^ String.substr_replace_all name ~pattern:"\"" ~with_:"\"\"" ^ "\""
 let declare_table ?(schema = "main") name columns ~row =
   let names = column_names columns and fields = fields_of_columns columns in

@@ -1,4 +1,3 @@
 include Codec.Values
-type ('list, 'fn, 'result) t =
-  | [] : (unit, 'result, 'result) t
-  | (::) : (string * ('a, _) Codec.t) * ('list, 'fn, 'result) t -> ('a * 'list, 'a -> 'fn, 'result) t
+type ('a, 'n) named = string * ('a, 'n) Codec.t
+include Spine.Make (struct type ('a, 'n) t = ('a, 'n) named end)
