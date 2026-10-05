@@ -135,7 +135,7 @@ module Request : sig
 
   (** The same operations as an instance, for code generic over backends. *)
   module Generic : Duckdb.Request.CONNECTION
-    with type owner = t and type error = error and type 'a future = 'a Async.Deferred.t
+    with type 'k owner = t and type error = error and type 'a future = 'a Async.Deferred.t
 
   val submit_exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> unit submitted
   val submit_find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> 'row submitted

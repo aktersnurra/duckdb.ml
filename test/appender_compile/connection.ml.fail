@@ -1,2 +1,0 @@
-let t = Duckdb.Table.(declare "table" Columns.[ "x", int64 ] ~row:(fun x -> x))
-let create (c : Duckdb.connection) = Duckdb.Table.with_appender_transaction c t ~f:(fun _ -> Ok ())

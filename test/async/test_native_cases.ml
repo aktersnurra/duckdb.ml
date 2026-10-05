@@ -102,7 +102,7 @@ let heartbeat_close seam () = with_pool (fun p ->
   heartbeat d seam >>= fun () -> native_release seam; d >>| ok)
 let heartbeat_cancel seam () = with_pool (fun p ->
   native_hold Execute;
-  let r = ok (A.transaction p ~f:(fun tx -> Duckdb.execute_transaction tx long_query)) in
+  let r = ok (A.transaction p ~f:(fun tx -> Duckdb.execute tx long_query)) in
   heartbeat (complete r) Execute >>= fun () ->
   native_hold seam;
   ignore (ok (A.cancel r));
@@ -144,21 +144,20 @@ let replacement_stop () = with_pool (fun p ->
   require "replacement candidate closed before stopped request completion" (connects () = 2 && disconnects () = 2 && cancelled result);
   stopped >>| ok)
 let count_rows tx =
-  Duckdb.with_prepared_transaction tx "select count(*)::BIGINT from t" ~f:(fun prepared ->
-    Result.bind (Duckdb.execute_prepared prepared) ~f:(fun result ->
-      Duckdb.fold_chunks result ~init:0L ~f:(fun chunk _ ->
-        match Duckdb.column chunk ~column:0 ~row:0 Duckdb.Codec.Values.int64 with
-        | Ok count -> Ok (Duckdb.Stop count)
-        | Error e -> Error e)))
+  Duckdb.Statement.with_prepared tx "select count(*)::BIGINT from t" ~f:(fun prepared ->
+    Duckdb.Statement.fold_chunks prepared ~init:0L ~f:(fun chunk _ ->
+      match Duckdb.Statement.column chunk ~column:0 ~row:0 Duckdb.Codec.Values.int64 with
+      | Ok count -> Ok (Duckdb.Stop count)
+      | Error e -> Error e))
 let transaction_exclusion () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   let escaped = ref None in
   let a = ok (A.transaction p ~f:(fun tx ->
     escaped := Some tx;
-    ok (Duckdb.execute_transaction tx "insert into t values (1)");
+    ok (Duckdb.execute tx "insert into t values (1)");
     Stdlib.Atomic.set entered true; wait_worker release;
-    Duckdb.execute_transaction tx "insert into t values (2)")) in
+    Duckdb.execute tx "insert into t values (2)")) in
   Monitor.protect ~finally:(fun () -> Stdlib.Atomic.set release true; complete a >>| fun _ -> ()) (fun () ->
     wait_scheduler (fun () -> Stdlib.Atomic.get entered) >>= fun () ->
     let b = ok (A.transaction p ~f:count_rows) in
@@ -167,16 +166,16 @@ let transaction_exclusion () = with_pool (fun p ->
     complete a >>= fun result -> ok result;
     complete b >>| fun result ->
     require "whole transaction visible to next borrower" (Int64.equal (ok result) 2L);
-    require "escaped transaction revoked" (match Duckdb.execute_transaction (Option.value_exn !escaped) "select 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false)))
+    require "escaped transaction revoked" (match Duckdb.execute (Option.value_exn !escaped) "select 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false)))
 let commit_cancel ~after () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   if after then native_hold Commit_return;
   let r = ok (A.transaction p ~f:(fun tx ->
-    ok (Duckdb.execute_transaction tx "insert into t values (1)");
+    ok (Duckdb.execute tx "insert into t values (1)");
     if not after then (
       Stdlib.Atomic.set entered true; wait_worker release;
-      ignore (Duckdb.execute_transaction tx "insert into t values (2)"));
+      ignore (Duckdb.execute tx "insert into t values (2)"));
     Ok ())) in
   Monitor.protect ~finally:(fun () -> Stdlib.Atomic.set release true; native_release_all (); complete r >>| fun _ -> ()) (fun () ->
     (if after then heartbeat (complete r) Commit_return else wait_scheduler (fun () -> Stdlib.Atomic.get entered)) >>= fun () ->
@@ -191,15 +190,16 @@ let heartbeat_typed seam ~cancel () = with_pool (fun p ->
   let r = ok (A.transaction p ~f:(fun tx ->
     match seam with
     | Fetch | Chunk ->
-      Duckdb.with_prepared_transaction tx "select 42::BIGINT" ~f:(fun prepared ->
-        let result = ok (Duckdb.execute_prepared prepared) in
+      Duckdb.Statement.with_prepared tx "select 42::BIGINT" ~f:(fun prepared ->
+        (* The fetch hold is armed before the fold executes; execution does
+           not reach it. *)
         if phys_equal seam Fetch then native_hold Fetch;
-        Duckdb.fold_chunks result ~init:() ~f:(fun _chunk () ->
+        Duckdb.Statement.fold_chunks prepared ~init:() ~f:(fun _chunk () ->
           if phys_equal seam Chunk then native_hold Chunk;
           Ok (Duckdb.Stop ())))
     | Appender_clear | Appender_destroy ->
       let t = Duckdb.Table.(declare "t" Columns.[ "i", int64 ] ~row:Fn.id) in
-      Duckdb.Table.with_appender_transaction tx t ~f:(fun appender ->
+      Duckdb.Table.with_appender tx t ~f:(fun appender ->
         ok (Duckdb.Table.append appender [Duckdb.Args.[42L]]);
         native_hold seam;
         if cancel then Error { Duckdb.Error.context = Transaction; cause = Native "intentional rollback" }
@@ -253,12 +253,11 @@ let shutdown_abandoned () = with_pool (fun p ->
   require "abandoned failed shutdown caller still closes once" (disconnects () = 1))
 let result_error () = with_pool (fun p ->
   let r = ok (A.transaction p ~f:(fun tx ->
-    Duckdb.with_prepared_transaction tx "select 'text'::VARCHAR" ~f:(fun prepared ->
-      Result.bind (Duckdb.execute_prepared prepared) ~f:(fun result ->
-        Duckdb.fold_chunks result ~init:() ~f:(fun chunk () ->
-          match Duckdb.column chunk ~column:0 ~row:0 Duckdb.Codec.Values.int64 with
-          | Ok _ -> Ok (Duckdb.Stop ())
-          | Error e -> Error e))))) in
+    Duckdb.Statement.with_prepared tx "select 'text'::VARCHAR" ~f:(fun prepared ->
+      Duckdb.Statement.fold_chunks prepared ~init:() ~f:(fun chunk () ->
+        match Duckdb.Statement.column chunk ~column:0 ~row:0 Duckdb.Codec.Values.int64 with
+        | Ok _ -> Ok (Duckdb.Stop ())
+        | Error e -> Error e)))) in
   complete r >>| fun result ->
   require "typed result error retained" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Type_mismatch _; _ })) -> true | _ -> false);
   require "typed result failed lease retired" (connects () = 2))
@@ -275,8 +274,8 @@ let heartbeat_copy () =
 let swallowed_statement_error () = with_pool (fun p ->
   let swallowed = Stdlib.Atomic.make false in
   let r = ok (A.transaction p ~f:(fun tx ->
-    Stdlib.Atomic.set swallowed (Result.is_error (Duckdb.execute_transaction tx "select __stage4c_absent_column__"));
-    require "manual transaction SQL rejected on token" (match Duckdb.execute_transaction tx "ROLLBACK" with Error { cause = Duckdb.Error.Unsupported_statement; _ } -> true | _ -> false);
+    Stdlib.Atomic.set swallowed (Result.is_error (Duckdb.execute tx "select __stage4c_absent_column__"));
+    require "manual transaction SQL rejected on token" (match Duckdb.execute tx "ROLLBACK" with Error { cause = Duckdb.Error.Unsupported_statement; _ } -> true | _ -> false);
     Ok 42)) in
   complete r >>| fun result ->
   require "callback actually swallowed a statement error" (Stdlib.Atomic.get swallowed);

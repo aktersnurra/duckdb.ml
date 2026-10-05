@@ -98,5 +98,5 @@ module Request : sig
   val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
 
   (** The same operations as an instance, for code generic over backends. *)
-  module Generic : Duckdb.Request.CONNECTION with type owner = t and type error = error and type 'a future = 'a
+  module Generic : Duckdb.Request.CONNECTION with type 'k owner = t and type error = error and type 'a future = 'a
 end

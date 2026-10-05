@@ -84,7 +84,7 @@ let delayed_a_cancellation_active_b clock replacement =
         Eio.Promise.resolve publish_context cc;
         try
           let result = if replacement then
-            E.transaction p ~f:(fun tx -> Duckdb.execute_transaction tx "SELECT 10")
+            E.transaction p ~f:(fun tx -> Duckdb.execute tx "SELECT 10")
             else E.execute p "SELECT 10" in
           ignore result; false
         with Eio.Cancel.Cancelled Test_support.Requested -> true)) in

@@ -30,29 +30,30 @@ let check (config : config) totals =
      not (Int64.equal totals.checksum target.checksum)
   then failwith "benchmark result mismatch"
 
-(* Typed requests execute and decode in one call, so the owned time includes
-   execute and has no separate execute time. The request is built once, so
+(* Both paths execute and decode in one call ([Statement.fold_chunks] folds
+   inside the result lease), so each time includes execute and neither has a
+   separate execute time. The request is built once, so
    warmups populate the statement cache and later samples exclude prepare. *)
 let owned_request sql =
   Duckdb.Request.many Duckdb.Fields.[] Duckdb.Fields.[int64; nullable int64]
     ~row:(fun required nullable -> required, nullable) sql
 
 let owned connection request () =
-  match Duckdb.Request.Connection.fold connection request Duckdb.Args.[] ~init:{ rows = 0; nulls = 0; checksum = 0L }
+  match Duckdb.Request.Session.fold connection request Duckdb.Args.[] ~init:{ rows = 0; nulls = 0; checksum = 0L }
     ~f:(fun (required, nullable) totals -> Ok (Duckdb.Continue (add required nullable totals))) with
   | Ok totals -> totals
   | Error { context = Query sql; _ } -> failwith ("benchmark owned request failed in " ^ sql)
   | Error _ -> failwith "benchmark owned request failed"
 
-let borrowed result =
-  fail_error (Duckdb.fold_chunks result ~init:{ rows = 0; nulls = 0; checksum = 0L }
+let borrowed prepared () =
+  fail_error (Duckdb.Statement.fold_chunks prepared ~init:{ rows = 0; nulls = 0; checksum = 0L }
                 ~f:(fun chunk totals ->
                   let rec rows index totals =
-                    if index = Duckdb.chunk_length chunk then Ok (Duckdb.Continue totals)
+                    if index = Duckdb.Statement.chunk_length chunk then Ok (Duckdb.Continue totals)
                     else
-                      let required = fail_error (Duckdb.column chunk ~column:0 ~row:index
+                      let required = fail_error (Duckdb.Statement.column chunk ~column:0 ~row:index
                                                    Duckdb.Codec.Values.int64) in
-                      let nullable = fail_error (Duckdb.column chunk ~column:1 ~row:index
+                      let nullable = fail_error (Duckdb.Statement.column chunk ~column:1 ~row:index
                                                    Duckdb.Codec.Values.(nullable int64)) in
                       rows (index + 1) (add required nullable totals)
                   in
@@ -105,11 +106,10 @@ let run (config : config) =
       config.rows in
   ignore (fail_error (Duckdb.with_database (fail_error (Duckdb.Config.create Duckdb.Config.Memory)) ~f:(fun database ->
       Duckdb.with_connection database ~f:(fun connection ->
-        Duckdb.with_prepared connection sql ~f:(fun prepared ->
-          let execute () = fail_error (Duckdb.execute_prepared prepared) in
+        Duckdb.Statement.with_prepared connection sql ~f:(fun prepared ->
           let request = owned_request sql in
           let measure_owned () = measure config ignore (fun () -> owned connection request ()) in
-          let measure_borrowed () = measure config execute borrowed in
+          let measure_borrowed () = measure config ignore (borrowed prepared) in
           for _ = 1 to config.warmups do
             ignore (measure_owned () : metrics * totals);
             ignore (measure_borrowed () : metrics * totals)

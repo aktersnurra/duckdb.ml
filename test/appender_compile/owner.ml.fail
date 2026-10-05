@@ -1,1 +1,1 @@
-let close (a : (_, _) Duckdb.Table.appender) = Duckdb.close_connection a
+let close (a : (_, _) Duckdb.Table.appender) = Duckdb.Owned.close_connection a

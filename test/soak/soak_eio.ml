@@ -43,7 +43,7 @@ let callback_cancel () = with_pool (fun sw p ->
     let request = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.sub (fun cc ->
       Eio.Promise.resolve publish cc;
       try ignore (E.transaction p ~f:(fun tx ->
-        match Duckdb.execute_transaction tx "INSERT INTO stage5_callback VALUES (1)" with
+        match Duckdb.execute tx "INSERT INTO stage5_callback VALUES (1)" with
         | Error error -> Error error | Ok () -> gate entered release; Ok ())); false
       with ex -> cancelled ex)) in
     await entered;
@@ -151,9 +151,9 @@ let run_episode scenario =
   let assert_baseline () = require "resource baseline restored" (Duckdb_ffi.live_resources () = live && Duckdb_ffi.fallback_reclaims () = fallback) in
   if not (controlled "accounting") then assert_baseline ()
   else
-    let db = unwrap (Duckdb.open_database (config ())) in
-    let connection = unwrap (Duckdb.connect db) in
-    Exn.protect ~finally:(fun () -> unwrap (Duckdb.close_connection connection); unwrap (Duckdb.close_database db)) ~f:assert_baseline
+    let db = unwrap (Duckdb.Owned.open_database (config ())) in
+    let connection = unwrap (Duckdb.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> unwrap (Duckdb.Owned.close_connection connection); unwrap (Duckdb.Owned.close_database db)) ~f:assert_baseline
 
 let run ~seed ~episodes =
   let config = { Soak_support.seed; episodes } in

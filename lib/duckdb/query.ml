@@ -226,6 +226,10 @@ let fold_internal ~lifting r validate ~init ~f =
       loop init)
       (fun () -> destroy_result r)))))
 let fold_chunks ~lifting r ~init ~f = fold_internal ~lifting r (fun _ -> Ok ()) ~init ~f
+let fold_prepared ~lifting p ~init ~f =
+  match execute_prepared p with
+  | Error cause -> Error (lift lifting cause)
+  | Ok r -> fold_chunks ~lifting r ~init ~f
 let fold_validated ~context r ~validate ~init ~f =
   fold_internal ~lifting:(Cause context) r
     (fun native -> validate (F.prepared_column_types native)) ~init ~f

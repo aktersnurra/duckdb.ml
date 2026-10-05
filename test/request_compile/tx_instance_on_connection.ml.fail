@@ -1,4 +1,0 @@
-module D = Duckdb
-module R = D.Request
-module C = R.Connection
-let f (c : D.connection) = R.Transaction.exec c (R.exec D.Fields.[] "delete from t") D.Args.[]

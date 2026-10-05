@@ -46,8 +46,8 @@ let main () =
   require "Row_count is a request error" (match absent with
     | Error (Q.Request { cause = D.Error.Row_count { actual = `Zero; _ }; _ }) -> true | _ -> false);
   Q.with_transaction pool ~f:(fun tx ->
-    Result.bind (R.Transaction.exec tx insert D.Args.[3L; Some "c"]) ~f:(fun () ->
-      R.Transaction.find tx one_note D.Args.[99L])) >>= fun rolled ->
+    Result.bind (R.Session.exec tx insert D.Args.[3L; Some "c"]) ~f:(fun () ->
+      R.Session.find tx one_note D.Args.[99L])) >>= fun rolled ->
   require "transaction rolls back on request error" (Result.is_error rolled);
   Q.collect pool values D.Args.[0L] >>| request_ok >>= fun remaining ->
   require "rollback left no row" (List.length remaining = 2);

@@ -15,14 +15,13 @@ let transaction () =
     Duckdb.with_connection db ~f:(fun c ->
       Duckdb.with_transaction c ~f:(fun tx ->
         escaped := Some tx;
-        ok (Duckdb.execute_transaction tx "CREATE TABLE t(s VARCHAR)");
-        ok (Duckdb.execute_transaction tx "INSERT INTO t VALUES ('owned')");
-        Duckdb.with_prepared_transaction tx "SELECT s FROM t" ~f:(fun p ->
-          let r = ok (Duckdb.execute_prepared p) in
-          Duckdb.fold_chunks r ~init:[] ~f:(fun chunk rows ->
-            let text = ok (Duckdb.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
+        ok (Duckdb.execute tx "CREATE TABLE t(s VARCHAR)");
+        ok (Duckdb.execute tx "INSERT INTO t VALUES ('owned')");
+        Duckdb.Statement.with_prepared tx "SELECT s FROM t" ~f:(fun p ->
+          Duckdb.Statement.fold_chunks p ~init:[] ~f:(fun chunk rows ->
+            let text = ok (Duckdb.Statement.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
             Ok (Duckdb.Continue (text :: rows)))))))) in
-  (match Duckdb.execute_transaction (Option.value_exn !escaped) "SELECT 1" with
+  (match Duckdb.execute (Option.value_exn !escaped) "SELECT 1" with
    | Error { cause = Closed; _ } -> () | _ -> failwith "escaped token usable");
   assert (Duckdb_ffi.live_resources () = 0);
   rows

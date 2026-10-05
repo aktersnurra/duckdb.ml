@@ -19,12 +19,11 @@ let reset () = reset_hooks (); query_mode ()
 let release () = for i = 1 to 95 do gate i false done; selected_gate false
 let wait id = E.await ~label:("control-publication boundary " ^ Int.to_string id) (fun () -> entered id > 0)
 let one_controller () = check "control-publication sole controller joined" (count 10 = 1 && count 12 = 1)
-let scalar c sql = ok (D.with_prepared c sql ~f:(fun p ->
-  Result.bind (D.execute_prepared p) ~f:(fun r ->
-    D.fold_chunks r ~init:0L ~f:(fun chunk _ ->
-      match D.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with
-      | Ok n -> Ok (D.Stop n)
-      | Error e -> Error e))))
+let scalar c sql = ok (D.Statement.with_prepared c sql ~f:(fun p ->
+  D.Statement.fold_chunks p ~init:0L ~f:(fun chunk _ ->
+    match D.Statement.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with
+    | Ok n -> Ok (D.Stop n)
+    | Error e -> Error e)))
 let with_pair f = ok (D.with_database (ok (D.Config.create Memory)) ~f:(fun db ->
   D.with_connection db ~f:(fun owner -> D.with_connection db ~f:(fun observer ->
     ok (D.execute owner "CREATE TABLE cp(x BIGINT)"); f owner observer; Ok ()))))
@@ -33,9 +32,8 @@ let commit_case ~snapshot point _ = with_pair (fun owner observer ->
   if point = 67 || point = 68 then selected_gate true;
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    let result = if snapshot then D.with_prepared c "INSERT INTO cp VALUES(1) RETURNING x" ~f:(fun p ->
-      Result.bind (D.execute_prepared p) ~f:D.close_result)
-    else D.with_transaction c ~f:(fun tx -> D.execute_transaction tx "INSERT INTO cp VALUES(1)") in
+    let result = if snapshot then D.Statement.with_prepared c "INSERT INTO cp VALUES(1) RETURNING x" ~f:D.Statement.execute
+    else D.with_transaction c ~f:(fun tx -> D.execute tx "INSERT INTO cp VALUES(1)") in
     cancelled (D.execute c "INSERT INTO cp VALUES(2)"); result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
@@ -141,9 +139,9 @@ let rollback_matrix primary mode owner =
   reset (); control_failure mode;
   let request = B.create () in
   let outcome = capture (fun () -> B.run request owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
-    ok (D.execute_transaction tx "SELECT 1");
+    ok (D.execute tx "SELECT 1");
     let error = if String.equal primary "native" then (
-      match D.execute_transaction tx "SELECT no_such_column" with Error e -> e | Ok () -> failwith "expected SQL failure")
+      match D.execute tx "SELECT no_such_column" with Error e -> e | Ok () -> failwith "expected SQL failure")
       else { D.Error.context = Transaction; cause = Cancelled } in
     ok (B.cancel request);
     if String.equal primary "exception" then raise_control_primary () else Error error))) in
@@ -165,7 +163,7 @@ let rollback_matrix primary mode owner =
 let commit_return_exception _ = with_pair (fun owner observer ->
   reset (); control_failure 3;
   let outcome = capture (fun () -> B.run (B.create ()) owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
-    D.execute_transaction tx "INSERT INTO cp VALUES(1)"))) in
+    D.execute tx "INSERT INTO cp VALUES(1)"))) in
   (match outcome with
    | Error (D.Cleanup_exception (secondary, Commit_return_failure), trace) ->
      check "uncertain commit exception and rollback diagnostics retained" (native_message secondary && has_trace trace "raw_control")
@@ -209,8 +207,7 @@ let snapshot_rollback ~exception_ mode _ = with_pair (fun owner observer ->
   reset (); control_failure mode; snapshot_exception exception_; gate 6 true; selected_gate true;
   let request = B.create () in
   E.with_worker (fun () -> capture (fun () -> B.run request owner ~f:(fun c ->
-    D.with_prepared c (if exception_ then "INSERT INTO cp VALUES(1) RETURNING x" else "SELECT CAST('invalid' AS BIGINT)") ~f:(fun p ->
-      Result.bind (D.execute_prepared p) ~f:D.close_result))))
+    D.Statement.with_prepared c (if exception_ then "INSERT INTO cp VALUES(1) RETURNING x" else "SELECT CAST('invalid' AS BIGINT)") ~f:D.Statement.execute)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 6; ok (B.cancel request); E.await ~label:"snapshot selected" selected_entered;
       gate 6 false; E.await ~label:"snapshot rollback joins" (fun () -> count 11 > 0);
@@ -247,7 +244,7 @@ let control_cleanup ~commit _ = with_pair (fun owner observer ->
   reset (); gate point true; selected_gate true;
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.with_transaction c ~f:(fun tx -> D.execute_transaction tx "INSERT INTO cp VALUES(1)")))
+    D.with_transaction c ~f:(fun tx -> D.execute tx "INSERT INTO cp VALUES(1)")))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request); E.await ~label:"control cleanup selected" selected_entered;
       gate 7 true; gate point false; wait 7;

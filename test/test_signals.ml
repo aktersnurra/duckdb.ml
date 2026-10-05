@@ -36,7 +36,7 @@ let () =
             if String.is_prefix mode ~prefix:"transaction" || String.is_prefix mode ~prefix:"rollback" || persistent then (
               inject "transaction";
               let transaction_result () = D.with_transaction c ~f:(fun tx ->
-                ok (D.execute_transaction tx "insert into t values (1)");
+                ok (D.execute tx "insert into t values (1)");
                 if String.equal mode "transaction-callback" || String.equal mode "transaction-rollback" then
                   (trigger (); Stdlib.Gc.minor ());
                 if String.is_prefix mode ~prefix:"rollback" then (inject "rollback"; Error { D.Error.context = Transaction; cause = Effects_not_allowed })

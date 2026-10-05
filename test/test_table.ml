@@ -1,7 +1,6 @@
 open! Base
 module D = Duckdb
 module R = D.Request
-module C = R.Connection
 module T = D.Table
 let ( let* ) x f = Result.bind x ~f
 let core_ok = function Ok x -> x | Error { D.Error.cause = Native s; _ } -> failwith s | Error _ -> failwith "unexpected core error"
@@ -21,13 +20,13 @@ let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fal
 let connected f =
   core_ok (D.with_database (core_ok (D.Config.create Memory)) ~f:(fun db -> D.with_connection db ~f:(fun c -> f c; Ok ())));
   clean ()
-let ddl c sql = ok (C.exec c (R.exec D.Fields.[] sql) D.Args.[])
-let count c table = ok (C.find c (R.one D.Fields.[] D.Fields.[int64] ~row:Fn.id ("SELECT count(*)::BIGINT FROM " ^ table)) D.Args.[])
+let ddl c sql = ok (R.Session.exec c (R.exec D.Fields.[] sql) D.Args.[])
+let count c table = ok (R.Session.find c (R.one D.Fields.[] D.Fields.[int64] ~row:Fn.id ("SELECT count(*)::BIGINT FROM " ^ table)) D.Args.[])
 
 type note = { value : int64; note : string option }
 let equal_note a b = Int64.equal a.value b.value && Option.equal String.equal a.note b.note
 let notes = T.(declare "notes" Columns.[ "value", int64; "note", nullable string ] ~row:(fun value note -> { value; note }))
-let read c = ok (C.collect c (T.select notes) D.Args.[])
+let read c = ok (R.Session.collect c (T.select notes) D.Args.[])
 
 (* Typed appender, select and insert over a declared table. *)
 let () =
@@ -36,7 +35,7 @@ let () =
     ok (T.with_appender c notes ~f:(fun a ->
       let* () = T.append a [D.Args.[1L; Some "one"]; D.Args.[2L; None]] in
       T.flush a));
-    ok (C.exec c (T.insert notes) D.Args.[3L; Some "three"]);
+    ok (R.Session.exec c (T.insert notes) D.Args.[3L; Some "three"]);
     assert (List.equal equal_note (read c)
       [ { value = 1L; note = Some "one" }; { value = 2L; note = None }; { value = 3L; note = Some "three" } ]));
   Stdlib.print_endline "table: typed appender, flush, select and insert of declared columns=ok"
@@ -65,8 +64,8 @@ let () =
       (T.with_appender c kinds ~f:(fun a -> T.append a [D.Args.["x"]])));
     ddl c "ALTER TABLE events ALTER extra SET DEFAULT 'none'";
     ok (T.with_appender c kinds ~f:(fun a -> T.append a [D.Args.["login"]; D.Args.["logout"]]));
-    ok (C.exec c (T.insert kinds) D.Args.["audit"]);
-    let ids = ok (C.collect c (R.many D.Fields.[] D.Fields.[int64; string] ~row:(fun i e -> (i, e))
+    ok (R.Session.exec c (T.insert kinds) D.Args.["audit"]);
+    let ids = ok (R.Session.collect c (R.many D.Fields.[] D.Fields.[int64; string] ~row:(fun i e -> (i, e))
       "SELECT id, extra FROM events ORDER BY id") D.Args.[]) in
     assert (List.equal Poly.equal ids [ 100L, "none"; 101L, "none"; 102L, "none" ]));
   Stdlib.print_endline "table: Missing_column without default; defaults applied for omitted columns=ok"
@@ -106,7 +105,7 @@ let () =
         let* () = T.append a [D.Args.[7L; None]] in
         Error { D.Error.context = Query "callback"; cause = Row_count { expected = `One; actual = `Zero } })));
     assert (Int64.equal (count c "notes") 1L);
-    ok (C.with_transaction c ~f:(fun tx -> T.with_appender_transaction tx notes ~f:(fun a -> T.append a [D.Args.[8L; None]])));
+    ok (R.Session.with_transaction c ~f:(fun tx -> T.with_appender tx notes ~f:(fun a -> T.append a [D.Args.[8L; None]])));
     assert (Int64.equal (count c "notes") 2L));
   Stdlib.print_endline "table: codec rejection before native rows, callback error rolls back, transaction scope=ok"
 
@@ -114,7 +113,7 @@ let () =
 let () =
   connected (fun c ->
     ddl c "CREATE TABLE notes(value BIGINT NOT NULL, note VARCHAR)";
-    ok (C.ingest c notes [ [D.Args.[1L; None]]; [D.Args.[2L; Some "b"]; D.Args.[3L; None]] ] ~flush:true);
+    ok (R.Session.ingest c notes [ [D.Args.[1L; None]]; [D.Args.[2L; Some "b"]; D.Args.[3L; None]] ] ~flush:true);
     assert (Int64.equal (count c "notes") 3L));
   Stdlib.print_endline "table: Connection.ingest batches with explicit flush=ok"
 
@@ -125,7 +124,7 @@ let () =
   Exn.protect ~finally:(fun () -> if Stdlib.Sys.file_exists file then Stdlib.Sys.remove file) ~f:(fun () ->
     connected (fun c ->
       ddl c "CREATE TABLE notes(value BIGINT NOT NULL, note VARCHAR)";
-      ok (C.ingest c notes [ [D.Args.[1L; Some "a"]; D.Args.[2L; None]] ] ~flush:false);
+      ok (R.Session.ingest c notes [ [D.Args.[1L; Some "a"]; D.Args.[2L; None]] ] ~flush:false);
       let path = core_ok (D.Parquet.path file) in
       core_ok (D.Parquet.export c ~query:"SELECT value, note FROM notes ORDER BY value" path);
       let table_rows = ok (D.Parquet.fold_table c [path] notes ~init:[] ~f:(fun r rs -> Ok (D.Continue (r :: rs)))) in

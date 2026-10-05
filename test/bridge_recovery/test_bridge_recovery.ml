@@ -6,17 +6,16 @@ external count : int -> int = "adapter_bridge_count"
 let check label condition = if not condition then failwith label
 let ok = function Ok value -> value | Error _ -> failwith "expected Ok"
 let rows connection =
-  D.with_prepared connection "SELECT i FROM recovery_rows ORDER BY i" ~f:(fun prepared ->
-    Result.bind (D.execute_prepared prepared) ~f:(fun result ->
-      D.fold_chunks result ~init:[] ~f:(fun chunk values ->
-        let values = ref values and failure = ref None in
-        for row = 0 to D.chunk_length chunk - 1 do
-          if Option.is_none !failure then
-            (match D.column chunk ~column:0 ~row D.Codec.Values.int64 with
-             | Ok value -> values := value :: !values
-             | Error e -> failure := Some e)
-        done;
-        match !failure with None -> Ok (D.Continue !values) | Some e -> Error e)))
+  D.Statement.with_prepared connection "SELECT i FROM recovery_rows ORDER BY i" ~f:(fun prepared ->
+    D.Statement.fold_chunks prepared ~init:[] ~f:(fun chunk values ->
+      let values = ref values and failure = ref None in
+      for row = 0 to D.Statement.chunk_length chunk - 1 do
+        if Option.is_none !failure then
+          (match D.Statement.column chunk ~column:0 ~row D.Codec.Values.int64 with
+           | Ok value -> values := value :: !values
+           | Error e -> failure := Some e)
+      done;
+      match !failure with None -> Ok (D.Continue !values) | Some e -> Error e))
 let still_admitted request owner =
   check "ordinary rollback leaves the same request Pending"
     (match B.settlement request with Pending -> true | Settled -> false);
@@ -37,10 +36,10 @@ let transaction_recovery failure owner observer =
   ok (B.run request owner ~f:(fun facade ->
     let outcome =
       try `Result (D.with_transaction facade ~f:(fun transaction ->
-        ok (D.execute_transaction transaction "INSERT INTO recovery_rows VALUES (1)");
+        ok (D.execute transaction "INSERT INTO recovery_rows VALUES (1)");
         match failure with
         | Result_error -> Error { D.Error.context = Transaction; cause = Embedded_nul }
-        | Native_error -> D.execute_transaction transaction "SELECT missing_recovery_column"
+        | Native_error -> D.execute transaction "SELECT missing_recovery_column"
         | Callback_exception -> raise_recoverable_callback ()))
       with Recoverable_callback as exception_ ->
         `Exception (exception_, Stdlib.Printexc.get_raw_backtrace ()) in
@@ -58,7 +57,7 @@ let transaction_recovery failure owner observer =
     still_admitted request owner;
     ok (D.execute facade "INSERT INTO recovery_rows VALUES (2)");
     ok (D.with_transaction facade ~f:(fun transaction ->
-      D.execute_transaction transaction "INSERT INTO recovery_rows VALUES (3)"));
+      D.execute transaction "INSERT INTO recovery_rows VALUES (3)"));
     check "later user work and transaction commit after rollback"
       (count 1 = 2 && count 2 = 1 && count 3 = 1);
     still_admitted request owner;
@@ -74,17 +73,18 @@ let snapshot_recovery owner observer =
   reset_counts ();
   ok (B.run request owner ~f:(fun facade ->
     (* Preparation succeeds; the NOT NULL violation occurs at native execute
-       inside the real Query.execute_prepared -> Resource.with_child_snapshot. *)
-    ok (D.with_prepared facade "INSERT INTO recovery_rows VALUES (NULL) RETURNING i"
+       inside the real Query.execute_prepared (under Statement.fold_chunks) ->
+       Resource.with_child_snapshot. *)
+    ok (D.Statement.with_prepared facade "INSERT INTO recovery_rows VALUES (NULL) RETURNING i"
       ~f:(fun prepared ->
-        expect_native_error (D.execute_prepared prepared);
+        expect_native_error (D.Statement.execute prepared);
         check "snapshot error rolls back before returning"
           (count 0 = 1 && count 1 = 1 && count 2 = 0 && count 3 = 1);
         still_admitted request owner;
         Ok ()));
     ok (D.execute facade "INSERT INTO recovery_rows VALUES (2)");
-    ok (D.with_prepared facade "INSERT INTO recovery_rows VALUES (3) RETURNING i"
-      ~f:(fun prepared -> Result.bind (D.execute_prepared prepared) ~f:D.close_result));
+    ok (D.Statement.with_prepared facade "INSERT INTO recovery_rows VALUES (3) RETURNING i"
+      ~f:D.Statement.execute);
     check "later raw execute and fresh snapshot commit after rollback"
       (count 0 = 3 && count 1 = 2 && count 2 = 1 && count 3 = 1);
     still_admitted request owner;

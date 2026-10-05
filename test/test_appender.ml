@@ -8,7 +8,7 @@ let rec message (e : Error.t) = match e.cause with
 let ok = function Ok x -> x | Error e -> failwith (message e)
 let error = function Error e -> e | Ok _ -> failwith "expected error"
 let rows c sql fields ~row =
-  match Request.Connection.collect c (Request.many ~oneshot:true Fields.[] fields ~row sql) Args.[] with
+  match Request.Session.collect c (Request.many ~oneshot:true Fields.[] fields ~row sql) Args.[] with
   | Ok values -> values
   | Error _ -> failwith "typed request failed"
 let count c table = match rows c ("SELECT count(*) FROM " ^ table) Fields.[int64] ~row:Fn.id with
@@ -62,7 +62,7 @@ let metadata_boundaries c =
     assert (phys_equal (error result).cause (Option.value_exn !first).cause);
     assert (Int64.equal (count c table) 1L); clean ());
   ok (execute c "CREATE TABLE metadata_marker(x BIGINT)");
-  let opens tx name table = error (Table.with_appender_transaction tx table ~f:(fun _ ->
+  let opens tx name table = error (Table.with_appender tx table ~f:(fun _ ->
     failwith ("metadata schema accepted before exhaustion: " ^ name))) in
   List.iter ["metadata_generated_boundary",2048,true;
              "metadata_generated_small",2,true;
@@ -71,7 +71,7 @@ let metadata_boundaries c =
     create table physical ~generated;
     let first = ref None in
     let result = with_transaction c ~f:(fun tx ->
-      ok (execute_transaction tx "INSERT INTO metadata_marker VALUES (1)");
+      ok (execute tx "INSERT INTO metadata_marker VALUES (1)");
       (* Generated columns are declared so the catalog check passes and the
          appender's own metadata rejection is reached. *)
       let e = if generated
@@ -105,7 +105,7 @@ let () =
     (* Nullable, so NULL reaches the engine's NOT NULL metadata. *)
     let nullable_t = Table.(declare "a" Columns.[ "x", nullable int64 ] ~row:Fn.id) in
     ok (Table.with_appender c t ~f:(fun a ->
-      assert (Result.is_error (close_connection c));
+      assert (Result.is_error (Owned.close_connection c));
       assert (Result.is_error (execute c "ALTER TABLE a ALTER x TYPE DOUBLE"));
       Table.append a [Args.[9007199254740993L]]));
     assert (Int64.equal (count c "a") 1L);
@@ -145,13 +145,13 @@ let () =
     (try ignore (Table.with_appender c t ~f:(fun a -> ok (Table.append a [Args.[1L]]); raise Stdlib.Exit)); assert false with Stdlib.Exit -> ());
     assert (Int64.equal (count c "a") 0L);
     ok (with_transaction c ~f:(fun tx ->
-      ok (Table.with_appender_transaction tx t ~f:(fun a ->
-        assert (match execute_transaction tx "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
+      ok (Table.with_appender tx t ~f:(fun a ->
+        assert (match execute tx "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
         Table.append a [Args.[3L]]));
-      execute_transaction tx "INSERT INTO a VALUES (4)"));
+      execute tx "INSERT INTO a VALUES (4)"));
     assert (Int64.equal (count c "a") 2L);
     ignore (error (with_transaction c ~f:(fun tx ->
-      ok (Table.with_appender_transaction tx t ~f:(fun a -> Table.append a [Args.[5L]])); Error { context = Transaction; cause = Native "callback primary" })));
+      ok (Table.with_appender tx t ~f:(fun a -> Table.append a [Args.[5L]])); Error { context = Transaction; cause = Native "callback primary" })));
     assert (Int64.equal (count c "a") 2L);
     ok (execute c "CREATE SCHEMA \"s' quoted\";" );
     ok (execute c "CREATE TABLE \"s' quoted\".\"t\"\"; DROP TABLE a;--\"(x BIGINT)");
@@ -166,7 +166,7 @@ let () =
     assert (Int64.equal (count c "a") 2L);
     List.iter [false;true] ~f:(fun use_effect ->
       ignore (error (with_transaction c ~f:(fun tx ->
-        (try ignore (Table.with_appender_transaction tx t ~f:(fun a ->
+        (try ignore (Table.with_appender tx t ~f:(fun a ->
           ok (Table.append a [Args.[99L]]);
           if use_effect then (try Stdlib.Effect.perform Pause with _ -> ())
           else raise Stdlib.Exit;

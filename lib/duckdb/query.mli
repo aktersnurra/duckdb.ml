@@ -42,6 +42,10 @@ val with_prepared_transaction : lifting:'e lifting -> transaction -> string ->
     Non-null codecs reject NULL on access, not on empty-result schema validation. *)
 val fold_chunks : lifting:'e lifting -> query_result -> init:'a ->
   f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
+(* Executes with the current bindings and folds the result inside its lease;
+   no result handle escapes. Execution failures are lifted as the fold's. *)
+val fold_prepared : lifting:'e lifting -> prepared -> init:'a ->
+  f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
 val chunk_length : chunk @ local -> int
 
 (** Zero-based column and row indices, checked before reading. Each access

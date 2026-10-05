@@ -1,1 +1,1 @@
-let reject (transaction : Duckdb.transaction) = Duckdb.close_connection transaction
+let reject (transaction : Duckdb.transaction) = Duckdb.Owned.close_connection transaction

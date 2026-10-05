@@ -1,8 +1,6 @@
 (* Every accepted typed-request form compiles. *)
 module D = Duckdb
 module R = D.Request
-module C = R.Connection
-module T = R.Transaction
 
 let user_id = D.Codec.Values.custom ~encode:(fun (`User n) -> Base.Or_error.return n)
   ~decode:(fun n -> Base.Or_error.return (`User n)) D.Codec.Values.int64
@@ -16,33 +14,33 @@ let records = R.many D.Fields.[int64] D.Fields.[int64; nullable string]
 
 let connection (c : D.connection) : (unit, D.Error.t) result =
   let ( let* ) x f = Result.bind x f in
-  let* () = C.exec c insert D.Args.[1L; None; `User 2L; Some (`User 3L)] in
-  let* ((_ : int64), (_ : string)) = C.find c one D.Args.[1L] in
-  let* (_ : (int64 * string) option) = C.find_opt c one D.Args.[1L] in
-  let* (_ : (int64 * string) list) = C.collect c one D.Args.[1L] in
-  let* (_ : float option option) = C.find_opt c opt D.Args.[] in
-  let* (_ : int64 list) = C.collect c many D.Args.[] in
-  let* (_ : record list) = C.collect c records D.Args.[0L] in
-  let* (_ : int) = C.fold c many D.Args.[] ~init:0 ~f:(fun _ n -> Ok (D.Continue (n + 1))) in
-  let* (_ : unit list) = C.collect c insert D.Args.[1L; Some "x"; `User 2L; None] in
-  C.with_transaction c ~f:(fun tx ->
-    let* () = T.exec tx insert D.Args.[1L; None; `User 2L; None] in
-    let* (_ : int64 * string) = T.find tx one D.Args.[1L] in
-    let* (_ : int64 list) = T.collect tx many D.Args.[] in
-    T.fold tx many D.Args.[] ~init:() ~f:(fun _ () -> Ok (D.Stop ())))
+  let* () = R.Session.exec c insert D.Args.[1L; None; `User 2L; Some (`User 3L)] in
+  let* ((_ : int64), (_ : string)) = R.Session.find c one D.Args.[1L] in
+  let* (_ : (int64 * string) option) = R.Session.find_opt c one D.Args.[1L] in
+  let* (_ : (int64 * string) list) = R.Session.collect c one D.Args.[1L] in
+  let* (_ : float option option) = R.Session.find_opt c opt D.Args.[] in
+  let* (_ : int64 list) = R.Session.collect c many D.Args.[] in
+  let* (_ : record list) = R.Session.collect c records D.Args.[0L] in
+  let* (_ : int) = R.Session.fold c many D.Args.[] ~init:0 ~f:(fun _ n -> Ok (D.Continue (n + 1))) in
+  let* (_ : unit list) = R.Session.collect c insert D.Args.[1L; Some "x"; `User 2L; None] in
+  R.Session.with_transaction c ~f:(fun tx ->
+    let* () = R.Session.exec tx insert D.Args.[1L; None; `User 2L; None] in
+    let* (_ : int64 * string) = R.Session.find tx one D.Args.[1L] in
+    let* (_ : int64 list) = R.Session.collect tx many D.Args.[] in
+    R.Session.fold tx many D.Args.[] ~init:() ~f:(fun _ () -> Ok (D.Stop ())))
 
 let example = D.Table.(declare "example" Columns.[ "value", int64; "note", nullable string ]
   ~row:(fun value note -> { value; note }))
 let tables (c : D.connection) : (unit, D.Error.t) result =
   let ( let* ) x f = Result.bind x f in
-  let* (_ : record list) = C.collect c (D.Table.select example) D.Args.[] in
-  let* () = C.exec c (D.Table.insert example) D.Args.[1L; Some "x"] in
-  let* () = C.ingest c example [[D.Args.[1L; None]]; [D.Args.[2L; Some "y"]]] ~flush:true in
+  let* (_ : record list) = R.Session.collect c (D.Table.select example) D.Args.[] in
+  let* () = R.Session.exec c (D.Table.insert example) D.Args.[1L; Some "x"] in
+  let* () = R.Session.ingest c example [[D.Args.[1L; None]]; [D.Args.[2L; Some "y"]]] ~flush:true in
   D.Table.with_appender c example ~f:(fun a ->
     let* () = D.Table.append a [D.Args.[1L; None]; D.Args.[2L; Some "y"]] in
     D.Table.flush a)
 let transactional_table (tx : D.transaction) =
-  D.Table.with_appender_transaction tx example ~f:(fun a -> D.Table.append a [D.Args.[3L; None]])
+  D.Table.with_appender tx example ~f:(fun a -> D.Table.append a [D.Args.[3L; None]])
 let parquet (c : D.connection) path =
 
   let (_ : (int, D.Error.t) result) =
@@ -55,5 +53,5 @@ let context (e : D.Error.t) = D.Error.(match e.context with
 module Count (B : R.CONNECTION) = struct
   let all owner = B.collect owner many D.Args.[]
 end
-module Sync_count = Count (R.Connection)
+module Sync_count = Count (R.Session)
 let (_ : D.connection -> (int64 list, D.Error.t) result) = Sync_count.all

@@ -1,4 +1,3 @@
 module D = Duckdb
 module R = D.Request
-module C = R.Connection
-let f c = C.find_opt c (R.many D.Fields.[] D.Fields.[int64] ~row:(fun x -> x) "select 1") D.Args.[]
+let f c = R.Session.find_opt c (R.many D.Fields.[] D.Fields.[int64] ~row:(fun x -> x) "select 1") D.Args.[]

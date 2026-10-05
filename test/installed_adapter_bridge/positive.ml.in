@@ -11,12 +11,11 @@ let () =
     Duckdb.with_connection db ~f:(fun connection ->
       Duckdb.Bridge.run request connection ~f:(fun facade ->
         Duckdb.with_transaction facade ~f:(fun tx ->
-          ok (Duckdb.execute_transaction tx "CREATE TABLE t(s VARCHAR)");
-          ok (Duckdb.execute_transaction tx "INSERT INTO t VALUES ('installed-owned')");
-          Duckdb.with_prepared_transaction tx "SELECT s FROM t" ~f:(fun prepared ->
-            let result = ok (Duckdb.execute_prepared prepared) in
-            Duckdb.fold_chunks result ~init:[] ~f:(fun chunk rows ->
-              let text = ok (Duckdb.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
+          ok (Duckdb.execute tx "CREATE TABLE t(s VARCHAR)");
+          ok (Duckdb.execute tx "INSERT INTO t VALUES ('installed-owned')");
+          Duckdb.Statement.with_prepared tx "SELECT s FROM t" ~f:(fun prepared ->
+            Duckdb.Statement.fold_chunks prepared ~init:[] ~f:(fun chunk rows ->
+              let text = ok (Duckdb.Statement.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
               Ok (Duckdb.Continue (text :: rows))))))))) in
   assert (List.equal String.equal rows ["installed-owned"]);
   assert (match Duckdb.Bridge.settlement request with Settled -> true | Pending -> false);

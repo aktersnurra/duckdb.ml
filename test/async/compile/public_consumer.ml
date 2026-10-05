@@ -1,7 +1,7 @@
 open! Base
 module A = Duckdb_async
 let submit pool = A.transaction pool ~f:(fun tx ->
-  Result.map (Duckdb.execute_transaction tx "select 42") ~f:(fun () -> "owned"))
+  Result.map (Duckdb.execute tx "select 42") ~f:(fun () -> "owned"))
 let observe request = A.completion request
 let typed pool =
   let row = Duckdb.Fields.[int64] in

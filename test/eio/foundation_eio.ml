@@ -83,7 +83,7 @@ let replacement_failure clock =
     Exn.protect ~finally:(fun () -> hold_database false) ~f:(fun () ->
     let running, queued = held clock (fun entered ->
       let running = Eio.Fiber.fork_promise ~sw (fun () ->
-        Eio.Cancel.protect (fun () -> E.transaction p ~f:(fun tx -> Duckdb.execute_transaction tx "SELECT 1"))) in
+        Eio.Cancel.protect (fun () -> E.transaction p ~f:(fun tx -> Duckdb.execute tx "SELECT 1"))) in
       entered ();
       let queued = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.protect (fun () -> E.execute p "SELECT 99")) in
       Eio.Fiber.yield ();
@@ -346,20 +346,16 @@ let held_disconnect clock cancellation =
       check "disconnect settles after release" (Eio.Promise.await_exn owner)))
 
 let child_cleanup_responsiveness clock =
-  let result tx =
-    let prepared = unwrap (Duckdb.prepare_transaction tx "SELECT 1") in
-    let result = unwrap (Duckdb.execute_prepared prepared) in
-    unwrap (Duckdb.close_result result); Duckdb.close_prepared prepared in
-  let chunk tx =
-    let prepared = unwrap (Duckdb.prepare_transaction tx "SELECT 1") in
-    let result = unwrap (Duckdb.execute_prepared prepared) in
-    ignore (unwrap (Duckdb.fold_chunks result ~init:() ~f:(fun _ () -> Ok (Duckdb.Stop ()) )));
-    unwrap (Duckdb.close_result result); Duckdb.close_prepared prepared in
-  let prepared tx = let p = unwrap (Duckdb.prepare_transaction tx "SELECT 1") in Duckdb.close_prepared p in
+  (* Each scope destroys its child on exit: the fold its result (and chunk),
+     the statement scope its prepared statement. *)
+  let result tx = Duckdb.Statement.with_prepared tx "SELECT 1" ~f:Duckdb.Statement.execute in
+  let chunk tx = Duckdb.Statement.with_prepared tx "SELECT 1" ~f:(fun prepared ->
+    Duckdb.Statement.fold_chunks prepared ~init:() ~f:(fun _ () -> Ok (Duckdb.Stop ()))) in
+  let prepared tx = Duckdb.Statement.with_prepared tx "SELECT 1" ~f:(fun _ -> Ok ()) in
   let appender tx =
-    unwrap (Duckdb.execute_transaction tx "CREATE TABLE cleanup_appender(x INTEGER)");
+    unwrap (Duckdb.execute tx "CREATE TABLE cleanup_appender(x INTEGER)");
     (* The declared table's scope opens and closes the appender. *)
-    Duckdb.Table.with_appender_transaction tx
+    Duckdb.Table.with_appender tx
       Duckdb.Table.(declare "cleanup_appender" Columns.[ "x", int32 ] ~row:Fn.id) ~f:(fun _ -> Ok ()) in
   List.iter [9, "result", result; 10, "prepared", prepared; 11, "appender", appender; 15, "chunk", chunk]
     ~f:(fun (kind, name, callback) -> held_child_cleanup clock kind name callback false;

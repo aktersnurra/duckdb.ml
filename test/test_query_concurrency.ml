@@ -27,68 +27,60 @@ let connected f = ok (D.with_database config ~f:(fun db -> D.with_connection db 
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let () =
   connected (fun c ->
-    D.with_prepared c "select ?::BIGINT" ~f:(fun p ->
-      ok (D.bind p 1 (D.Codec.Values.int64) 1L);
+    D.Statement.with_prepared c "select ?::BIGINT" ~f:(fun p ->
+      ok (D.Statement.bind p 1 (D.Codec.Values.int64) 1L);
       fail_bind ();
-      (match D.bind p 1 (D.Codec.Values.int64) 2L with Error { cause = Native _; _ } -> () | _ -> assert false);
-      (match D.execute_prepared p with Error { cause = Unbound_parameter 1; _ } -> () | _ -> assert false);
-      ok (D.bind p 1 (D.Codec.Values.int64) 3L);
-      let r = ok (D.execute_prepared p) in
+      (match D.Statement.bind p 1 (D.Codec.Values.int64) 2L with Error { cause = Native _; _ } -> () | _ -> assert false);
+      (match D.Statement.execute p with Error { cause = Unbound_parameter 1; _ } -> () | _ -> assert false);
+      ok (D.Statement.bind p 1 (D.Codec.Values.int64) 3L);
       fail_fetch ();
-      (match D.fold_chunks r ~init:() ~f:(fun _ () -> assert false) with Error { cause = Native _; _ } -> () | _ -> assert false);
-      ok (D.close_result r);
-      ok (D.close_result (ok (D.execute_prepared p))); Ok ()));
+      (match D.Statement.fold_chunks p ~init:() ~f:(fun _ () -> assert false) with Error { cause = Native _; _ } -> () | _ -> assert false);
+      ok (D.Statement.execute p); Ok ()));
   clean (); Stdlib.print_endline "query: injected bind/fetch errors clean and reusable=ok"
 let () =
   List.iter [1; 2] ~f:(fun point ->
     connected (fun c ->
-      D.with_prepared c "SELECT i FROM range(5000) t(i)" ~f:(fun p ->
-        let r = if point = 2 then Some (ok (D.execute_prepared p)) else None in
+      D.Statement.with_prepared c "SELECT i FROM range(5000) t(i)" ~f:(fun p ->
+        (* The fold pauses in execution (1) or in its first fetch (2). *)
         arm point;
         let outcome = ref None in
-        let worker = start (fun () -> outcome := Some (match r with
-          | None -> D.close_result (ok (D.execute_prepared p))
-          | Some r -> D.fold_chunks r ~init:() ~f:(fun _ () -> Ok (D.Stop ())))) () in
+        let worker = start (fun () -> outcome := Some (
+          D.Statement.fold_chunks p ~init:() ~f:(fun _ () -> Ok (D.Stop ())))) () in
         Exn.protect ~finally:(fun () -> release (); join worker; arm 0) ~f:(fun () ->
           wait (fun () -> entered () = point);
-          busy (D.execute c "select 1"); busy (D.close_prepared p); busy (D.reset p);
-          Option.iter r ~f:(fun r -> busy (D.close_result r));
+          busy (D.execute c "select 1"); busy (D.Statement.reset p);
           for _ = 1 to 10 do let _ = String.make 100000 'x' in Stdlib.Gc.compact () done);
         ok (Option.value_exn !outcome); Ok ())));
   clean (); Stdlib.print_endline "query: concurrent execute/fetch exclusion + unlocked GC progress=ok"
 let () =
   connected (fun c ->
-    D.with_prepared c "select 42::BIGINT" ~f:(fun p ->
-      let r = ok (D.execute_prepared p) in
-      let result = D.fold_chunks r ~init:() ~f:(fun chunk () ->
+    D.Statement.with_prepared c "select 42::BIGINT" ~f:(fun p ->
+      let result = D.Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
         let outcome = ref None in
         let thread = start (fun () ->
-          busy (D.close_result r); busy (D.close_prepared p); busy (D.reset p);
-          busy (D.fold_chunks r ~init:() ~f:(fun _ () -> Ok (D.Stop ()))); outcome := Some ()) () in
+          busy (D.Statement.reset p);
+          busy (D.Statement.fold_chunks p ~init:() ~f:(fun _ () -> Ok (D.Stop ()))); outcome := Some ()) () in
         join thread; assert (Option.is_some !outcome);
-        assert (Int64.equal (ok (D.column chunk ~column:0 ~row:0 (D.Codec.Values.int64))) 42L);
+        assert (Int64.equal (ok (D.Statement.column chunk ~column:0 ~row:0 (D.Codec.Values.int64))) 42L);
         Ok (D.Stop ())) in
       result));
   clean (); Stdlib.print_endline "query: live borrowed callback allows concurrent fail-fast aliases without mutex deadlock=ok"
 let () =
   List.iter ["prepared"; "transaction"] ~f:(fun scope ->
     connected (fun c ->
-      let worker = ref None and retained = ref None in
+      let worker = ref None in
       arm 2;
       let launch p =
-        retained := Some p;
-        let r = ok (D.execute_prepared p) in
-        let t = start (fun () -> ok (D.fold_chunks r ~init:() ~f:(fun _ () -> Ok (D.Stop ())))) () in
+        let t = start (fun () -> ok (D.Statement.fold_chunks p ~init:() ~f:(fun _ () -> Ok (D.Stop ())))) () in
         worker := Some t; wait (fun () -> entered () = 2); Ok () in
       let releaser = start (fun () -> wait waiting; release ()) () in
       Exn.protect ~finally:(fun () -> release (); join releaser; Option.iter !worker ~f:join; arm 0)
         ~f:(fun () ->
           let result = match scope with
-            | "prepared" -> D.with_prepared c "select 1" ~f:launch
-            | "transaction" -> D.with_transaction c ~f:(fun tx -> launch (ok (D.prepare_transaction tx "select 1")))
+            | "prepared" -> D.Statement.with_prepared c "select 1" ~f:launch
+            | "transaction" -> D.with_transaction c ~f:(fun tx -> D.Statement.with_prepared tx "select 1" ~f:launch)
             | _ -> assert false in
           ok result);
-      (match D.execute_prepared (Option.value_exn !retained) with Error { cause = Closed; _ } -> () | _ -> assert false);
       Ok ()));
   clean (); Stdlib.print_endline "query: scoped prepared/transaction revoke and drain admitted fetch=ok"
 let () =
@@ -100,32 +92,29 @@ let () =
     let releaser = start (fun () -> wait waiting; Stdlib.Atomic.set settle true) () in
     Exn.protect ~finally:(fun () -> Stdlib.Atomic.set settle true; join releaser; Option.iter !worker ~f:join)
       ~f:(fun () ->
-        D.with_prepared c "select 1" ~f:(fun _ ->
+        D.Statement.with_prepared c "select 1" ~f:(fun _ ->
           worker := Some (start (fun () -> ok (D.with_transaction c ~f:(fun tx ->
             Stdlib.Atomic.set transaction_entered true;
             wait (fun () -> Stdlib.Atomic.get settle);
-            D.execute_transaction tx "select 2"))) ());
+            D.execute tx "select 2"))) ());
           wait (fun () -> Stdlib.Atomic.get transaction_entered); Ok ())));
   clean (); Stdlib.print_endline "query: scoped connection-prepared close drains another transaction lease=ok"
 let () =
   List.iter [3; 4] ~f:(fun point ->
     connected (fun c ->
-      let p = if point = 4 then Some (ok (D.prepare c "select ?::VARCHAR")) else None in
+      (* Point 3 pauses in the extraction of the long dynamic SQL, point 4 in
+         binding the long text. *)
+      let sql = if point = 4 then "select ?::VARCHAR" else "select ?::VARCHAR /*" ^ String.make 100000 'x' ^ "*/" in
       arm point;
-      let worker = start (fun () ->
-        let p = match p with
-          | Some p -> p
-          | None -> ok (D.prepare c ("select ?::VARCHAR /*" ^ String.make 100000 'x' ^ "*/")) in
+      let worker = start (fun () -> ok (D.Statement.with_prepared c sql ~f:(fun p ->
         let text = String.init 200000 ~f:(fun i -> if i % 17 = 0 then '\000' else 'a') in
-        ok (D.bind p 1 (D.Codec.Values.string) text);
-        let r = ok (D.execute_prepared p) in
-        ok (D.fold_chunks r ~init:() ~f:(fun chunk () ->
-          assert (String.equal text (ok (D.column chunk ~column:0 ~row:0 (D.Codec.Values.string))));
-          Ok (D.Stop ())));
-        ok (D.close_prepared p)) () in
+        ok (D.Statement.bind p 1 (D.Codec.Values.string) text);
+        D.Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
+          assert (String.equal text (ok (D.Statement.column chunk ~column:0 ~row:0 (D.Codec.Values.string))));
+          Ok (D.Stop ()))))) () in
       Exn.protect ~finally:(fun () -> release (); join worker; arm 0) ~f:(fun () ->
         wait (fun () -> entered () = point);
-        busy (D.execute c "select 1"); busy (D.close_connection c);
+        busy (D.execute c "select 1"); busy (D.Owned.close_connection c);
         for _ = 1 to 20 do let _ = String.make 100000 'g' in Stdlib.Gc.compact () done);
       Ok ()));
   clean (); Stdlib.print_endline "query: native-owned dynamic SQL/string lengths survive unlocked concurrent compaction=ok"
@@ -140,10 +129,10 @@ let () =
         D.with_connection db ~f:(fun ddl ->
           ok (D.execute c "CREATE TABLE t(x BIGINT)");
           let run prepare = prepare ~f:(fun p ->
-            ok (D.bind p 1 (D.Codec.Values.int64) 9007199254740993L);
+            ok (D.Statement.bind p 1 (D.Codec.Values.int64) 9007199254740993L);
             if revalidate then ok (D.execute ddl "CREATE TABLE unrelated(y BIGINT)");
             arm point;
-            let worker = start D.execute_prepared p in
+            let worker = start D.Statement.execute p in
             Exn.protect ~finally:(fun () -> release ()) ~f:(fun () ->
               wait (fun () -> entered () = point);
               (* Disarm only the DDL's passage through the same wrapped symbol. *)
@@ -152,7 +141,7 @@ let () =
             let result = join worker in
             (match point, explicit, result with
              | (1 | 3), false, Error { cause = Parameter_schema_changed; _ } when point = 3 || not revalidate -> ()
-             | 6, true, Ok r -> ok (D.close_result r)
+             | 6, true, Ok () -> ()
              | 6, false, Error { cause = Rollback_failed { primary = { cause = Native primary; _ }; rollback = { cause = Native _; _ } }; _ } ->
                assert (String.is_substring primary ~substring:"Failed to commit: Transaction conflict")
              | _, _, Error { cause = Native message; _ } ->
@@ -160,8 +149,8 @@ let () =
              | _ -> failwith "schema race did not reject at the intended boundary");
             Ok ()) in
           let result = if explicit then D.with_transaction c ~f:(fun tx ->
-            run (D.with_prepared_transaction tx "INSERT INTO t VALUES (?)"))
-            else run (D.with_prepared c "INSERT INTO t VALUES (?)") in
+            run (D.Statement.with_prepared tx "INSERT INTO t VALUES (?)"))
+            else run (D.Statement.with_prepared c "INSERT INTO t VALUES (?)") in
           if point = 6 && explicit then (
             match result with
             | Error { cause = Rollback_failed { primary = { cause = Native primary; _ }; rollback = { cause = Native _; _ } }; _ } ->
@@ -189,12 +178,12 @@ let () =
         let request_ok = function Ok x -> x | Error _ -> failwith "unexpected request error" in
         let insert = R.exec D.Fields.[int64] "INSERT INTO t VALUES (?)" in
         ok (D.execute c "CREATE TABLE t(x BIGINT)");
-        request_ok (R.Connection.exec c insert D.Args.[1L]);
+        request_ok (R.Session.exec c insert D.Args.[1L]);
         if revalidate then ok (D.execute ddl "CREATE TABLE unrelated(y BIGINT)");
         ok (D.execute c "DELETE FROM t");
         arm 1;
-        let worker = start (fun () -> R.Connection.with_transaction c ~f:(fun tx ->
-          let outcome = R.Transaction.exec tx insert D.Args.[9007199254740993L] in
+        let worker = start (fun () -> R.Session.with_transaction c ~f:(fun tx ->
+          let outcome = R.Session.exec tx insert D.Args.[9007199254740993L] in
           (* Ignoring the error must still not commit: the transaction is poisoned. *)
           if ignore_error then Ok () else outcome)) () in
         Exn.protect ~finally:(fun () -> release ()) ~f:(fun () ->

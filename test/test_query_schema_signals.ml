@@ -16,15 +16,15 @@ let signal_case ~revalidate operation boundary ordinal expected_live =
   ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
     with_connection db ~f:(fun observer ->
       ok (execute c "CREATE TABLE t(x BIGINT)");
-      with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
-        ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
+      Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
+        ok (Statement.bind p 1 (Codec.Values.int64) 9007199254740993L);
         let rollback = String.equal operation "rollback" in
         let rejection_close = String.equal operation "rejection-close" in
         if rollback || rejection_close then ok (execute c "ALTER TABLE t ALTER x TYPE DOUBLE");
         (* Unrelated DDL advances the schema epoch, so execution re-validates. *)
         if revalidate then ok (execute observer "CREATE TABLE unrelated(y BIGINT)");
         if String.equal boundary "enter" then arm ordinal 0 else arm 0 ordinal;
-        let outcome = try Ok (execute_prepared p) with exn -> Error exn in
+        let outcome = try Ok (Statement.execute p) with exn -> Error exn in
         let discarded = rollback ||
           (String.equal operation "begin" && String.equal boundary "enter") ||
           (String.equal operation "commit" && String.equal boundary "leave") in
@@ -33,8 +33,8 @@ let signal_case ~revalidate operation boundary ordinal expected_live =
          | false, true, Error (Cleanup_exception ({ cause = Native _; _ }, Stdlib.Sys.Break)) -> ()
          | false, false, Error Stdlib.Sys.Break -> ()
          | _ -> failwith "snapshot signal lost primary/rollback outcome");
-        if discarded then (closed (execute c "SELECT 1"); closed (parameter_count p))
-        else (ok (execute c "SELECT 1"); ok (reset p));
+        if discarded then (closed (execute c "SELECT 1"); closed (Statement.parameter_count p))
+        else (ok (execute c "SELECT 1"); ok (Statement.reset p));
         count observer (if String.equal operation "commit" && String.equal boundary "leave" then 1 else 0);
         Stdlib.Printf.printf "snapshot-%s-%s revalidate=%b: live=%d expected=%d\n%!" operation boundary revalidate
           (live_at_signal ()) expected_live;
@@ -68,24 +68,24 @@ let () =
       with_connection db ~f:(fun observer ->
         ok (execute c "CREATE TABLE t(x BIGINT)");
         let sql = if fault = 4 then "SELECT error('primary snapshot query')" else "INSERT INTO t VALUES (?)" in
-        with_prepared c sql ~f:(fun p ->
-          if fault <> 4 then ok (bind p 1 (Codec.Values.int64) 9007199254740993L);
+        Statement.with_prepared c sql ~f:(fun p ->
+          if fault <> 4 then ok (Statement.bind p 1 (Codec.Values.int64) 9007199254740993L);
           if fault = 2 then ok (execute c "ALTER TABLE t ALTER x TYPE DOUBLE");
           fail_control (if fault = 4 then 2 else fault);
-          let result = execute_prepared p in
+          let result = Statement.execute p in
           (match fault, result with
            | 1, Error { cause = Native message; _ } ->
              assert (String.is_substring message ~substring:"injected snapshot control failure");
              ok (execute c "SELECT 1")
            | 2, Error { cause = Rollback_failed { primary = { cause = Parameter_schema_changed; _ }; rollback = { cause = Native _; _ } }; _ } ->
-             closed (execute c "SELECT 1"); closed (parameter_count p)
+             closed (execute c "SELECT 1"); closed (Statement.parameter_count p)
            | 4, Error { cause = Rollback_failed { primary = { cause = Native primary; _ }; rollback = { cause = Native secondary; _ } }; _ } ->
              assert (String.is_substring primary ~substring:"primary snapshot query");
              Stdlib.Printf.printf "failed rollback after native error: %s\n%!" secondary;
              assert (String.is_substring secondary ~substring:"aborted");
-             closed (execute c "SELECT 1"); closed (parameter_count p)
+             closed (execute c "SELECT 1"); closed (Statement.parameter_count p)
            | 3, Error { cause = Rollback_failed { primary = { cause = Native _; _ }; rollback = { cause = Native _; _ } }; _ } ->
-             closed (execute c "SELECT 1"); closed (parameter_count p)
+             closed (execute c "SELECT 1"); closed (Statement.parameter_count p)
            | _ -> failwith "snapshot control fault lost outcome/discard");
           count observer 0;
           Ok ())))));

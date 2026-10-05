@@ -68,12 +68,11 @@ let work seam request =
     with_owner (fun owner ->
       B.run request owner ~f:(fun facade ->
         if is_interrupted seam then
-          D.with_transaction facade ~f:(fun tx -> activate (); D.execute_transaction tx long_query)
+          D.with_transaction facade ~f:(fun tx -> activate (); D.execute tx long_query)
         else match seam with
         | Chunk ->
-          D.with_prepared facade "SELECT 42::BIGINT" ~f:(fun p ->
-            let r = ok (D.execute_prepared p) in
-            D.fold_chunks r ~init:() ~f:(fun _chunk () ->
+          D.Statement.with_prepared facade "SELECT 42::BIGINT" ~f:(fun p ->
+            D.Statement.fold_chunks p ~init:() ~f:(fun _chunk () ->
               activate (); ok (B.cancel request); Ok (D.Stop ())))
         | Appender_clear | Appender_destroy ->
           ok (D.execute facade "CREATE TABLE t(x BIGINT)");
@@ -101,7 +100,7 @@ let exceptional_work ~fail_cleanup request =
     ignore (Sys.opaque_identity (with_owner (fun owner ->
       B.run request owner ~f:(fun facade ->
         D.with_transaction facade ~f:(fun tx ->
-          ok (D.execute_transaction tx "CREATE TABLE t(x INTEGER)");
+          ok (D.execute tx "CREATE TABLE t(x INTEGER)");
           activate (); fail_rollback fail_cleanup; callback_failure_frame ()))))))
 let check_exception ~fail_cleanup = function
   | S.Raised failure ->

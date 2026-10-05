@@ -72,7 +72,8 @@ for name in private_worker private_resource forge_pool borrowed_escape borrowed_
     echo "unexpected installed acceptance: $name"
     exit 1
   fi
-  grep -Fq 'File "main.ml", line 1' "$work/$name.log"
+  # The error is reported in the fixture itself (any line), not in a dependency.
+  grep -Eq 'File "main.ml", lines? [0-9]' "$work/$name.log"
 done
 grep -Fq 'Unbound module "Duckdb_eio__Worker_owner"' "$work/private_worker.log"
 grep -Fq 'Unbound module "Duckdb__Resource"' "$work/private_resource.log"

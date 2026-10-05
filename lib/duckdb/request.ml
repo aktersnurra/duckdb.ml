@@ -29,23 +29,24 @@ let many ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, r
 let query r = r.sql
 
 module type QUERY = sig
-  type owner
+  type _ owner
   type error
   type 'a future
-  val exec : owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
-  val find : owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
-  val find_opt : owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
+  val exec : _ owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
+  val find : _ owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
+  val find_opt : _ owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
     ('row option, error) result future
-  val collect : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val collect : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     ('row list, error) result future
-  val fold : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val fold : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, error) result future
 end
 
 module type CONNECTION = sig
   include QUERY
-  val with_transaction : owner -> f:(transaction -> ('a, Failure.t) result) -> ('a, error) result future
-  val ingest : owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+  val with_transaction : [ `Connection ] owner ->
+    f:([ `Transaction ] Session.t -> ('a, Failure.t) result) -> ('a, error) result future
+  val ingest : [ `Connection ] owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
     (unit, error) result future
 end
 
@@ -230,8 +231,6 @@ let run_shape : type p row out. connection -> transaction option -> (row, out) s
   | Collect -> collect_rows c tx r args
   | Fold { init; f } -> run_fold c tx r args ~init ~f
 
-let run c shape r args = run_shape c None shape r args
-
 let fold_on ~context c r ~init ~f = run_fold ~context c None r Args.[] ~init ~f
 
 (* Declared tables. *)
@@ -316,29 +315,24 @@ let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
   within context (Appender.append_rows a.core cells)
 let flush a = within (table_context a.table) (Appender.flush_appender a.core)
 
-module Connection = struct
-  type owner = connection
+(* A transaction owned by the calling scope; errors pass through flat. *)
+let with_owned_transaction c ~f = Resource.with_transaction ~lifting:(Flat Transaction) c ~f
+
+module Session = struct
+  type 'k owner = 'k Session.t
   type error = Failure.t
   type 'a future = 'a
-  let exec c r args = run c Exec r args
-  let find c r args = run c Find r args
-  let find_opt c r args = run c Find_opt r args
-  let collect c r args = run c Collect r args
-  let fold c r args ~init ~f = run c (Fold { init; f }) r args
-  let with_transaction c ~f = Resource.with_transaction ~lifting:(Flat Transaction) c ~f
-  let ingest c table batches ~flush:explicit =
-    with_transaction c ~f:(fun tx -> with_appender_transaction tx table ~f:(fun a ->
-      let* () = List.fold batches ~init:(Ok ()) ~f:(fun acc rows -> let* () = acc in append a rows) in
-      if explicit then flush a else Ok ()))
-end
-module Transaction = struct
-  type owner = transaction
-  type error = Failure.t
-  type 'a future = 'a
-  let run_tx tx shape r args = run_shape (transaction_connection tx) (Some tx) shape r args
-  let exec tx r args = run_tx tx Exec r args
-  let find tx r args = run_tx tx Find r args
-  let find_opt tx r args = run_tx tx Find_opt r args
-  let collect tx r args = run_tx tx Collect r args
-  let fold tx r args ~init ~f = run_tx tx (Fold { init; f }) r args
+  let run s shape r args = run_shape (Session.connection s) (Session.within s) shape r args
+  let exec s r args = run s Exec r args
+  let find s r args = run s Find r args
+  let find_opt s r args = run s Find_opt r args
+  let collect s r args = run s Collect r args
+  let fold s r args ~init ~f = run s (Fold { init; f }) r args
+  let with_transaction (Session.Connection c : [ `Connection ] owner) ~f =
+    with_owned_transaction c ~f:(fun tx -> f (Session.Transaction tx))
+  let ingest (Session.Connection c : [ `Connection ] owner) table batches ~flush:explicit =
+    with_owned_transaction c ~f:(fun tx ->
+      with_appender_transaction tx table ~f:(fun a ->
+        let* () = List.fold batches ~init:(Ok ()) ~f:(fun acc rows -> let* () = acc in append a rows) in
+        if explicit then flush a else Ok ()))
 end

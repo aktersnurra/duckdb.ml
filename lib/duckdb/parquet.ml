@@ -59,7 +59,7 @@ let copy_to tx ~query temporary destination =
       let* () = Query.bind p 1 Codec.Values.string temporary in
       let* result = Query.execute_prepared p in
       Query.close_result result)
-let export c ~query destination =
+let export (Session.Connection c : [ `Connection ] Session.t) ~query destination =
   (* The standalone source and the final COPY are independently engine-parsed;
      the bound output name never becomes SQL text. No lexical SQL classifier. *)
   within (Parquet destination) @@ with_transaction ~lifting:(Cause (Parquet destination)) c ~f:(fun tx ->
@@ -79,7 +79,7 @@ let export c ~query destination =
 (* Typed decoding: each file is one oneshot request over the same columns.
    Failures are in the failing file's context; callback errors pass through.
    An empty list involves no file and is reported as ["read_parquet"]. *)
-let fold c paths fields ~row ~init ~f =
+let fold_files c paths fields ~row ~init ~f =
   let read p = "SELECT * FROM read_parquet(" ^ literal p ^ ")" in
   let rec loop paths acc =
     match paths with
@@ -93,5 +93,7 @@ let fold c paths fields ~row ~init ~f =
       if !stopped then Ok acc else loop rest acc in
   if List.is_empty paths then within (Parquet "read_parquet") (Error (Invalid_configuration "Parquet read requires at least one file"))
   else loop paths init
-let fold_table c paths (Request.Table_def t : (_, _) Request.table) ~init ~f =
-  fold c paths (Request.fields_of_columns t.columns) ~row:t.row ~init ~f
+let fold (Session.Connection c : [ `Connection ] Session.t) paths fields ~row ~init ~f =
+  fold_files c paths fields ~row ~init ~f
+let fold_table (Session.Connection c : [ `Connection ] Session.t) paths (Request.Table_def t : (_, _) Request.table) ~init ~f =
+  fold_files c paths (Request.fields_of_columns t.columns) ~row:t.row ~init ~f

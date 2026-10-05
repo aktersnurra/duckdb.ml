@@ -1,0 +1,2 @@
+module D = Duckdb
+let f c = D.with_transaction c ~f:(fun tx -> D.with_transaction tx ~f:(fun _ -> Ok ()))

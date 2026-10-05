@@ -1,1 +1,1 @@
-val escape : Duckdb.query_result -> (unit, Duckdb.Error.t) result
+val escape : Duckdb.Statement.prepared -> (unit, Duckdb.Error.t) result

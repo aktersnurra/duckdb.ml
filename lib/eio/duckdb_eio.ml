@@ -305,15 +305,15 @@ module Request = struct
     | Ok (Error e) -> Error (Request e)
     | Error e -> Error (Adapter e)
   let run pool shape r args = typed pool (fun slot bridge -> W.request_run slot bridge shape r args)
-  let exec pool r args = run pool Duckdb.Request.Exec r args
-  let find pool r args = run pool Duckdb.Request.Find r args
-  let find_opt pool r args = run pool Duckdb.Request.Find_opt r args
-  let collect pool r args = run pool Duckdb.Request.Collect r args
-  let fold pool r args ~init ~f = run pool (Duckdb.Request.Fold { init; f }) r args
+  let exec pool r args = run pool Duckdb.Owned.Exec r args
+  let find pool r args = run pool Duckdb.Owned.Find r args
+  let find_opt pool r args = run pool Duckdb.Owned.Find_opt r args
+  let collect pool r args = run pool Duckdb.Owned.Collect r args
+  let fold pool r args ~init ~f = run pool (Duckdb.Owned.Fold { init; f }) r args
   let with_transaction pool ~f = typed pool (fun slot bridge -> W.request_transaction slot bridge ~f)
   let ingest pool table batches ~flush = typed pool (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
   module Generic = struct
-    type owner = t
+    type 'k owner = t
     type nonrec error = error
     type 'a future = 'a
     let exec = exec

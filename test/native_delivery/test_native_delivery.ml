@@ -63,7 +63,7 @@ let running ~transaction ~recover owner =
        | Error { cause = Embedded_nul; _ } -> () | _ -> failwith "recoverable rollback outcome");
       check "same controller survives ordinary rollback" (count 10 = 1 && count 12 = 0));
     let sql = "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) t(i)" in
-    if transaction then D.with_transaction facade ~f:(fun tx -> D.execute_transaction tx sql)
+    if transaction then D.with_transaction facade ~f:(fun tx -> D.execute tx sql)
     else D.execute facade sql))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 5;
@@ -135,7 +135,7 @@ let rollback_race ~before owner =
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
     (match D.with_transaction facade ~f:(fun tx ->
-      ok (D.execute_transaction tx "SELECT 1");
+      ok (D.execute tx "SELECT 1");
       if before then ok (B.cancel request);
       Error { D.Error.context = Transaction; cause = Embedded_nul }) with Error { cause = Embedded_nul; _ } -> () | _ -> failwith "rollback primary preserved");
     cancelled (D.execute facade "SELECT 2"); Ok ()))
@@ -160,7 +160,7 @@ let rollback_drains_foreign owner =
         D.with_transaction facade ~f:(fun tx ->
           child := Some (Thread.create (fun () ->
             Stdlib.Atomic.set outcome (Some (E.capture (fun () ->
-              D.execute_transaction tx "SELECT sum(i) FROM range(10000) t(i)")))) ());
+              D.execute tx "SELECT sum(i) FROM range(10000) t(i)")))) ());
           wait 5; ok (B.cancel request);
           (* Only this request worker's next Condition.wait can be the drain:
              the foreign child is held at gate 5 and the callback now raises. *)
@@ -186,8 +186,8 @@ let snapshot_rollback_race ~before owner =
   if before then (gate 6 true; selected_gate true);
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
-    ok (D.with_prepared facade "INSERT INTO snapshot_delivery VALUES (NULL) RETURNING i" ~f:(fun prepared ->
-      native_error (D.execute_prepared prepared); Ok ()));
+    ok (D.Statement.with_prepared facade "INSERT INTO snapshot_delivery VALUES (NULL) RETURNING i" ~f:(fun prepared ->
+      native_error (D.Statement.execute prepared); Ok ()));
     cancelled (D.execute facade "SELECT 2"); Ok ()))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       if before then (
@@ -215,17 +215,15 @@ let before_native point owner =
       if point = 12 then check "cancel during binding starts no controller" (count 10 = 0 && count 13 = 1)
       else one_controller ()));
   ok (B.run (B.create ()) owner ~f:(fun facade -> D.execute facade "SELECT 2"))
-let cancelled_child_cleanup ~manual owner =
+(* Statements are scoped: the scope's close is the child cleanup. *)
+let cancelled_child_cleanup owner =
   reset (); gate 6 true; selected_gate true;
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
-    let work prepared =
+    D.Statement.with_prepared facade "SELECT 1" ~f:(fun _ ->
       let result = D.execute facade "SELECT 2" in
       gate 8 true;
-      if manual then ok (D.close_prepared prepared);
-      result in
-    if manual then Result.bind (D.prepare facade "SELECT 1") ~f:work
-    else D.with_prepared facade "SELECT 1" ~f:work))
+      result)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 6; ok (B.cancel request);
       E.await ~label:"child cleanup selected ticket" selected_entered;
@@ -246,7 +244,7 @@ let selected_terminal owner =
       gate 6 false; wait_count 11 1;
       pending request;
       check "no join completion/detach/close while selected" (count 12 = 0 && count 13 = 0 && count 5 = 0);
-      check "owner Busy before retirement" (match D.close_connection owner with Error { cause = Busy; _ } -> true | _ -> false);
+      check "owner Busy before retirement" (match D.Owned.close_connection owner with Error { cause = Busy; _ } -> true | _ -> false);
       check "fresh B cannot reuse before A retirement" (match B.run (B.create ()) owner ~f:(fun _ -> Ok ()) with Error { cause = Busy; _ } -> true | _ -> false);
       selected_gate false; cancelled (join ());
       check "late ticket skipped" (count 4 = 0 && count 16 = 1 && count 17 = 1);
@@ -265,8 +263,7 @@ let tests = ["controller", controller_lifecycle; "start-failure", controller_fai
   "rollback-drains-foreign", rollback_drains_foreign;
   "snapshot-rollback-before", snapshot_rollback_race ~before:true;
   "snapshot-rollback-after", snapshot_rollback_race ~before:false;
-  "scoped-child-cleanup", cancelled_child_cleanup ~manual:false;
-  "manual-child-cleanup", cancelled_child_cleanup ~manual:true;
+  "scoped-child-cleanup", cancelled_child_cleanup;
   "selected-terminal", selected_terminal]
 let run () =
   Stdlib.Printexc.record_backtrace true;

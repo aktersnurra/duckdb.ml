@@ -1,0 +1,2 @@
+let t = Duckdb.Table.(declare "table" Columns.[ "x", int64 ] ~row:(fun x -> x))
+let create (db : Duckdb.database) = Duckdb.Table.with_appender db t ~f:(fun _ -> Ok ())

@@ -10,9 +10,9 @@ let await f = let rec loop n = if f () then () else if n = 0 then failwith "hand
 let spawn f = let result = ref None in let t = Thread.create (fun () -> result := Some (try Ok (f ()) with e -> Error e)) () in t,result
 let join (t,r) = Thread.join t; match !r with Some (Ok x) -> x | Some (Error e) -> raise e | None -> failwith "worker missing outcome"
 let bigints = Table.(declare "a" Columns.[ "x", int64 ] ~row:Fn.id)
-let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
-  fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
-    match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
+let count c = ok (Statement.with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
+  Statement.fold_chunks p ~init:0L ~f:(fun chunk _ ->
+    match Statement.column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
 let race explicit point =
   ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c -> with_connection db ~f:(fun other ->
     ok (execute c "CREATE TABLE a(x BIGINT)"); arm point;
@@ -20,7 +20,7 @@ let race explicit point =
       let callback a =
         ok (Table.append a [Args.[9007199254740993L]]);
         if point = 3 then Table.flush a else Ok () in
-      if explicit then with_transaction c ~f:(fun tx -> Table.with_appender_transaction tx bigints ~f:callback)
+      if explicit then with_transaction c ~f:(fun tx -> Table.with_appender tx bigints ~f:callback)
       else Table.with_appender c bigints ~f:callback) in
     Exn.protect ~finally:release ~f:(fun () ->
       await (fun () -> entered () = point);
@@ -57,7 +57,7 @@ let gc_and_drain ~explicit =
       if explicit then (
         let inner = ref None in
         let settled = with_transaction c ~f:(fun tx ->
-          inner := Some (Table.with_appender_transaction tx table ~f:body); Ok ()) in
+          inner := Some (Table.with_appender tx table ~f:body); Ok ()) in
         assert (busy_close (Option.value_exn !inner));
         settled)
       else (
@@ -68,8 +68,8 @@ let gc_and_drain ~explicit =
     ok (join (Option.value_exn !append_worker));
     if explicit then assert (Result.is_error settled);
     arm 0;
-    let n = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
-  match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e))) in
+    let n = ok (Statement.with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> Statement.fold_chunks p ~init:0L ~f:(fun chunk _ ->
+  match Statement.column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e))) in
     assert (Int64.equal n 0L); Ok ())))
 let () =
   List.iter [false;true] ~f:(fun explicit -> List.iter [1;2;3;4;5] ~f:(race explicit));

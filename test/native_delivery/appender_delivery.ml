@@ -27,11 +27,9 @@ let setup owner =
   ok (D.execute owner "CREATE SEQUENCE app_flush");
   ok (D.execute owner "CREATE TABLE app(i BIGINT CHECK(nextval('app_flush') > 0))")
 let scalar owner sql =
-  let p = ok (D.prepare owner sql) in
-  Exn.protect ~finally:(fun () -> ok (D.close_prepared p)) ~f:(fun () ->
-    let r = ok (D.execute_prepared p) in
-    ok (D.fold_chunks r ~init:0L ~f:(fun chunk _ ->
-      match D.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with
+  ok (D.Statement.with_prepared owner sql ~f:(fun p ->
+    D.Statement.fold_chunks p ~init:0L ~f:(fun chunk _ ->
+      match D.Statement.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with
       | Ok n -> Ok (D.Continue n)
       | Error e -> Error e)))
 let no_flush owner = check "Appender cancelled cleanup never flushes sequence" (Int64.equal (scalar owner "SELECT nextval('app_flush')") 1L)
@@ -116,7 +114,7 @@ let cleanup ?destructor ~internal owner =
       (* BEGIN has its own result destruction; arm only after it completes,
          and after the table's catalog query, at the native appender creation. *)
       gate_at_create point; gate_at_create destructor; selected_gate true;
-      T.with_appender_transaction tx app ~f:(fun _ -> failwith "cancelled create published"))))
+      T.with_appender tx app ~f:(fun _ -> failwith "cancelled create published"))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
       if internal then E.await ~label:"Appender internal metadata selection" selected_entered;
@@ -222,7 +220,7 @@ let batch_and_transaction ~cancel owner =
   let request = B.create () in
   let result = B.run request owner ~f:(fun c ->
     let result = D.with_transaction c ~f:(fun tx ->
-      T.with_appender_transaction tx app ~f:(fun a ->
+      T.with_appender tx app ~f:(fun a ->
         ok (T.append a [row]);
         if cancel then (ok (B.cancel request); cancelled (T.append a [row]); Ok ())
         else T.append a [row])) in

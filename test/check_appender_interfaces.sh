@@ -12,7 +12,7 @@ cd "$tmp"
 "$compiler" -extension-universe beta -w @a -c duckdb.mli
 # Warning 45: [Args.[...]] literals intentionally shadow the list constructors.
 "$compiler" -extension-universe beta -w @a-45-70 -c positive.ml
-for name in connection owner chunk; do
+for name in database owner chunk; do
   cp "$name.ml.fail" "$name.ml"
   if "$compiler" -extension-universe beta -c "$name.ml" >"$name.out" 2>&1; then
     echo "unexpected acceptance: $name"
@@ -20,16 +20,16 @@ for name in connection owner chunk; do
   fi
   cat "$name.out"
   case "$name" in
-  connection)
-    grep -q 'Duckdb.connection' "$name.out"
-    grep -q 'Duckdb.transaction' "$name.out"
+  database)
+    grep -q 'Duckdb.database' "$name.out"
+    grep -q 'Duckdb.session' "$name.out"
     ;;
   owner)
     grep -q 'Duckdb.Table.appender' "$name.out"
     grep -q 'Duckdb.connection' "$name.out"
     ;;
   chunk)
-    grep -q 'Duckdb.chunk' "$name.out"
+    grep -q 'Duckdb.Statement.chunk' "$name.out"
     grep -q 'Duckdb.Table.appender' "$name.out"
     ;;
   esac

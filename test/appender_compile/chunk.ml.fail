@@ -1,1 +1,1 @@
-let flush (c : Duckdb.chunk @ local) = Duckdb.Table.flush c
+let flush (c : Duckdb.Statement.chunk @ local) = Duckdb.Table.flush c

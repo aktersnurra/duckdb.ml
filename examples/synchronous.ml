@@ -39,9 +39,9 @@ let () =
   let config = require "create in-memory configuration" (D.Config.create Memory) in
   let values = require "open database" (D.with_database config ~f:(fun database ->
     D.with_connection database ~f:(fun connection ->
-      require "create example table" (R.Connection.exec connection create_example D.Args.[]);
-      require "run insert transaction" (R.Connection.with_transaction connection ~f:(fun transaction ->
-        R.Transaction.exec transaction insert_example D.Args.[42L; "owned\000text"]));
+      require "create example table" (R.Session.exec connection create_example D.Args.[]);
+      require "run insert transaction" (R.Session.with_transaction connection ~f:(fun transaction ->
+        R.Session.exec transaction insert_example D.Args.[42L; "owned\000text"]));
       require "append owned rows" (D.Table.with_appender connection example ~f:(fun appender ->
         D.Table.append appender [D.Args.[9007199254740993L; "bulk\000row"]]));
       (* The file is owned by this example and removed on every exit path. *)

@@ -186,9 +186,9 @@ let transaction_between_statements clock =
     Exn.protect ~finally:(fun () -> hold_between false) ~f:(fun () ->
       let a = Eio.Fiber.fork_promise ~sw (fun () -> E.transaction p ~f:(fun tx ->
         escaped := Some tx;
-        unwrap (Duckdb.execute_transaction tx "CREATE TABLE between_tx(x INTEGER)");
+        unwrap (Duckdb.execute tx "CREATE TABLE between_tx(x INTEGER)");
         wait_between ();
-        Duckdb.execute_transaction tx "INSERT INTO between_tx VALUES (1)")) in
+        Duckdb.execute tx "INSERT INTO between_tx VALUES (1)")) in
       until clock "A held between its two statements" (fun () -> counter 20 = 1);
       let b = Eio.Fiber.fork_promise ~sw (fun () -> E.execute p "INSERT INTO between_tx VALUES (2)") in
       Eio.Fiber.yield ();
@@ -197,7 +197,7 @@ let transaction_between_statements clock =
       unwrap (Eio.Promise.await_exn a); unwrap (Eio.Promise.await_exn b);
       check "two-statement transaction then competing B have ordered native effects" (counter 3 = 3);
       let tx = Option.value_exn !escaped in
-      check "escaped transaction token is revoked" (match Duckdb.execute_transaction tx "SELECT 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false);
+      check "escaped transaction token is revoked" (match Duckdb.execute tx "SELECT 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false);
       check "worker callback outward scheduler effect hits core barrier"
         (match E.transaction p ~f:(fun _ -> Eio.Fiber.yield (); Ok ()) with Error (E.Core { cause = Duckdb.Error.Effects_not_allowed; _ }) -> true | _ -> false);
       unwrap (E.shutdown p)))
@@ -235,10 +235,10 @@ let transaction_isolation_and_reentry () =
       check "shutdown callback reentry rejected before effects" (match E.shutdown p with Error E.Reentrant_call -> true | _ -> false);
       check "all callback reentries cause zero native acquisition SQL interrupt or close"
         (List.equal Int.equal before (native_snapshot ()));
-      Duckdb.execute_transaction tx "CREATE TABLE tx_isolation(x INTEGER)")) in
+      Duckdb.execute tx "CREATE TABLE tx_isolation(x INTEGER)")) in
     Eio.Promise.await entered;
     unwrap (Eio.Promise.await_exn a);
-    let b = E.transaction p ~f:(fun tx -> Duckdb.execute_transaction tx "INSERT INTO tx_isolation VALUES (1)") in
+    let b = E.transaction p ~f:(fun tx -> Duckdb.execute tx "INSERT INTO tx_isolation VALUES (1)") in
     unwrap b;
     check "whole transactions retire rather than share SQL slot" (counter 0 = 4 && counter 1 = 2);
     unwrap (E.shutdown p));

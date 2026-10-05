@@ -9,7 +9,7 @@ let rejected = function
   | _ -> failwith "expected Parameter_schema_changed"
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
-let insert p x = ok (bind p 1 (Codec.Values.int64) x); Result.bind (execute_prepared p) ~f:close_result
+let insert p x = ok (Statement.bind p 1 (Codec.Values.int64) x); Statement.execute p
 let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
   with_connection db ~f:(fun other -> f c other; Ok ()))))
 let advanced f =
@@ -24,16 +24,16 @@ let () =
     assert (not (advanced (fun () -> ok (execute c "INSERT INTO t VALUES (1)"))));
     assert (not (advanced (fun () -> ok (execute c "SELECT * FROM t"))));
     assert (advanced (fun () -> ok (execute c "ALTER TABLE t ADD y BIGINT")));
-    assert (not (advanced (fun () -> ok (with_transaction c ~f:(fun tx -> execute_transaction tx "DELETE FROM t")))));
+    assert (not (advanced (fun () -> ok (with_transaction c ~f:(fun tx -> execute tx "DELETE FROM t")))));
     (* Settlement of a transaction that ran DDL advances again after the DDL itself. *)
     let after_ddl = ref 0 in
     assert (advanced (fun () -> ok (with_transaction c ~f:(fun tx ->
-      let* () = execute_transaction tx "DROP TABLE t" in
+      let* () = execute tx "DROP TABLE t" in
       after_ddl := Duckdb_ffi.schema_epoch (); Ok ()))));
     ok (execute c "CREATE TABLE r(x BIGINT)");
     let before = Duckdb_ffi.schema_epoch () in
     (match with_transaction c ~f:(fun tx ->
-       let* () = execute_transaction tx "DROP TABLE r" in
+       let* () = execute tx "DROP TABLE r" in
        after_ddl := Duckdb_ffi.schema_epoch (); Error { context = Transaction; cause = Busy }) with
      | Error { cause = Busy; _ } -> () | _ -> failwith "rollback outcome");
     assert (!after_ddl > before && Duckdb_ffi.schema_epoch () > !after_ddl));
@@ -44,7 +44,7 @@ let () =
 let () =
   connected (fun c _ ->
     ok (execute c "CREATE TABLE t(x BIGINT)");
-    ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
+    ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
       ok (insert p 1L);
       let start = prepares () in
       for i = 2 to 6 do ok (insert p (Int64.of_int i)) done;
@@ -59,7 +59,7 @@ let () =
   List.iter [false; true] ~f:(fun other_connection ->
     connected (fun c other ->
       ok (execute c "CREATE TABLE t(x BIGINT)");
-      ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
+      ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
         ok (insert p 1L);
         ok (execute (if other_connection then other else c) "ALTER TABLE t ALTER x TYPE DOUBLE");
         rejected (insert p 9007199254740993L);
@@ -71,7 +71,7 @@ let () =
 let () =
   connected (fun c other ->
     ok (execute c "CREATE TABLE t(x BIGINT)");
-    ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
+    ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
       ok (insert p 1L);
       ok (execute other "CREATE TABLE unrelated(y BIGINT)");
       let start = prepares () in
@@ -87,10 +87,10 @@ let () =
 let () =
   connected (fun c _ ->
     ok (execute c "CREATE TABLE t(x BIGINT)");
-    ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
+    ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
       ok (insert p 1L);
       (match with_transaction c ~f:(fun tx ->
-         let* () = execute_transaction tx "ALTER TABLE t ALTER x TYPE DOUBLE" in Error { context = Transaction; cause = Busy }) with
+         let* () = execute tx "ALTER TABLE t ALTER x TYPE DOUBLE" in Error { context = Transaction; cause = Busy }) with
        | Error { cause = Busy; _ } -> () | _ -> failwith "rollback outcome");
       ok (insert p 9007199254740993L);
       Ok ())));

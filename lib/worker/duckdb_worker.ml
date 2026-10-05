@@ -29,7 +29,7 @@ module type S = sig
 
   (** Typed requests (each one bridged request). Bridge failures are reported
       in the request's context; row callbacks run inside the callback marker. *)
-  val request_run : slot -> D.Bridge.request -> ('row, 'out) D.Request.shape -> ('p, 'row, _) D.Request.t ->
+  val request_run : slot -> D.Bridge.request -> ('row, 'out) D.Owned.shape -> ('p, 'row, _) D.Request.t ->
     'p D.Args.t -> ('out, D.Error.t) result
   val request_transaction : slot -> D.Bridge.request ->
     f:(D.transaction -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
@@ -54,10 +54,10 @@ module Make (Probe : Probe) = struct
   (* Lifts a row callback so each invocation runs inside the callback marker. *)
   let in_callback f value accumulator = with_callback (fun () -> f value accumulator)
 
-  let open_database config = Result.map (D.open_database config) ~f:(fun db -> Database db)
-  let connect (Database db) = Result.map (D.connect db) ~f:(fun c -> Slot c)
-  let close_slot (Slot c) = D.close_connection c
-  let close_database (Database db) = D.close_database db
+  let open_database config = Result.map (D.Owned.open_database config) ~f:(fun db -> Database db)
+  let connect (Database db) = Result.map (D.Owned.connect db) ~f:(fun c -> Slot c)
+  let close_slot (Slot c) = D.Owned.close_connection c
+  let close_database (Database db) = D.Owned.close_database db
 
   (* Every slot operation is one bridged request; [work] sees only the facade. *)
   let bridged (Slot c) request work = D.Bridge.run request c ~f:work
@@ -67,9 +67,9 @@ module Make (Probe : Probe) = struct
   let transaction slot request ~f =
     bridged slot request (fun c -> D.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
   let query slot request sql fields ~row =
-    bridged slot request (fun c -> D.Request.Connection.collect c (raw sql fields ~row) D.Args.[])
+    bridged slot request (fun c -> D.Request.Session.collect c (raw sql fields ~row) D.Args.[])
   let fold_rows slot request sql fields ~row ~init ~f =
-    bridged slot request (fun c -> D.Request.Connection.fold c (raw sql fields ~row) D.Args.[] ~init ~f:(in_callback f))
+    bridged slot request (fun c -> D.Request.Session.fold c (raw sql fields ~row) D.Args.[] ~init ~f:(in_callback f))
   let parquet_fold_rows slot request names fields ~row ~init ~f =
     bridged slot request (fun c ->
       let* paths = Result.all (List.map names ~f:D.Parquet.path) in
@@ -85,20 +85,20 @@ module Make (Probe : Probe) = struct
     | Ok result -> result
     | Error error -> Error { error with D.Error.context }
   let in_query r = D.Error.Query (R.query r)
-  let marked : type row out. (row, out) R.shape -> (row, out) R.shape = function
-    | R.Fold { init; f } -> R.Fold { init; f = in_callback f }
-    | R.Exec -> R.Exec
-    | R.Find -> R.Find
-    | R.Find_opt -> R.Find_opt
-    | R.Collect -> R.Collect
+  let marked : type row out. (row, out) D.Owned.shape -> (row, out) D.Owned.shape = function
+    | D.Owned.Fold { init; f } -> D.Owned.Fold { init; f = in_callback f }
+    | D.Owned.Exec -> D.Owned.Exec
+    | D.Owned.Find -> D.Owned.Find
+    | D.Owned.Find_opt -> D.Owned.Find_opt
+    | D.Owned.Collect -> D.Owned.Collect
   let request_run slot request shape r args =
-    typed slot request ~context:(in_query r) (fun c -> R.run c (marked shape) r args)
+    typed slot request ~context:(in_query r) (fun c -> D.Owned.run c (marked shape) r args)
   let request_transaction slot request ~f =
     typed slot request ~context:D.Error.Transaction (fun c ->
-      R.Connection.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
+      R.Session.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
   let table_ingest slot request table batches ~flush =
     typed slot request ~context:D.Error.Transaction (fun c ->
-      R.Connection.with_transaction c ~f:(fun tx -> D.Table.with_appender_transaction tx table ~f:(fun appender ->
+      R.Session.with_transaction c ~f:(fun tx -> D.Table.with_appender tx table ~f:(fun appender ->
         let* () = List.fold_result batches ~init:() ~f:(fun () batch -> D.Table.append appender batch) in
         if flush then (Probe.explicit_flush (); D.Table.flush appender) else Ok ())))
 end

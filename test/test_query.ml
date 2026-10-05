@@ -9,54 +9,57 @@ let ok = function
 let error (expected : Error.cause -> bool) = function
   | Error { Error.cause; _ } when expected cause -> () | _ -> failwith "expected specific error"
 let busy result = error (function Busy -> true | _ -> false) result
-let closed result = error (function Closed -> true | _ -> false) result
 let children result = error (function Busy -> true | _ -> false) result
 let index result = error (function Index _ -> true | _ -> false) result
 let schema result = error (function Type_mismatch _ -> true | _ -> false) result
 let non_null typ = Codec.Values.of_scalar typ
 let decode typ = non_null typ
-(* Reads column 0 of an executed result through the borrowed-chunk lease. *)
-let rows r codec =
-  fold_chunks r ~init:[] ~f:(fun chunk acc ->
+(* Executes [p] and reads column 0 through the borrowed-chunk lease; [inside]
+   runs in every callback, while the result lease is held. *)
+let rows ?(inside = fun () -> ()) p codec =
+  Statement.fold_chunks p ~init:[] ~f:(fun chunk acc ->
+    inside ();
     let acc = ref acc and failure = ref None in
-    for row = 0 to chunk_length chunk - 1 do
+    for row = 0 to Statement.chunk_length chunk - 1 do
       if Option.is_none !failure then
-        (match column chunk ~column:0 ~row codec with
+        (match Statement.column chunk ~column:0 ~row codec with
          | Ok x -> acc := x :: !acc
          | Error e -> failure := Some e)
     done;
     match !failure with None -> Ok (Continue !acc) | Some e -> Error e)
+(* Preparation alone: a statement scope with no work. *)
+let prepare c sql = Statement.with_prepared c sql ~f:(fun _ -> Ok ())
 (* A typed request validates the schema at prepare, even for an empty result. *)
 let query c sql codec =
-  Request.Connection.collect c (Request.many ~oneshot:true Fields.[] Fields.[codec] ~row:Fn.id sql) Args.[]
+  Request.Session.collect c (Request.many ~oneshot:true Fields.[] Fields.[codec] ~row:Fn.id sql) Args.[]
 let config = ok (Config.create Memory)
 let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f))
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let roundtrip c typ equal values =
-  ok (with_prepared c ("SELECT ?::" ^ S.name typ) ~f:(fun p ->
-    assert (ok (parameter_count p) = 1);
-    error (function Unbound_parameter 1 -> true | _ -> false) (execute_prepared p);
-    index (bind p (-1) (non_null typ) (List.hd_exn values));
-    index (bind p 0 (non_null typ) (List.hd_exn values));
-    index (bind p 2 (non_null typ) (List.hd_exn values));
+  ok (Statement.with_prepared c ("SELECT ?::" ^ S.name typ) ~f:(fun p ->
+    assert (ok (Statement.parameter_count p) = 1);
+    error (function Unbound_parameter 1 -> true | _ -> false) (Statement.execute p);
+    index (Statement.bind p (-1) (non_null typ) (List.hd_exn values));
+    index (Statement.bind p 0 (non_null typ) (List.hd_exn values));
+    index (Statement.bind p 2 (non_null typ) (List.hd_exn values));
     List.iter values ~f:(fun value ->
-      ok (bind p 1 (non_null typ) value);
+      ok (Statement.bind p 1 (non_null typ) value);
       for _ = 1 to 2 do
-        let r = ok (execute_prepared p) in
-        children (reset p); children (close_prepared p); children (execute_prepared p);
-        busy (execute c "select 1"); busy (with_transaction c ~f:(fun _ -> Ok ()));
-        let copied = ok (rows r (decode typ)) in
-        assert (List.equal equal copied [value]);
-        ok (close_result r); ok (close_result r);
-        closed (rows r (decode typ))
+        (* The fold holds the result lease: the statement and its connection
+           are Busy until it returns. *)
+        let inside () =
+          children (Statement.reset p); children (Statement.bind p 1 (non_null typ) value); children (Statement.execute p);
+          busy (execute c "select 1"); busy (with_transaction c ~f:(fun _ -> Ok ())) in
+        let copied = ok (rows ~inside p (decode typ)) in
+        assert (List.equal equal copied [value])
       done);
-    ok (bind p 1 Codec.Values.(nullable (of_scalar typ)) None);
-    let nullable = ok (rows (ok (execute_prepared p)) Codec.Values.(nullable (of_scalar typ))) in
+    ok (Statement.bind p 1 Codec.Values.(nullable (of_scalar typ)) None);
+    let nullable = ok (rows p Codec.Values.(nullable (of_scalar typ))) in
     assert (List.for_all nullable ~f:Option.is_none);
     error (function Null { column = 0; row = 0 } -> true | _ -> false)
-      (rows (ok (execute_prepared p)) (decode typ));
-    ok (reset p);
-    error (function Unbound_parameter 1 -> true | _ -> false) (execute_prepared p);
+      (rows p (decode typ));
+    ok (Statement.reset p);
+    error (function Unbound_parameter 1 -> true | _ -> false) (Statement.execute p);
     Ok ()))
 let () =
   connected (fun c ->
@@ -84,18 +87,17 @@ let () =
     error (function Embedded_nul -> true | _ -> false) (prepare c "SELECT 1\000;");
     for _ = 1 to 30 do
       error (function Native _ -> true | _ -> false) (prepare c "not valid SQL");
-      ok (with_prepared c "SELECT error('execution fails')" ~f:(fun p ->
-        for _ = 1 to 3 do error (function Native _ -> true | _ -> false) (execute_prepared p) done;
+      ok (Statement.with_prepared c "SELECT error('execution fails')" ~f:(fun p ->
+        for _ = 1 to 3 do error (function Native _ -> true | _ -> false) (Statement.execute p) done;
         Ok ()))
     done;
-    let p = ok (prepare c "SELECT ?::TINYINT, ?::FLOAT") in
-    schema (bind p 1 (non_null S.Int64) 1L);
-    ok (close_prepared p); ok (close_prepared p); closed (reset p);
-    ok (with_prepared c "SELECT ?" ~f:(fun p ->
-      ok (bind p 1 (non_null S.Int8) 2s);
-      assert (List.length (ok (rows (ok (execute_prepared p)) (decode S.Int8))) = 1);
-      ok (reset p); ok (bind p 1 (non_null S.String) "changed type");
-      assert (List.length (ok (rows (ok (execute_prepared p)) (decode S.String))) = 1); Ok ()));
+    ok (Statement.with_prepared c "SELECT ?::TINYINT, ?::FLOAT" ~f:(fun p ->
+      schema (Statement.bind p 1 (non_null S.Int64) 1L); Ok ()));
+    ok (Statement.with_prepared c "SELECT ?" ~f:(fun p ->
+      ok (Statement.bind p 1 (non_null S.Int8) 2s);
+      assert (List.length (ok (rows p (decode S.Int8))) = 1);
+      ok (Statement.reset p); ok (Statement.bind p 1 (non_null S.String) "changed type");
+      assert (List.length (ok (rows p (decode S.String))) = 1); Ok ()));
     assert (List.is_empty (ok (query c "SELECT 1::BIGINT WHERE false" (decode S.Int64))));
     schema (query c "SELECT 1::INTEGER WHERE false" (decode S.Int64));
     List.iter ["1::UBIGINT"; "1::HUGEINT"; "1::DECIMAL(10,2)"; "[1,2]"; "TIME '12:00:00'"] ~f:(fun expr ->
@@ -106,22 +108,20 @@ let () =
   clean (); Stdlib.print_endline "query: policy/failures/range/schema/empty/unsupported=ok"
 let () =
   connected (fun c ->
-    let copied = ok (with_prepared c "SELECT case when i%67=0 then NULL else i end::BIGINT, 'a' || chr(0) || 'b' FROM range(5000) t(i)" ~f:(fun p ->
-      let r = ok (execute_prepared p) in
+    let copied = ok (Statement.with_prepared c "SELECT case when i%67=0 then NULL else i end::BIGINT, 'a' || chr(0) || 'b' FROM range(5000) t(i)" ~f:(fun p ->
       let chunks = ref 0 in
-      let result = fold_chunks r ~init:[] ~f:(fun chunk acc ->
+      let result = Statement.fold_chunks p ~init:[] ~f:(fun chunk acc ->
         Int.incr chunks;
-        busy (close_result r); busy (close_prepared p); busy (reset p); busy (execute_prepared p);
-        busy (close_connection c); busy (execute c "select 1");
-        busy (fold_chunks r ~init:() ~f:(fun _ () -> Ok (Continue ())));
-        index (column chunk ~column:(-1) ~row:0 (non_null S.Int64));
-        index (column chunk ~column:2 ~row:0 (non_null S.Int64));
-        index (column chunk ~column:0 ~row:(-1) (non_null S.Int64));
-        index (column chunk ~column:0 ~row:(chunk_length chunk) (non_null S.Int64));
-        schema (column chunk ~column:0 ~row:0 (non_null S.Int32));
-        let rec copy row acc = if row = chunk_length chunk then acc else
-          let value = ok (column chunk ~column:0 ~row Codec.Values.(nullable int64)) in
-          assert (String.equal (ok (column chunk ~column:1 ~row (non_null S.String))) "a\000b");
+        busy (Statement.reset p); busy (Statement.execute p);
+        busy (Owned.close_connection c); busy (execute c "select 1");
+        index (Statement.column chunk ~column:(-1) ~row:0 (non_null S.Int64));
+        index (Statement.column chunk ~column:2 ~row:0 (non_null S.Int64));
+        index (Statement.column chunk ~column:0 ~row:(-1) (non_null S.Int64));
+        index (Statement.column chunk ~column:0 ~row:(Statement.chunk_length chunk) (non_null S.Int64));
+        schema (Statement.column chunk ~column:0 ~row:0 (non_null S.Int32));
+        let rec copy row acc = if row = Statement.chunk_length chunk then acc else
+          let value = ok (Statement.column chunk ~column:0 ~row Codec.Values.(nullable int64)) in
+          assert (String.equal (ok (Statement.column chunk ~column:1 ~row (non_null S.String))) "a\000b");
           copy (row + 1) (value :: acc) in
         let copied = copy 0 acc in
         Stdlib.Gc.compact ();
@@ -140,8 +140,8 @@ exception Callback_failure
 type _ Stdlib.Effect.t += Pause : unit Stdlib.Effect.t
 let () =
   connected (fun c ->
-    let run f = with_prepared c "SELECT i FROM range(5000) t(i)" ~f:(fun p ->
-      fold_chunks (ok (execute_prepared p)) ~init:0 ~f) in
+    let run f = Statement.with_prepared c "SELECT i FROM range(5000) t(i)" ~f:(fun p ->
+      Statement.fold_chunks p ~init:0 ~f) in
     assert (ok (run (fun _ _ -> Ok (Stop 7))) = 7);
     error (function Invalid_configuration "callback" -> true | _ -> false)
       (run (fun _ _ -> Error { context = Database; cause = Invalid_configuration "callback" }));
@@ -158,36 +158,28 @@ let () =
         | _ -> None } in
     error (function Effects_not_allowed -> true | _ -> false) result;
     assert (not !delivered);
-    let retained_p = ref None and retained_r = ref None in
     ok (with_transaction c ~f:(fun tx ->
-      let p = ok (prepare_transaction tx "SELECT 42::BIGINT") in
-      let r = ok (execute_prepared p) in
-      retained_p := Some p; retained_r := Some r;
-      busy (prepare c "select 1"); busy (execute_transaction tx "select 1"); Ok ()));
-    let p = Option.value_exn !retained_p and r = Option.value_exn !retained_r in
-    closed (execute_prepared p); closed (rows r (decode S.Int64)); ok (close_result r); ok (close_prepared p);
-    let p = ok (prepare c "SELECT 1") in
-    ok (with_transaction c ~f:(fun _ -> busy (execute_prepared p); Ok ()));
-    ok (close_prepared p);
+      Statement.with_prepared tx "SELECT 42::BIGINT" ~f:(fun p ->
+        Statement.fold_chunks p ~init:() ~f:(fun _ () ->
+          busy (prepare c "select 1"); busy (execute tx "select 1"); Ok (Stop ())))));
+    ok (Statement.with_prepared c "SELECT 1" ~f:(fun p ->
+      ok (with_transaction c ~f:(fun _ -> busy (Statement.execute p); Ok ())); Ok ()));
     Ok ());
   clean (); Stdlib.print_endline "query: stop/error/exception/Break/effect/transaction-revocation=ok"
 let () =
-  let retained = ref None in
   ok (with_database config ~f:(fun db ->
-    let c = ok (connect db) in
-    let p = ok (prepare c "select 1") in
-    children (close_connection c); children (close_database db);
-    retained := Some (p, ok (execute_prepared p)); Ok ()));
-  let p, r = Option.value_exn !retained in
-  closed (reset p); ok (close_prepared p); ok (close_result r);
+    let c = ok (Owned.connect db) in
+    ok (Statement.with_prepared c "select 1" ~f:(fun _ ->
+      children (Owned.close_connection c); children (Owned.close_database db); Ok ()));
+    Ok ()));
   clean (); Stdlib.print_endline "query: scoped-parent-child-close=ok"
 let () =
   connected (fun c ->
     let check sql typ equal expected =
       let values = ok (query c sql (decode typ)) in
       assert (List.equal equal values [expected]) in
-    ok (with_prepared c "SELECT ?::TIMESTAMP_S" ~f:(fun p ->
-      schema (bind p 1 (non_null S.Timestamp_us) 1000000L); Ok ()));
+    ok (Statement.with_prepared c "SELECT ?::TIMESTAMP_S" ~f:(fun p ->
+      schema (Statement.bind p 1 (non_null S.Timestamp_us) 1000000L); Ok ()));
     schema (query c "SELECT TIMESTAMP_S '1970-01-01 00:00:01'" (decode S.Timestamp_us));
     check "SELECT DATE '1969-12-31'" S.Date Int32.equal (-1l);
     check "SELECT TIMESTAMP_S '1970-01-01 00:00:01'" S.Timestamp_s Int64.equal 1L;
@@ -197,17 +189,6 @@ let () =
     check "SELECT TIMESTAMPTZ '1970-01-01 01:00:00+01:00'" S.Timestamp_tz Int64.equal 0L;
     Ok ());
   clean (); Stdlib.print_endline "query: independent native date/timestamp units/UTC semantics=ok"
-let () =
-  connected (fun c ->
-    let other = ref None in
-    ok (with_prepared c "select 1" ~f:(fun _ ->
-      let p = ok (prepare c "select 2") in
-      other := Some (p, ok (execute_prepared p)); Ok ()));
-    (* Closing a sibling prepared scope must not clear someone else's lease. *)
-    busy (execute c "select 3");
-    let p, r = Option.value_exn !other in
-    ok (close_result r); ok (close_prepared p); Ok ());
-  clean (); Stdlib.print_endline "query: sibling scoped close preserves result lease identity=ok"
 let () =
   connected (fun c ->
     (* DuckDB 1.5.5 materializes bare NULL as INTEGER, not logical SQLNULL. *)
@@ -221,7 +202,7 @@ let () =
   clean (); Stdlib.print_endline "query: bare NULL retains engine-inferred INTEGER schema=ok"
 let () =
   connected (fun c ->
-    let run f = with_prepared c "select 1::BIGINT" ~f:(fun p -> fold_chunks (ok (execute_prepared p)) ~init:() ~f) in
+    let run f = Statement.with_prepared c "select 1::BIGINT" ~f:(fun p -> Statement.fold_chunks p ~init:() ~f) in
     let unwound = ref 0 in
     error (function Effects_not_allowed -> true | _ -> false)
       (run (fun _ () -> Exn.protect ~f:(fun () -> Stdlib.Effect.perform Pause; Ok (Stop ()))
@@ -237,7 +218,7 @@ let () =
         { effc = fun (type a) (effect : a Stdlib.Effect.t) -> match effect with
           | Pause -> Some (fun (k : (a, _) Stdlib.Effect.Deep.continuation) -> Stdlib.Effect.Deep.continue k ())
           | _ -> None } in
-      assert (handled = 42); assert (chunk_length chunk = 1); Ok (Stop ())));
+      assert (handled = 42); assert (Statement.chunk_length chunk = 1); Ok (Stop ())));
     Ok ());
   clean (); Stdlib.print_endline "query: effect unwind/catch-reperform/composite exception/inner handler=ok"
 
@@ -247,12 +228,11 @@ let () =
   connected (fun c ->
     let parity = Codec.Values.custom Codec.Values.int64
       ~encode:(fun b -> Ok (if b then 1L else 0L)) ~decode:(fun n -> Ok (Int64.equal n 1L)) in
-    ok (with_prepared c "SELECT ?::BIGINT AS x, NULL::VARCHAR AS y" ~f:(fun p ->
-      let* () = bind p 1 parity true in
-      let* r = execute_prepared p in
-      fold_chunks r ~init:() ~f:(fun chunk () ->
-        let x = ok (column chunk ~column:0 ~row:0 parity) in
-        let y = ok (column chunk ~column:1 ~row:0 Codec.Values.(nullable string)) in
+    ok (Statement.with_prepared c "SELECT ?::BIGINT AS x, NULL::VARCHAR AS y" ~f:(fun p ->
+      let* () = Statement.bind p 1 parity true in
+      Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
+        let x = ok (Statement.column chunk ~column:0 ~row:0 parity) in
+        let y = ok (Statement.column chunk ~column:1 ~row:0 Codec.Values.(nullable string)) in
         assert x; assert (Option.is_none y);
         Ok (Stop ()))));
     Ok ());
@@ -265,22 +245,20 @@ let () =
       ~encode:(fun n -> if Int64.equal n 7L then Or_error.error_string "seven" else Ok n)
       ~decode:(fun n -> if Int64.equal n 3L && which then Or_error.error_string "three" else Ok n) in
     let codec = no_seven true in
-    ok (with_prepared c "SELECT ?::BIGINT" ~f:(fun p ->
-      ok (bind p 1 codec 5L);
-      error (function Encode_rejected { index = 1; _ } -> true | _ -> false) (bind p 1 codec 7L);
-      let r = ok (execute_prepared p) in
-      assert (List.equal Int64.equal (ok (rows r (decode S.Int64))) [5L]);
-      ok (close_result r); Ok ()));
-    ok (with_prepared c "SELECT * FROM (VALUES (1::BIGINT),(2),(3))" ~f:(fun p ->
-      let r = ok (execute_prepared p) in
+    ok (Statement.with_prepared c "SELECT ?::BIGINT" ~f:(fun p ->
+      ok (Statement.bind p 1 codec 5L);
+      error (function Encode_rejected { index = 1; _ } -> true | _ -> false) (Statement.bind p 1 codec 7L);
+      assert (List.equal Int64.equal (ok (rows p (decode S.Int64))) [5L]);
+      Ok ()));
+    ok (Statement.with_prepared c "SELECT * FROM (VALUES (1::BIGINT),(2),(3))" ~f:(fun p ->
       error (function Decode_rejected { column = 0; row = 2; _ } -> true | _ -> false)
-        (fold_chunks r ~init:() ~f:(fun chunk () ->
+        (Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
           let outcome = ref (Ok (Continue ())) in
-          for row = 0 to chunk_length chunk - 1 do
+          for row = 0 to Statement.chunk_length chunk - 1 do
             if Result.is_ok !outcome then
-              match column chunk ~column:0 ~row codec with Error e -> outcome := Error e | Ok _ -> ()
+              match Statement.column chunk ~column:0 ~row codec with Error e -> outcome := Error e | Ok _ -> ()
           done;
           !outcome));
-      ok (close_result r); Ok ()));
+      Ok ()));
     Ok ());
   Stdlib.print_endline "query: low-level encode/decode rejection=ok"

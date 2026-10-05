@@ -10,7 +10,7 @@ let run () =
       let pool = unwrap (E.create ~sw limits (ok (Duckdb.Config.create Duckdb.Config.Memory))) in
       assert (Result.is_ok (E.execute pool "CREATE TABLE t(x INTEGER)"));
       let value = unwrap (E.transaction pool ~f:(fun tx ->
-        Result.map (Duckdb.execute_transaction tx "INSERT INTO t VALUES (7)") ~f:(fun () -> 7L))) in
+        Result.map (Duckdb.execute tx "INSERT INTO t VALUES (7)") ~f:(fun () -> 7L))) in
       assert (Int64.equal value 7L);
       (* An exception in the worker callback must settle its producer rather
          than strand the sole permit/completion.  The following SQL proves a

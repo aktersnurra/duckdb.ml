@@ -20,12 +20,12 @@ for name in return store capture domain inner_effect owner_close owner_reset; do
   cat "$name.out"
   case "$name" in
   owner_close)
-    grep -q 'Duckdb.chunk' "$name.out"
-    grep -q 'Duckdb.query_result' "$name.out"
+    grep -q 'Duckdb.Statement.chunk' "$name.out"
+    grep -q 'Duckdb.connection' "$name.out"
     ;;
   owner_reset)
-    grep -q 'Duckdb.chunk' "$name.out"
-    grep -q 'Duckdb.prepared' "$name.out"
+    grep -q 'Duckdb.Statement.chunk' "$name.out"
+    grep -q 'Duckdb.Statement.prepared' "$name.out"
     ;;
   *)
     grep -q '"local"' "$name.out"

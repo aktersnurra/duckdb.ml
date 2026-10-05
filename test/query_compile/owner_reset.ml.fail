@@ -1,1 +1,1 @@
-let escape result = Duckdb.fold_chunks result ~init:() ~f:(fun chunk () -> Duckdb.reset chunk |> fun _ -> Ok (Duckdb.Stop ()))
+let escape prepared = Duckdb.Statement.fold_chunks prepared ~init:() ~f:(fun chunk () -> Duckdb.Statement.reset chunk |> fun _ -> Ok (Duckdb.Stop ()))

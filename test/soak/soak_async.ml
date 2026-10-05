@@ -48,7 +48,7 @@ let callback_cancel () = with_pool (fun pool ->
   require "callback table created" (Result.is_ok created);
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   let request = ok (A.transaction pool ~f:(fun tx ->
-    match Duckdb.execute_transaction tx "INSERT INTO stage5_callback VALUES (1)" with
+    match Duckdb.execute tx "INSERT INTO stage5_callback VALUES (1)" with
     | Error error -> Error error
     | Ok () -> gate entered release; Ok ())) in
   protected_gate release (fun () ->
@@ -143,10 +143,10 @@ let run_episode scenario =
     require "resource baseline restored" (Duckdb_ffi.live_resources () = before_live && Duckdb_ffi.fallback_reclaims () = before_fallback) in
   if not (controlled "accounting") then (assert_baseline (); Deferred.unit)
   else
-    let db = ok (Duckdb.open_database (config ())) in
-    let connection = ok (Duckdb.connect db) in
+    let db = ok (Duckdb.Owned.open_database (config ())) in
+    let connection = ok (Duckdb.Owned.connect db) in
     Monitor.protect
-      ~finally:(fun () -> ok (Duckdb.close_connection connection); ok (Duckdb.close_database db); Deferred.unit)
+      ~finally:(fun () -> ok (Duckdb.Owned.close_connection connection); ok (Duckdb.Owned.close_database db); Deferred.unit)
       (fun () -> assert_baseline (); Deferred.unit)
 
 let run_deferred ~seed ~episodes =

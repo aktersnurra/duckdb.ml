@@ -36,23 +36,24 @@ val append : ('columns, _) appender -> 'columns Args.t list -> (unit, Failure.t)
 val flush : (_, _) appender -> (unit, Failure.t) result
 
 module type QUERY = sig
-  type owner
+  type _ owner
   type error
   type 'a future
-  val exec : owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
-  val find : owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
-  val find_opt : owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
+  val exec : _ owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
+  val find : _ owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
+  val find_opt : _ owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
     ('row option, error) result future
-  val collect : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val collect : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     ('row list, error) result future
-  val fold : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val fold : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, error) result future
 end
 
 module type CONNECTION = sig
   include QUERY
-  val with_transaction : owner -> f:(transaction -> ('a, Failure.t) result) -> ('a, error) result future
-  val ingest : owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+  val with_transaction : [ `Connection ] owner ->
+    f:([ `Transaction ] Session.t -> ('a, Failure.t) result) -> ('a, error) result future
+  val ingest : [ `Connection ] owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
     (unit, error) result future
 end
 
@@ -64,16 +65,21 @@ type ('row, 'out) shape =
   | Collect : ('row, 'row list) shape
   | Fold : { init : 'a; f : 'row -> 'a -> ('a Query.step, Failure.t) result } -> ('row, 'a) shape
 
-(* The one execution entry point per shape, used by the adapters; prefer the named operations of [Connection], which
-   carry the row-count guards ([run] accepts any multiplicity with [Find], [Find_opt], [Collect] and [Fold]). *)
-val run : connection -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t -> ('out, Failure.t) result
-
-(* Runs a parameterless request on a connection, as [Connection.fold], with
+(* Runs a parameterless request on a connection, as [Session.fold], with
    its errors in [context]. *)
 val fold_on : context:Failure.context -> connection -> (unit, 'row, _) t -> init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) ->
   ('a, Failure.t) result
 
-module Connection : CONNECTION
-  with type owner = connection and type error = Failure.t and type 'a future = 'a
-module Transaction : QUERY
-  with type owner = transaction and type error = Failure.t and type 'a future = 'a
+(* A transaction owned by the calling scope; errors pass through flat. *)
+val with_owned_transaction : connection -> f:(transaction -> ('a, Failure.t) result) -> ('a, Failure.t) result
+
+(* One operation set over both session kinds. [run] is the one execution entry
+   point per shape, used by the adapters through [Duckdb.Owned]; the named
+   operations carry the row-count guards ([run] accepts any multiplicity with
+   [Find], [Find_opt], [Collect] and [Fold]). *)
+module Session : sig
+  include CONNECTION
+    with type 'k owner = 'k Session.t and type error = Failure.t and type 'a future = 'a
+  val run : _ Session.t -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t ->
+    ('out, Failure.t) result
+end

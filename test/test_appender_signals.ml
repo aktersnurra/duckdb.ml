@@ -12,9 +12,9 @@ let rec is_break = function
   | Cleanup_exception (_,e) -> is_break e
   | Exn.Finally (a,b) -> is_break a || is_break b
   | _ -> false
-let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
-  fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
-    match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
+let count c = ok (Statement.with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
+  Statement.fold_chunks p ~init:0L ~f:(fun chunk _ ->
+    match Statement.column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
 let () =
   let mode = Stdlib.Sys.argv.(1) in
   let leave = String.is_suffix mode ~suffix:"-leave" in
@@ -41,7 +41,7 @@ let () =
                native appender creation itself. *)
             if String.is_prefix mode ~prefix:"create" then target 5 leave;
             let table = Table.(declare "a" Columns.[ "x", string ] ~row:Fn.id) in
-            let result = Table.with_appender_transaction tx table ~f:(fun a ->
+            let result = Table.with_appender tx table ~f:(fun a ->
               inject "append";
               ok (Table.append a [Args.[String.make 10000 'x' ^ "\000end"]]);
               inject "flush"; ok (Table.flush a);

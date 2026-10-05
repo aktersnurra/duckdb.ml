@@ -11,45 +11,65 @@ module Config = struct
   let create ?threads ?memory_limit_bytes ?statement_cache ?access storage =
     within Database (create ?threads ?memory_limit_bytes ?statement_cache ?access storage)
 end
-type database = R.database
-type connection = R.connection
-type transaction = R.transaction
+type database = Session.database
+type 'k session = 'k Session.t
+type connection = [ `Connection ] session
+type transaction = [ `Transaction ] session
 module Bridge = struct
   include R.Bridge
   let cancel request = within Connection (cancel request)
+  let run request (Session.Connection c : connection) ~f =
+    R.Bridge.run request c ~f:(fun facade -> f (Session.Connection facade))
 end
-let open_database config = within Database (R.open_database config)
-let close_database db = within Database (R.close_database db)
-let connect db = within Connection (R.connect db)
-let close_connection c = within Connection (R.close_connection c)
-let execute c sql = within (Query sql) (R.execute c sql)
-let execute_transaction tx sql = within (Query sql) (R.execute_transaction tx sql)
-let with_database = R.with_database
-let with_connection = R.with_connection
-let with_transaction = Request.Connection.with_transaction
+let execute s sql = within (Query sql) (match Session.within s with
+  | None -> R.execute (Session.connection s) sql
+  | Some tx -> R.execute_transaction tx sql)
+let with_database config ~f = R.with_database config ~f:(fun database -> f { Session.database })
+let with_connection (db : database) ~f =
+  R.with_connection db.database ~f:(fun c -> f (Session.Connection c))
+let with_transaction = Request.Session.with_transaction
 
-type prepared = Q.prepared
-type query_result = Q.query_result
-type chunk = Q.chunk
 type 'a step = 'a Q.step = Continue of 'a | Stop of 'a
-let in_statement p result = within (Query (Q.sql p)) result
-let prepare c sql = within (Query sql) (Q.prepare c sql)
-let prepare_transaction tx sql = within (Query sql) (Q.prepare_transaction tx sql)
-let close_prepared p = in_statement p (Q.close_prepared p)
-let parameter_count p = in_statement p (Q.parameter_count p)
-let bind p index codec value = in_statement p (Q.bind p index codec value)
-let reset p = in_statement p (Q.reset p)
-let execute_prepared p = in_statement p (Q.execute_prepared p)
-let close_result r = within (Query (Q.result_sql r)) (Q.close_result r)
-let with_prepared c sql ~f = Q.with_prepared ~lifting:(Flat (Query sql)) c sql ~f
-let with_prepared_transaction tx sql ~f = Q.with_prepared_transaction ~lifting:(Flat (Query sql)) tx sql ~f
-let fold_chunks r ~init ~f = Q.fold_chunks ~lifting:(Flat (Query (Q.result_sql r))) r ~init ~f
-let chunk_length = Q.chunk_length
-let column (chunk @ local) ~column ~row codec =
-  within (Query (Q.chunk_sql chunk)) (Q.column chunk ~column ~row codec)
+module Statement = struct
+  (* The payload is global so that a facade function receiving a local
+     statement can still pass the internal one to the global internals
+     (execution records it as the result's owner). *)
+  type prepared = { prepared : Q.prepared @@ global }
+  type chunk = Q.chunk
+  let in_statement p result = within (Query (Q.sql p)) result
+  let with_prepared s sql ~f =
+    let f prepared = f { prepared } in
+    match Session.within s with
+    | None -> Q.with_prepared ~lifting:(Flat (Query sql)) (Session.connection s) sql ~f
+    | Some tx -> Q.with_prepared_transaction ~lifting:(Flat (Query sql)) tx sql ~f
+  let parameter_count { prepared = p } = in_statement p (Q.parameter_count p)
+  let bind { prepared = p } index codec value = in_statement p (Q.bind p index codec value)
+  let reset { prepared = p } = in_statement p (Q.reset p)
+  let fold_chunks { prepared = p } ~init ~f = Q.fold_prepared ~lifting:(Flat (Query (Q.sql p))) p ~init ~f
+  let execute p = fold_chunks p ~init:() ~f:(fun _ () -> Ok (Continue ()))
+  let chunk_length = Q.chunk_length
+  let column (chunk @ local) ~column ~row codec =
+    within (Query (Q.chunk_sql chunk)) (Q.column chunk ~column ~row codec)
+end
 
 module Fields = Fields
 module Args = Args
 module Request = Request
 module Table = Table
 module Parquet = Parquet
+
+module Owned = struct
+  let open_database config =
+    within Database (Result.map (fun database -> { Session.database }) (R.open_database config))
+  let close_database (db : database) = within Database (R.close_database db.database)
+  let connect (db : database) =
+    within Connection (Result.map (fun c -> Session.Connection c) (R.connect db.database))
+  let close_connection (Session.Connection c : connection) = within Connection (R.close_connection c)
+  type ('row, 'out) shape = ('row, 'out) Request.shape =
+    | Exec : (unit, unit) shape
+    | Find : ('row, 'row) shape
+    | Find_opt : ('row, 'row option) shape
+    | Collect : ('row, 'row list) shape
+    | Fold : { init : 'a; f : 'row -> 'a -> ('a step, Error.t) result } -> ('row, 'a) shape
+  let run = Request.Session.run
+end

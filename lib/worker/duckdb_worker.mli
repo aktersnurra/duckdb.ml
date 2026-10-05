@@ -34,7 +34,7 @@ module type S = sig
 
   (** Typed requests (each one bridged request). Bridge failures are reported
       in the request's context; row callbacks run inside the callback marker. *)
-  val request_run : slot -> Duckdb.Bridge.request -> ('row, 'out) Duckdb.Request.shape ->
+  val request_run : slot -> Duckdb.Bridge.request -> ('row, 'out) Duckdb.Owned.shape ->
     ('p, 'row, _) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('out, Duckdb.Error.t) result
   val request_transaction : slot -> Duckdb.Bridge.request ->
     f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result

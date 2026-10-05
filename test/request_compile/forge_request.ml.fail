@@ -1,4 +1,3 @@
 module D = Duckdb
 module R = D.Request
-module C = R.Connection
 let r : (unit, unit, R.zero) R.t = { R.sql = "delete from t" }
