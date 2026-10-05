@@ -3,8 +3,6 @@ module D = Duckdb
 external arm : int -> unit = "test_arm" [@@noalloc]
 external entered : unit -> int = "test_entered" [@@noalloc]
 external release : unit -> unit = "test_release" [@@noalloc]
-external waiting : unit -> bool = "test_waiting" [@@noalloc]
-external calls : unit -> int = "test_calls" [@@noalloc]
 external fail_rollback : unit -> unit = "test_fail_rollback" [@@noalloc]
 external trace_reset : unit -> unit = "test_trace_reset" [@@noalloc]
 external trace : unit -> int = "test_trace" [@@noalloc]
@@ -21,6 +19,12 @@ let error (expected : D.Error.cause) = function
 let native_error = function Error { D.Error.cause = Native _; _ } -> () | _ -> failwith "expected native error"
 let config = ok (D.Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
+(* Owned handles are global: callbacks and threads may capture them. *)
+let with_owned f =
+  let db = ok (D.Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> ok (D.Owned.close_database db)) ~f:(fun () ->
+    let c = ok (D.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection c)) ~f:(fun () -> f db c))
 let wait predicate =
   let rec loop n = if predicate () then () else if n = 0 then failwith "handshake timeout"
     else (Thread.delay 0.001; loop (n - 1)) in loop 5000
@@ -38,9 +42,6 @@ let lifecycle () =
   ok (D.with_database (ok (D.Config.create ~threads:2 ~memory_limit_bytes:128_000_000 Memory))
     ~f:(fun db -> D.with_connection db ~f:(fun c ->
       D.execute c "select case when current_setting('threads')=2 then 1 else error('threads') end")));
-  ok (D.with_database config ~f:D.Owned.close_database);
-  ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:D.Owned.close_connection));
-  clean ();
   (match D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun _ -> raise Callback)) with
    | exception Callback -> () | _ -> assert false);
   clean ();
@@ -56,11 +57,6 @@ let lifecycle () =
   ok (D.Owned.close_connection c); ok (D.Owned.close_connection alias);
   error Closed (D.execute alias "select 1");
   ok (D.Owned.close_database db); ok (D.Owned.close_database db); error Closed (D.Owned.connect db); clean ();
-  let escaped_db = ok (D.with_database config ~f:(fun db ->
-    let escaped_c = ok (D.with_connection db ~f:(fun c -> Ok c)) in
-    error Closed (D.execute escaped_c "select 1");
-    let _ = ok (D.Owned.connect db) in Ok db)) in
-  error Closed (D.Owned.connect escaped_db); clean ();
   Stdlib.print_endline "duckdb: config/errors/aliases/parent-child/scoped=ok"
 let persistence () =
   let path = Stdlib.Filename.temp_file "duckdb-stage3a" ".db" in
@@ -75,16 +71,15 @@ let persistence () =
       D.execute c "select case when sum(i)=42 then 1 else error('persistence') end from persisted"))));
   clean (); Stdlib.print_endline "duckdb: persistence/read-only=ok"
 let transactions () =
-  ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
+  with_owned (fun db c ->
     ok (D.execute c "create table t(i integer)");
     let count n = ok (D.execute c ("select case when count(*)=" ^ Int.to_string n ^
       " then 1 else error('transaction count') end from t")) in
-    let escaped = ok (D.with_transaction c ~f:(fun tx ->
+    ok (D.with_transaction c ~f:(fun tx ->
       error Busy (D.execute c "select 1"); error Busy (D.Owned.close_connection c);
       error Busy (D.Owned.close_database db);
       error Busy (D.with_transaction c ~f:(fun _ -> Ok ()));
-      ok (D.execute tx "insert into t values (1)"); Ok tx)) in
-    error Closed (D.execute escaped "select 1"); count 1;
+      D.execute tx "insert into t values (1)")); count 1;
     error Effects_not_allowed (D.with_transaction c ~f:(fun tx ->
       ok (D.execute tx "insert into t values (2)");
       Error { context = Transaction; cause = Effects_not_allowed })); count 1;
@@ -92,8 +87,8 @@ let transactions () =
       ok (D.execute tx "insert into t values (3)"); raise Callback) with
      | exception Callback -> () | _ -> assert false); count 1;
     native_error (D.with_transaction c ~f:(fun tx ->
-      ok (D.execute tx "insert into t values (4)"); D.execute tx "select missing")); count 1;
-    Ok ()))); clean (); Stdlib.print_endline "duckdb: transactions/rollback/error/exn/revocation=ok"
+      ok (D.execute tx "insert into t values (4)"); D.execute tx "select missing")); count 1);
+  clean (); Stdlib.print_endline "duckdb: transactions/rollback/error/exn=ok"
 type _ Stdlib.Effect.t += Pause : unit Stdlib.Effect.t
 let effects () =
   let delivered = ref false in
@@ -105,17 +100,11 @@ let effects () =
   error Effects_not_allowed (D.with_database config ~f:(fun _ ->
     (try Stdlib.Effect.perform Pause with _ -> ()); Ok ()));
   clean ();
-  let saved : (unit, (unit, D.Error.t) Result.t) Stdlib.Effect.Deep.continuation option ref = ref None in
-  ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
-    D.with_transaction c ~f:(fun tx ->
-      Stdlib.Effect.Deep.match_with
-        (fun () -> Stdlib.Effect.perform Pause; D.execute tx "select 1") ()
-        { retc = Fn.id; exnc = raise;
-          effc = fun (type a) (effect : a Stdlib.Effect.t) -> match effect with
-            | Pause -> Some (fun (continuation : (a, _) Stdlib.Effect.Deep.continuation) -> saved := Some continuation; Ok ())
-            | _ -> None }))));
-  error Closed (Stdlib.Effect.Deep.continue (Option.value_exn !saved) ());
-  clean (); Stdlib.print_endline "duckdb: effects/no-escape/inner-continuation-revoked=ok"
+  (* A handler inside the callback cannot capture [tx] in its thunk
+     (test/scope_compile/effect_escape.ml.fail). A handler installed outside
+     the scope still captures a continuation holding [tx] on its stack: only
+     the runtime barrier above (Effects_not_allowed) stops it. *)
+  Stdlib.print_endline "duckdb: effects/no-escape=ok"
 let ownership () =
   let db = ok (D.Owned.open_database config) in
   let c = ok (D.Owned.connect db) in
@@ -129,31 +118,9 @@ let ownership () =
   error Busy (D.execute c "select 1"); error Busy (D.Owned.close_connection c); error Busy (D.Owned.close_database db);
   release (); Thread.join worker; ok (Option.value_exn !result);
   ok (D.Owned.close_connection c); ok (D.Owned.close_database db); clean ();
-  let worker = ref None and observer = ref None in
-  ok (D.with_database config ~f:(fun db ->
-    let c = ok (D.Owned.connect db) in
-    arm 1;
-    worker := Some (Thread.create (fun () -> ok (D.execute c "select 42")) ());
-    wait (fun () -> entered () = 1);
-    observer := Some (Thread.create (fun () ->
-      wait (fun () -> match D.execute c "select 1" with Error { cause = Closed; _ } -> true | Error { cause = Busy; _ } -> false | _ -> assert false);
-      release ()) ());
-    Ok ()));
-  Thread.join (Option.value_exn !worker); Thread.join (Option.value_exn !observer); clean ();
-  (* Concurrent manual close must be drained, not duplicated by scoped close. *)
-  let closer = ref None and releaser = ref None in
-  ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
-    arm 2;
-    closer := Some (Thread.create (fun () -> ok (D.Owned.close_connection c)) ());
-    wait (fun () -> entered () = 2);
-    releaser := Some (Thread.create (fun () -> wait waiting; release ()) ());
-    Ok ())));
-  Thread.join (Option.value_exn !closer); Thread.join (Option.value_exn !releaser);
-  assert (calls () = 1); clean ();
-  Stdlib.print_endline "duckdb: systhreads/exclusion/revocation/drain=ok"
+  Stdlib.print_endline "duckdb: systhreads/exclusion=ok"
 let rollback_failures () =
-  ok (D.with_database config ~f:(fun db ->
-    let c = ok (D.Owned.connect db) in
+  with_owned (fun db c ->
     fail_rollback ();
     (match D.with_transaction c ~f:(fun _ -> Error { D.Error.context = Transaction; cause = Effects_not_allowed }) with
      | Error { cause = Rollback_failed { primary = { cause = Effects_not_allowed; _ }; rollback = { cause = Native _; _ } }; _ } -> ()
@@ -163,34 +130,17 @@ let rollback_failures () =
     fail_rollback ();
     (match D.with_transaction c ~f:(fun _ -> raise Callback) with
      | exception D.Cleanup_exception ({ cause = Native _; _ }, Callback) -> () | _ -> assert false);
-    error Closed (D.execute c "select 1"); Ok ()));
+    error Closed (D.execute c "select 1"); ok (D.Owned.close_connection c));
   clean (); Stdlib.print_endline "duckdb: rollback-failure/outcome-preservation/discard=ok"
-let transaction_drain () =
-  let worker = ref None and observer = ref None in
-  ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
-    ok (D.execute c "create table t(i integer)");
-    ok (D.with_transaction c ~f:(fun tx ->
-      arm 1;
-      worker := Some (Thread.create (fun () -> ok (D.execute tx "insert into t values (42)")) ());
-      wait (fun () -> entered () = 1);
-      error Busy (D.execute tx "select 1");
-      observer := Some (Thread.create (fun () ->
-        wait (fun () -> match D.execute tx "select 1" with
-          | Error { cause = Closed; _ } -> true | Error { cause = Busy; _ } -> false | _ -> assert false);
-        error Busy (D.execute c "select 1");
-        release ()) ());
-      Ok ()));
-    Thread.join (Option.value_exn !worker); Thread.join (Option.value_exn !observer);
-    arm 0;
-    D.execute c "select case when sum(i)=42 then 1 else error('drain') end from t")));
-  clean (); Stdlib.print_endline "duckdb: transaction/concurrent-token/revocation/drain=ok"
 let destruction_order () =
+  (* The old case, a scoped database closing an un-closed Owned child, can no
+     longer be written: a scoped database cannot reach [Owned.connect]. *)
   trace_reset ();
-  ok (D.with_database config ~f:(fun db -> let _ = ok (D.Owned.connect db) in Ok ()));
+  ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun _ -> Ok ())));
   assert (trace () = 12); clean ();
   Stdlib.print_endline "duckdb: disconnect-before-database-close=ok"
 let () = lifecycle (); persistence (); transactions (); effects (); ownership ();
-  rollback_failures (); transaction_drain (); destruction_order ()
+  rollback_failures (); destruction_order ()
 (* Native counters were checked before GC at every scope. This only lets the
    OCaml runtime finalize its mutex/condition/thread bookkeeping for diagnostics. *)
 let () = Stdlib.Gc.full_major (); Stdlib.Gc.full_major (); clean ()

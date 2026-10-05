@@ -19,7 +19,7 @@ module type S = sig
   val close_slot : slot -> (unit, D.Error.t) result
   val close_database : database -> (unit, D.Error.t) result
   val execute : slot -> D.Bridge.request -> string -> (unit, D.Error.t) result
-  val transaction : slot -> D.Bridge.request -> f:(D.transaction -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
+  val transaction : slot -> D.Bridge.request -> f:(D.transaction @ local -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
   val query : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> ('row list, D.Error.t) result
   val fold_rows : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.Error.t) result) -> ('a, D.Error.t) result
@@ -32,20 +32,19 @@ module type S = sig
   val request_run : slot -> D.Bridge.request -> ('row, 'out) D.Owned.shape -> ('p, 'row, _) D.Request.t ->
     'p D.Args.t -> ('out, D.Error.t) result
   val request_transaction : slot -> D.Bridge.request ->
-    f:(D.transaction -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
+    f:(D.transaction @ local -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
   val table_ingest : slot -> D.Bridge.request -> ('c, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
     (unit, D.Error.t) result
   val is_in_callback : unit -> bool
 end
 
 module Make (Probe : Probe) = struct
-  let ( let* ) x f = Result.bind x ~f
   type database = Database of D.database
   type slot = Slot of D.connection
 
   let active = Thread.TLS.new_key (fun () -> false)
   let is_in_callback () = Thread.TLS.get active
-  let with_callback f =
+  let with_callback (f @ local) =
     let previous = Thread.TLS.get active in
     Thread.TLS.set active true;
     Exn.protect ~f ~finally:(fun () ->
@@ -65,19 +64,22 @@ module Make (Probe : Probe) = struct
 
   let execute slot request sql = bridged slot request (fun c -> D.execute c sql)
   let transaction slot request ~f =
-    bridged slot request (fun c -> D.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
+    bridged slot request (fun c -> D.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx) [@nontail]))
   let query slot request sql fields ~row =
     bridged slot request (fun c -> D.Request.Session.collect c (raw sql fields ~row) D.Args.[])
   let fold_rows slot request sql fields ~row ~init ~f =
     bridged slot request (fun c -> D.Request.Session.fold c (raw sql fields ~row) D.Args.[] ~init ~f:(in_callback f))
   let parquet_fold_rows slot request names fields ~row ~init ~f =
     bridged slot request (fun c ->
-      let* paths = Result.all (List.map names ~f:D.Parquet.path) in
-      D.Parquet.fold c paths fields ~row ~init ~f:(in_callback f))
+      (* Binding-operator continuations are global; [c] is local. *)
+      match Result.all (List.map names ~f:D.Parquet.path) with
+      | Error _ as error -> error
+      | Ok paths -> D.Parquet.fold c paths fields ~row ~init ~f:(in_callback f))
   let parquet_export slot request ~query ~destination =
     bridged slot request (fun c ->
-      let* path = D.Parquet.path destination in
-      D.Parquet.export c ~query path)
+      match D.Parquet.path destination with
+      | Error _ as error -> error
+      | Ok path -> D.Parquet.export c ~query path)
 
   module R = D.Request
   let typed slot request ~context work =
@@ -95,10 +97,11 @@ module Make (Probe : Probe) = struct
     typed slot request ~context:(in_query r) (fun c -> D.Owned.run c (marked shape) r args)
   let request_transaction slot request ~f =
     typed slot request ~context:D.Error.Transaction (fun c ->
-      R.Session.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
+      R.Session.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx) [@nontail]))
   let table_ingest slot request table batches ~flush =
     typed slot request ~context:D.Error.Transaction (fun c ->
       R.Session.with_transaction c ~f:(fun tx -> D.Table.with_appender tx table ~f:(fun appender ->
-        let* () = List.fold_result batches ~init:() ~f:(fun () batch -> D.Table.append appender batch) in
-        if flush then (Probe.explicit_flush (); D.Table.flush appender) else Ok ())))
+        match List.fold_result batches ~init:() ~f:(fun () batch -> D.Table.append appender batch) with
+        | Error _ as error -> error
+        | Ok () -> if flush then (Probe.explicit_flush (); D.Table.flush appender) else Ok ())))
 end

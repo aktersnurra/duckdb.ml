@@ -1,0 +1,2 @@
+module D = Duckdb
+let f (c @ local) t = D.Table.with_appender c t ~f:(fun _a -> D.execute c "SELECT 1")

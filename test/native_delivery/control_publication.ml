@@ -24,9 +24,13 @@ let scalar c sql = ok (D.Statement.with_prepared c sql ~f:(fun p ->
     match D.Statement.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with
     | Ok n -> Ok (D.Stop n)
     | Error e -> Error e)))
-let with_pair f = ok (D.with_database (ok (D.Config.create Memory)) ~f:(fun db ->
-  D.with_connection db ~f:(fun owner -> D.with_connection db ~f:(fun observer ->
-    ok (D.execute owner "CREATE TABLE cp(x BIGINT)"); f owner observer; Ok ()))))
+(* Owned handles are global, so worker threads and callbacks may capture them. *)
+let with_pair f =
+  let db = ok (D.Owned.open_database (ok (D.Config.create Memory))) in
+  Exn.protect ~finally:(fun () -> ok (D.Owned.close_database db)) ~f:(fun () ->
+    let owner = ok (D.Owned.connect db) and observer = ok (D.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection observer); ok (D.Owned.close_connection owner))
+      ~f:(fun () -> ok (D.execute owner "CREATE TABLE cp(x BIGINT)"); f owner observer))
 let commit_case ~snapshot point _ = with_pair (fun owner observer ->
   reset (); gate point true;
   if point = 67 || point = 68 then selected_gate true;

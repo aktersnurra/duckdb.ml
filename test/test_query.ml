@@ -33,7 +33,12 @@ let prepare c sql = Statement.with_prepared c sql ~f:(fun _ -> Ok ())
 let query c sql codec =
   Request.Session.collect c (Request.many ~oneshot:true Fields.[] Fields.[codec] ~row:Fn.id sql) Args.[]
 let config = ok (Config.create Memory)
-let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f))
+(* Owned handles are global: callbacks may capture them. *)
+let connected f =
+  let db = ok (Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
+    let c = ok (Owned.connect db) in
+    Exn.protect ~finally:(fun () -> ok (Owned.close_connection c)) ~f:(fun () -> ok (f c)))
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let roundtrip c typ equal values =
   ok (Statement.with_prepared c ("SELECT ?::" ^ S.name typ) ~f:(fun p ->
@@ -45,10 +50,9 @@ let roundtrip c typ equal values =
     List.iter values ~f:(fun value ->
       ok (Statement.bind p 1 (non_null typ) value);
       for _ = 1 to 2 do
-        (* The fold holds the result lease: the statement and its connection
-           are Busy until it returns. *)
+        (* The fold holds the result lease: the connection is Busy until it
+           returns. (The callback cannot capture the local statement.) *)
         let inside () =
-          children (Statement.reset p); children (Statement.bind p 1 (non_null typ) value); children (Statement.execute p);
           busy (execute c "select 1"); busy (with_transaction c ~f:(fun _ -> Ok ())) in
         let copied = ok (rows ~inside p (decode typ)) in
         assert (List.equal equal copied [value])
@@ -112,7 +116,6 @@ let () =
       let chunks = ref 0 in
       let result = Statement.fold_chunks p ~init:[] ~f:(fun chunk acc ->
         Int.incr chunks;
-        busy (Statement.reset p); busy (Statement.execute p);
         busy (Owned.close_connection c); busy (execute c "select 1");
         index (Statement.column chunk ~column:(-1) ~row:0 (non_null S.Int64));
         index (Statement.column chunk ~column:2 ~row:0 (non_null S.Int64));
@@ -161,18 +164,17 @@ let () =
     ok (with_transaction c ~f:(fun tx ->
       Statement.with_prepared tx "SELECT 42::BIGINT" ~f:(fun p ->
         Statement.fold_chunks p ~init:() ~f:(fun _ () ->
-          busy (prepare c "select 1"); busy (execute tx "select 1"); Ok (Stop ())))));
-    ok (Statement.with_prepared c "SELECT 1" ~f:(fun p ->
-      ok (with_transaction c ~f:(fun _ -> busy (Statement.execute p); Ok ())); Ok ()));
+          busy (prepare c "select 1"); Ok (Stop ())))));
     Ok ());
   clean (); Stdlib.print_endline "query: stop/error/exception/Break/effect/transaction-revocation=ok"
 let () =
-  ok (with_database config ~f:(fun db ->
+  let db = ok (Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
     let c = ok (Owned.connect db) in
-    ok (Statement.with_prepared c "select 1" ~f:(fun _ ->
-      children (Owned.close_connection c); children (Owned.close_database db); Ok ()));
-    Ok ()));
-  clean (); Stdlib.print_endline "query: scoped-parent-child-close=ok"
+    Exn.protect ~finally:(fun () -> ok (Owned.close_connection c)) ~f:(fun () ->
+      ok (Statement.with_prepared c "select 1" ~f:(fun _ ->
+        children (Owned.close_connection c); children (Owned.close_database db); Ok ()))));
+  clean (); Stdlib.print_endline "query: parent-child-close=ok"
 let () =
   connected (fun c ->
     let check sql typ equal expected =
@@ -224,12 +226,11 @@ let () =
 
 (* Low-level bind/column take codecs, including custom ones. *)
 let () =
-  let ( let* ) x f = Result.bind x ~f in
   connected (fun c ->
     let parity = Codec.Values.custom Codec.Values.int64
       ~encode:(fun b -> Ok (if b then 1L else 0L)) ~decode:(fun n -> Ok (Int64.equal n 1L)) in
     ok (Statement.with_prepared c "SELECT ?::BIGINT AS x, NULL::VARCHAR AS y" ~f:(fun p ->
-      let* () = Statement.bind p 1 parity true in
+      ok (Statement.bind p 1 parity true);
       Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
         let x = ok (Statement.column chunk ~column:0 ~row:0 parity) in
         let y = ok (Statement.column chunk ~column:1 ~row:0 Codec.Values.(nullable string)) in

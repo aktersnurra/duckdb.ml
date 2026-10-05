@@ -1,0 +1,2 @@
+module D = Duckdb
+let f c t = D.Table.with_appender c t ~f:(fun a -> Ok a)

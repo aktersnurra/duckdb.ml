@@ -10,8 +10,15 @@ let rejected = function
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let insert p x = ok (Statement.bind p 1 (Codec.Values.int64) x); Statement.execute p
-let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
-  with_connection db ~f:(fun other -> f c other; Ok ()))))
+(* Owned handles are global: callbacks may capture them. *)
+let connected f =
+  let db = ok (Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
+    let connect () = ok (Owned.connect db) in
+    let c = connect () and other = connect () in
+    Exn.protect ~finally:(fun () -> ok (Owned.close_connection other); ok (Owned.close_connection c))
+      ~f:(fun () -> f c other))
+
 let advanced f =
   let before = Duckdb_ffi.schema_epoch () in
   f ();

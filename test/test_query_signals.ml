@@ -20,8 +20,12 @@ let () =
     (Stdlib.Sys.Signal_handle (fun _ -> Stdlib.Atomic.incr handled; raise Stdlib.Sys.Break)) in
   Exn.protect ~finally:(fun () -> arm 0 0; Stdlib.Sys.Safe.set_signal Stdlib.Sys.sigusr1 previous) ~f:(fun () ->
     (match Stdlib.Sys.with_async_exns (fun () ->
-      ok (D.with_database (ok (D.Config.create Memory)) ~f:(fun db ->
-        D.with_connection db ~f:(fun c ->
+      (* Owned handles are global: the statement callback may capture [c]. *)
+      let db = ok (D.Owned.open_database (ok (D.Config.create Memory))) in
+      Exn.protect ~finally:(fun () -> ok (D.Owned.close_database db)) ~f:(fun () ->
+      let c = ok (D.Owned.connect db) in
+      Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection c)) ~f:(fun () ->
+          ok (
           inject "prepare";
           let bind_kind = if String.is_prefix mode ~prefix:"bind-int" then "BIGINT"
             else if String.is_prefix mode ~prefix:"bind-float" then "DOUBLE" else "VARCHAR" in

@@ -17,8 +17,8 @@ val path : string -> (path, Failure.t) result
     Filesystem effects are not rolled back by DuckDB transactions. A failure or
     interruption during/after publication can follow a published output. No
     crash durability, hostile-directory or atomic transaction/file claim. *)
-val export : [ `Connection ] Session.t -> query:string -> path -> (unit, Failure.t) result
-val fold : [ `Connection ] Session.t -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
+val export : [ `Connection ] Session.t @ local -> query:string -> path -> (unit, Failure.t) result
+val fold : [ `Connection ] Session.t @ local -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, Failure.t) result
-val fold_table : [ `Connection ] Session.t -> path list -> (_, 'row) Request.table -> init:'a ->
+val fold_table : [ `Connection ] Session.t @ local -> path list -> (_, 'row) Request.table -> init:'a ->
   f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, Failure.t) result

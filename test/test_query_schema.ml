@@ -12,11 +12,18 @@ let count c = ok (Statement.with_prepared c "SELECT count(*)::BIGINT FROM t" ~f:
     | Error e -> Error e)))
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
+(* Owned handles are global: callbacks may capture them. *)
+let owned f =
+  let db = ok (Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
+    let connect () = ok (Owned.connect db) in
+    let c = connect () and other = connect () in
+    Exn.protect ~finally:(fun () -> ok (Owned.close_connection other); ok (Owned.close_connection c))
+      ~f:(fun () -> f c other))
 let () =
   List.iter [false; true] ~f:(fun other_connection ->
     List.iter ["before-bind"; "after-bind"; "reuse"] ~f:(fun phase ->
-      ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
-        with_connection db ~f:(fun other ->
+      owned (fun c other ->
           ok (execute c "CREATE TABLE t(x BIGINT)");
           ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
             let alter () = ok (execute (if other_connection then other else c)
@@ -35,32 +42,9 @@ let () =
               ok (Statement.bind fresh 1 (Codec.Values.float64) 42.0);
               Statement.execute fresh));
             assert (Int64.equal (count c) 1L);
-            Ok ()));
-          Ok ()))));
+            Ok ())));
       clean ();
       Stdlib.Printf.printf "schema: %s other-connection=%b rejects without insert; cleanup/reuse=ok\n%!" phase other_connection))
-
-let () =
-  ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
-    ok (execute c "CREATE TABLE t(x BIGINT)");
-    (match with_transaction c ~f:(fun tx ->
-      Statement.with_prepared tx "INSERT INTO t VALUES (?)" ~f:(fun p ->
-        ok (Statement.bind p 1 (Codec.Values.int64) 9007199254740993L);
-        ok (Statement.execute p);
-        ok (execute tx "DELETE FROM t");
-        ok (execute tx "ALTER TABLE t ALTER x TYPE DOUBLE");
-        rejected (Statement.execute p);
-        ok (execute tx "INSERT INTO t VALUES (42.0)");
-        Error { context = Transaction; cause = Effects_not_allowed })) with
-     | Error { cause = Effects_not_allowed; _ } -> () | _ -> failwith "outer transaction outcome changed");
-    assert (Int64.equal (count c) 0L);
-    (* Outer rollback restores BIGINT, not just rows; no internal COMMIT occurred. *)
-    ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
-      ok (Statement.bind p 1 (Codec.Values.int64) 9007199254740993L);
-      ok (Statement.execute p); Ok ()));
-    Ok ())));
-  clean ();
-  Stdlib.print_endline "schema: explicit transaction reuse/rejection/outer rollback ownership=ok"
 
 let () =
   let path = Stdlib.Filename.temp_file "duckdb-schema-copy" ".csv" in

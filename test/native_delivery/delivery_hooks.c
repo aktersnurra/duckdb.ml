@@ -22,8 +22,8 @@ static _Atomic int gates[96], entries[96], counts[96];
    appender creation entry, so they observe the appender's own metadata. */
 static _Atomic bool deferred[96];
 static _Atomic bool selected_gate, selected_entered, fail_start;
-static _Thread_local bool request_worker, controller_expected, drain_wait_armed;
-static _Atomic bool drain_wait_entered, query_only;
+static _Thread_local bool request_worker, controller_expected;
+static _Atomic bool query_only;
 static _Atomic int appender_auto_row, control_failure, unlink_failure;
 static _Thread_local bool copy_work;
 static _Atomic bool snapshot_exception;
@@ -53,24 +53,6 @@ CAMLprim value delivery_selected_gate(value enabled) {
 }
 CAMLprim value delivery_selected_entered(value unit) { (void)unit; return Val_bool(atomic_load(&selected_entered)); }
 CAMLprim value delivery_fail_start(value enabled) { atomic_store(&fail_start, Bool_val(enabled)); return Val_unit; }
-/* Arm on the request worker immediately before its callback raises. TLS plus
-   the installed-request marker excludes the controller, observer and foreign
-   child. This one-shot observation adds no wait or runtime transition. */
-CAMLprim value delivery_arm_drain_wait(value enabled) {
-  drain_wait_armed = request_worker && Bool_val(enabled); return Val_unit;
-}
-CAMLprim value delivery_drain_wait_entered(value unit) {
-  (void)unit; return Val_bool(atomic_load(&drain_wait_entered));
-}
-value real_condition_wait(value, value) __asm__("__real_caml_ml_condition_wait");
-value wrapped_condition_wait(value, value) __asm__("__wrap_caml_ml_condition_wait");
-value wrapped_condition_wait(value condition, value mutex) {
-  if (request_worker && drain_wait_armed) {
-    drain_wait_armed = false;
-    atomic_store(&drain_wait_entered, true);
-  }
-  return real_condition_wait(condition, mutex);
-}
 CAMLprim value delivery_reset(value unit) {
   (void)unit;
   for (int i = 0; i < 96; ++i) { atomic_store(&gates[i], 0); atomic_store(&entries[i], 0); }
@@ -81,9 +63,6 @@ CAMLprim value delivery_reset(value unit) {
   atomic_store(&control_failure, 0); atomic_store(&unlink_failure, 0);
   atomic_store(&snapshot_exception, false); copy_work = false;
   atomic_store(&fail_start, false); atomic_store(&query_only, false);
-  /* reset runs only between cases, after all workers have joined; the armed
-     worker clears its own TLS in finally (and on successful uninstall). */
-  atomic_store(&drain_wait_entered, false); drain_wait_armed = false;
   return Val_unit;
 }
 idx_t __real_duckdb_extract_statements(duckdb_connection, const char *, duckdb_extracted_statements *);
@@ -179,7 +158,7 @@ value __wrap_ml_duckdb_native_request_uninstall(value r) {
   value result = __real_ml_duckdb_native_request_uninstall(r);
   if (Int_val(result) == 0) {
     atomic_fetch_add(&counts[13], 1);
-    request_worker = false; controller_expected = false; drain_wait_armed = false; copy_work = false;
+    request_worker = false; controller_expected = false; copy_work = false;
   }
   return result;
 }

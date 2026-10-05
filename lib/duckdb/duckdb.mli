@@ -149,10 +149,9 @@ type transaction = [ `Transaction ] session
     suppress an unadmitted COMMIT/publication, not undo already-admitted durable
     effects. OOM, arbitrary/repeated asynchronous exceptions, nonreturning work
     and process failure remain outside these settlement guarantees.
-    Facades/children are revoked at settlement; owned values may escape.
-    The owner is Busy throughout [run]; facade close is Busy while active and
-    Closed after revocation, never an owner disconnect. Live children cannot
-    be imported (Busy). Requests are single-use, including failed admission: overlapping
+    The facade is local to the callback; owned values may escape.
+    The owner is Busy throughout [run], never disconnected by it. Live children
+    cannot be imported (Busy). Requests are single-use, including failed admission: overlapping
     [run] is Busy, later [run]/[cancel] is Closed. [cancel] latches a request,
     not its outcome; repeated cancellation before settlement succeeds. Pending
     includes never-run requests. Cancellation replaces only an otherwise
@@ -164,8 +163,8 @@ module Bridge : sig
   val create : unit -> request
   val cancel : request -> (unit, Error.t) result
   val settlement : request -> settlement
-  val run : request -> connection ->
-    f:(connection -> ('a, Error.t) result) -> ('a, Error.t) result
+  val run : request -> connection @ local ->
+    f:(connection @ local -> ('a, Error.t) result) -> ('a, Error.t) result
 end
 
 (** Exactly one engine-parsed statement. Only engine-prepared SELECT, INSERT,
@@ -173,36 +172,36 @@ end
     executed. Other types (notably transaction control and SQL PREPARE/EXECUTE)
     are rejected. Engine rewrites such as PRAGMA version to SELECT are allowed.
     Results discarded. *)
-val execute : _ session -> string -> (unit, Error.t) result
+val execute : _ session @ local -> string -> (unit, Error.t) result
 
-(** Scoped cleanup revokes escaped aliases and drains operations/leases before
-    destruction. There is no termination deadline. Acquisition/OOM and arbitrary
+(** Scoped cleanup drains operations/leases before destruction. There is no termination deadline. Acquisition/OOM and arbitrary
     repeated asynchronous interruption do not have a deterministic guarantee. *)
-val with_database : Config.t -> f:(database -> ('a, Error.t) result) -> ('a, Error.t) result
-val with_connection : database -> f:(connection -> ('a, Error.t) result) -> ('a, Error.t) result
+val with_database : Config.t -> f:(database @ local -> ('a, Error.t) result) -> ('a, Error.t) result
+val with_connection : database @ local -> f:(connection @ local -> ('a, Error.t) result) -> ('a, Error.t) result
 
 (** Runs [f] between BEGIN and COMMIT; any error or exception rolls back.
-    Exclusive for the complete callback and commit/rollback. Reentrant/nested use
-    of the original connection returns Busy. The token is revoked on exit.
+    Exclusive for the complete callback and commit/rollback. The token is local
+    to the callback. Reentrant/nested use of the original connection (reachable
+    through an [Owned] connection) returns Busy.
     Error/exception/Break rolls back; failed rollback preserves both outcomes.
     Interruption does not establish that writes did not commit. DuckDB's
     transaction semantics apply: external effects such as COPY output files
     are not rolled back. Failed/exceptional rollback discards the connection. *)
-val with_transaction : connection -> f:(transaction -> ('a, Error.t) result) -> ('a, Error.t) result
+val with_transaction : connection @ local -> f:(transaction @ local -> ('a, Error.t) result) -> ('a, Error.t) result
 
 type 'a step = Continue of 'a | Stop of 'a
 
 (** The low-level statement API: positional binding and borrowed chunks.
     Bindings persist across execution; [reset] clears all of them. SQL policy
     is identical to [execute]. A statement prepared through a transaction is
-    revoked/closed before its settlement. Statement errors are in the context
+    closed before its settlement. Statement errors are in the context
     [Query sql] of the statement's SQL; scoped callbacks' errors are returned
     unchanged. *)
 module Statement : sig
   type prepared
   type chunk
-  val with_prepared : _ session -> string -> f:(prepared -> ('a, Error.t) result) -> ('a, Error.t) result
-  val parameter_count : prepared -> (int, Error.t) result
+  val with_prepared : _ session @ local -> string -> f:(prepared @ local -> ('a, Error.t) result) -> ('a, Error.t) result
+  val parameter_count : prepared @ local -> (int, Error.t) result
 
   (** One-based parameter indices; known engine parameter types must match exactly.
       Unresolved ANY/INVALID parameters accept the supplied witness. Rebinding is
@@ -211,14 +210,15 @@ module Statement : sig
       precedence over index/Busy/Closed/type errors. Encode/index/type/range errors
       leave previous bindings unchanged; native bind failure/interruption marks
       that parameter unbound. Reset failure/interruption marks all unbound. *)
-  val bind : prepared -> int -> ('a, _) Codec.t -> 'a -> (unit, Error.t) result
-  val reset : prepared -> (unit, Error.t) result
+  val bind : prepared @ local -> int -> ('a, _) Codec.t -> 'a -> (unit, Error.t) result
+  val reset : prepared @ local -> (unit, Error.t) result
 
   (** Executes with the current bindings and streams borrowed chunks to [f]
       until exhaustion or [Stop]. All parameters must be bound. The result
-      exclusively leases the connection for the whole fold: [reset], [bind] and
-      a nested fold on the statement return Busy. No result handle exists
-      outside the fold.
+      exclusively leases the connection for the whole fold: other operations on
+      the connection (reachable through an [Owned] connection) return Busy. The
+      statement is local, so the callback cannot reach it. No result handle
+      exists outside the fold.
       Parameter types inferred now must equal those at preparation, otherwise
       [Parameter_schema_changed] is returned and nothing is published.
       They are re-inferred only when a CREATE/ALTER/DROP (on any connection in
@@ -233,10 +233,10 @@ module Statement : sig
       The callback is synchronous, local, and guarded against outward effects.
       No owner transition is exposed through a chunk. Non-null codecs reject
       NULL on access, not on empty-result schema validation. *)
-  val fold_chunks : prepared -> init:'a -> f:(chunk @ local -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result
+  val fold_chunks : prepared @ local -> init:'a -> f:(chunk @ local -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result
 
   (** [fold_chunks] that executes and discards every row. *)
-  val execute : prepared -> (unit, Error.t) result
+  val execute : prepared @ local -> (unit, Error.t) result
   val chunk_length : chunk @ local -> int
 
   (** Zero-based column and row indices, checked before reading. Each access
@@ -289,15 +289,15 @@ module Request : sig
     type _ owner
     type error
     type 'a future
-    val exec : _ owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
-    val find : _ owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
-    val find_opt : _ owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
+    val exec : _ owner @ local -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
+    val find : _ owner @ local -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
+    val find_opt : _ owner @ local -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
       ('row option, error) result future
-    val collect : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+    val collect : _ owner @ local -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
       ('row list, error) result future
 
     (** [f] runs synchronously on the owning thread or worker. *)
-    val fold : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+    val fold : _ owner @ local -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
       init:'a -> f:('row -> 'a -> ('a step, Error.t) result) -> ('a, error) result future
   end
 
@@ -305,12 +305,12 @@ module Request : sig
     include QUERY
 
     (** [with_transaction] semantics; the callback is synchronous. *)
-    val with_transaction : [ `Connection ] owner -> f:(transaction -> ('a, Error.t) result) ->
+    val with_transaction : [ `Connection ] owner @ local -> f:(transaction @ local -> ('a, Error.t) result) ->
       ('a, error) result future
 
     (** A complete transaction and typed appender lifecycle. [flush] requests an
         additional explicit flush after all batches. *)
-    val ingest : [ `Connection ] owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+    val ingest : [ `Connection ] owner @ local -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
       (unit, error) result future
   end
 
@@ -351,21 +351,19 @@ module Table : sig
       owns BEGIN/COMMIT/ROLLBACK; given a transaction, it never settles it.
       Callback errors/exceptions/effect denial poison settlement. On success
       the scope flushes and closes; it never commits a transaction it does not
-      own. Unjoined admitted work is drained on exit; a Busy implicit close
-      discards the appender: the connection scope rolls back rather than
-      committing, and the caller's transaction can no longer commit. *)
-  val with_appender : _ session -> ('columns, 'row) t ->
-    f:(('columns, 'row) appender -> ('a, Error.t) result) -> ('a, Error.t) result
+      own. *)
+  val with_appender : _ session @ local -> ('columns, 'row) t ->
+    f:(('columns, 'row) appender @ local -> ('a, Error.t) result) -> ('a, Error.t) result
 
   (** One admission for a complete batch, validated before any native row
       mutation. A codec rejection rejects the batch without native work. An
       engine error (including an automatic flush), interrupted native work, or
       a [None] in a NOT NULL column poisons this appender and the transaction;
       later operations return the first error. *)
-  val append : ('columns, _) appender -> 'columns Args.t list -> (unit, Error.t) result
+  val append : ('columns, _) appender @ local -> 'columns Args.t list -> (unit, Error.t) result
 
   (** Explicit flush; an engine error poisons as [append]. *)
-  val flush : (_, _) appender -> (unit, Error.t) result
+  val flush : (_, _) appender @ local -> (unit, Error.t) result
 end
 
 module Parquet : sig
@@ -388,7 +386,7 @@ val path : string -> (path, Error.t) result
     Filesystem effects are not rolled back by DuckDB transactions. A failure or
     interruption during/after publication can follow a published output. No
     crash durability, hostile-directory or atomic transaction/file claim. *)
-val export : connection -> query:string -> path -> (unit, Error.t) result
+val export : connection @ local -> query:string -> path -> (unit, Error.t) result
 
 (** Reads each file separately in order, validating the schema of each (even an
     empty file) before fetching; no cross-file type coercion. Decodes through
@@ -396,9 +394,9 @@ val export : connection -> query:string -> path -> (unit, Error.t) result
     have exactly those). An empty list is rejected. Earlier callbacks may run
     before a later file fails; external file mutation is not a transaction
     snapshot guarantee. *)
-val fold : connection -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
+val fold : connection @ local -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result
-val fold_table : connection -> path list -> (_, 'row) Table.t -> init:'a ->
+val fold_table : connection @ local -> path list -> (_, 'row) Table.t -> init:'a ->
   f:('row -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result
 end
 
@@ -423,6 +421,6 @@ module Owned : sig
 
   (** One execution entry point per shape, used by the adapters. Prefer the named operations, which carry the
       row-count guards: [run] accepts any multiplicity with every shape but [Exec]. *)
-  val run : _ session -> ('row, 'out) shape -> ('params, 'row, _) Request.t -> 'params Args.t ->
+  val run : _ session @ local -> ('row, 'out) shape -> ('params, 'row, _) Request.t -> 'params Args.t ->
     ('out, Error.t) result
 end

@@ -1,0 +1,13 @@
+module D = Duckdb
+type _ Stdlib.Effect.t += Pause : unit Stdlib.Effect.t
+(* A thunk handled inside the callback cannot capture the local token. Modes do
+   not cover a handler installed outside the scope, whose continuation holds
+   the token on its stack: the runtime Effects_not_allowed barrier does. *)
+let saved : (unit, (unit, D.Error.t) result) Stdlib.Effect.Deep.continuation option ref = ref None
+let f (c @ local) = D.with_transaction c ~f:(fun tx ->
+  Stdlib.Effect.Deep.match_with
+    (fun () -> Stdlib.Effect.perform Pause; D.execute tx "select 1") ()
+    { retc = Fun.id; exnc = raise;
+      effc = fun (type a) (effect : a Stdlib.Effect.t) -> match effect with
+        | Pause -> Some (fun (continuation : (a, _) Stdlib.Effect.Deep.continuation) -> saved := Some continuation; Ok ())
+        | _ -> None })

@@ -25,7 +25,7 @@ type request = {
   mutable state : request_state;
   settlement : unit Eio.Promise.t;
 }
-type t = {
+type pool = {
   sw : Eio.Switch.t;
   limits : limits;
   database : W.database;
@@ -41,6 +41,9 @@ type t = {
   shutdown_done : (unit, failure list) result Eio.Promise.t;
   resolve_shutdown : (unit, failure list) result Eio.Promise.u;
 }
+(* The public handle. Immutable with a global payload, so an operation given a
+   local handle (as [Duckdb.Request.QUERY] requires) can reach the pool. *)
+type t = { pool : pool @@ global }
 type 'a completion = Finished of ('a, failure list) result | Rejected
 
 let limits ~connections ~queue_capacity =
@@ -171,12 +174,12 @@ let create ~sw limits config =
             (* Fork can schedule other fibers. Once registered, only the daemon
                owns disposal; a cancelled creator joins it instead of publishing. *)
             match check_context () with
-            | Ok () -> Ok pool
+            | Ok () -> Ok { pool }
             | Error failures ->
               start_shutdown pool [];
               deliver (Error (failures @ errors (Eio.Promise.await pool.shutdown_done)))))
 
-let submit : type a. t -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, Duckdb.Error.t) result) -> (a, error) result =
+let submit : type a. pool -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, Duckdb.Error.t) result) -> (a, error) result =
  fun t ~reuse run ->
   if W.is_in_callback () then Error Reentrant_call
   else (
@@ -270,18 +273,18 @@ let submit : type a. t -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, 
         let failures = match settled with Rejected -> [] | Finished result -> errors result in
         propagate_cancellation cancellation bt failures)
 
-let execute t sql = submit t ~reuse:true (fun slot request -> W.execute slot request sql)
-let transaction t ~f = submit t ~reuse:false (fun slot request -> W.transaction slot request ~f)
+let execute ({ pool = t } : t @ local) sql = submit t ~reuse:true (fun slot request -> W.execute slot request sql)
+let transaction ({ pool = t } : t @ local) ~f = submit t ~reuse:false (fun slot request -> W.transaction slot request ~f)
 (* Complete typed requests conservatively retire their slot after every outcome.
    Their worker owners materialize all output before [submit] settles. *)
-let query t sql fields ~row = submit t ~reuse:false (fun slot request -> W.query slot request sql fields ~row)
-let fold_rows t sql fields ~row ~init ~f =
+let query ({ pool = t } : t @ local) sql fields ~row = submit t ~reuse:false (fun slot request -> W.query slot request sql fields ~row)
+let fold_rows ({ pool = t } : t @ local) sql fields ~row ~init ~f =
   submit t ~reuse:false (fun slot request -> W.fold_rows slot request sql fields ~row ~init ~f)
-let parquet_fold_rows t names fields ~row ~init ~f =
+let parquet_fold_rows ({ pool = t } : t @ local) names fields ~row ~init ~f =
   submit t ~reuse:false (fun slot request -> W.parquet_fold_rows slot request names fields ~row ~init ~f)
-let parquet_export t ~query ~destination =
+let parquet_export ({ pool = t } : t @ local) ~query ~destination =
   submit t ~reuse:false (fun slot request -> W.parquet_export slot request ~query ~destination)
-let shutdown t =
+let shutdown ({ pool = t } : t @ local) =
   if W.is_in_callback () then Error Reentrant_call
   else (
     start_shutdown t [];
@@ -299,19 +302,20 @@ module Request = struct
   type nonrec error = Adapter of error | Request of Duckdb.Error.t
   (* A typed request's own outcome is the worker payload; cancellation and
      lifecycle failures keep the adapter's rules. Retires its connection. *)
-  let typed pool work =
+  (* Public operations accept a local handle ([Generic] requires it). *)
+  let typed ({ pool } : t @ local) work =
     match submit pool ~reuse:false (fun slot bridge -> Ok (work slot bridge)) with
     | Ok (Ok value) -> Ok value
     | Ok (Error e) -> Error (Request e)
     | Error e -> Error (Adapter e)
-  let run pool shape r args = typed pool (fun slot bridge -> W.request_run slot bridge shape r args)
-  let exec pool r args = run pool Duckdb.Owned.Exec r args
-  let find pool r args = run pool Duckdb.Owned.Find r args
-  let find_opt pool r args = run pool Duckdb.Owned.Find_opt r args
-  let collect pool r args = run pool Duckdb.Owned.Collect r args
-  let fold pool r args ~init ~f = run pool (Duckdb.Owned.Fold { init; f }) r args
-  let with_transaction pool ~f = typed pool (fun slot bridge -> W.request_transaction slot bridge ~f)
-  let ingest pool table batches ~flush = typed pool (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
+  let run (t @ local) shape r args = typed t (fun slot bridge -> W.request_run slot bridge shape r args)
+  let exec (t @ local) r args = run t Duckdb.Owned.Exec r args
+  let find (t @ local) r args = run t Duckdb.Owned.Find r args
+  let find_opt (t @ local) r args = run t Duckdb.Owned.Find_opt r args
+  let collect (t @ local) r args = run t Duckdb.Owned.Collect r args
+  let fold (t @ local) r args ~init ~f = run t (Duckdb.Owned.Fold { init; f }) r args
+  let with_transaction (t @ local) ~f = typed t (fun slot bridge -> W.request_transaction slot bridge ~f)
+  let ingest (t @ local) table batches ~flush = typed t (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
   module Generic = struct
     type 'k owner = t
     type nonrec error = error

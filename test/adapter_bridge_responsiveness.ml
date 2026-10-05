@@ -88,7 +88,7 @@ let work seam request =
             if Stdlib.Sys.file_exists destination then Stdlib.Sys.remove destination)
             ~f:(fun () ->
               let path = ok (D.Parquet.path destination) in
-              activate (); D.Parquet.export facade ~query:"SELECT 42::BIGINT AS x" path)
+              activate (); D.Parquet.export facade ~query:"SELECT 42::BIGINT AS x" path) [@nontail]
         | Execute | Rollback | Result | Prepared | Extracted | Disconnect | Database_close -> assert false)))
 exception Worker_failure
 exception Cleanup_failure

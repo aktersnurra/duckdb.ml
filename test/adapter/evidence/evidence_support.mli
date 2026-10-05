@@ -12,7 +12,7 @@ val with_worker : (unit -> 'a) -> f:((unit -> 'a) -> 'b) -> 'b
 type failure = { exception_ : exn; backtrace : Printexc.raw_backtrace }
 exception Multiple_failures of failure * failure
 type 'a outcome = Returned of 'a | Raised of failure
-val capture : (unit -> 'a) -> 'a outcome
+val capture : (unit -> 'a) @ local -> 'a outcome
 val restore : 'a outcome -> 'a
 
 (** Cleanup runs even when work fails; neither failure replaces the other. *)

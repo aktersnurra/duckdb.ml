@@ -1,0 +1,2 @@
+module D = Duckdb
+let f cfg = D.with_database cfg ~f:(fun db -> D.with_connection db ~f:(fun c -> D.Owned.close_connection c))

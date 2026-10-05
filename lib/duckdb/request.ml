@@ -32,21 +32,21 @@ module type QUERY = sig
   type _ owner
   type error
   type 'a future
-  val exec : _ owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
-  val find : _ owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
-  val find_opt : _ owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
+  val exec : _ owner @ local -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
+  val find : _ owner @ local -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
+  val find_opt : _ owner @ local -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
     ('row option, error) result future
-  val collect : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val collect : _ owner @ local -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     ('row list, error) result future
-  val fold : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val fold : _ owner @ local -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, error) result future
 end
 
 module type CONNECTION = sig
   include QUERY
-  val with_transaction : [ `Connection ] owner ->
-    f:([ `Transaction ] Session.t -> ('a, Failure.t) result) -> ('a, error) result future
-  val ingest : [ `Connection ] owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+  val with_transaction : [ `Connection ] owner @ local ->
+    f:([ `Transaction ] Session.t @ local -> ('a, Failure.t) result) -> ('a, error) result future
+  val ingest : [ `Connection ] owner @ local -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
     (unit, error) result future
 end
 
@@ -322,15 +322,15 @@ module Session = struct
   type 'k owner = 'k Session.t
   type error = Failure.t
   type 'a future = 'a
-  let run s shape r args = run_shape (Session.connection s) (Session.within s) shape r args
-  let exec s r args = run s Exec r args
-  let find s r args = run s Find r args
-  let find_opt s r args = run s Find_opt r args
-  let collect s r args = run s Collect r args
-  let fold s r args ~init ~f = run s (Fold { init; f }) r args
-  let with_transaction (Session.Connection c : [ `Connection ] owner) ~f =
+  let run (s @ local) shape r args = run_shape (Session.connection s) (Session.within s) shape r args
+  let exec (s @ local) r args = run s Exec r args
+  let find (s @ local) r args = run s Find r args
+  let find_opt (s @ local) r args = run s Find_opt r args
+  let collect (s @ local) r args = run s Collect r args
+  let fold (s @ local) r args ~init ~f = run s (Fold { init; f }) r args
+  let with_transaction (Session.Connection c : [ `Connection ] owner @ local) ~f =
     with_owned_transaction c ~f:(fun tx -> f (Session.Transaction tx))
-  let ingest (Session.Connection c : [ `Connection ] owner) table batches ~flush:explicit =
+  let ingest (Session.Connection c : [ `Connection ] owner @ local) table batches ~flush:explicit =
     with_owned_transaction c ~f:(fun tx ->
       with_appender_transaction tx table ~f:(fun a ->
         let* () = List.fold batches ~init:(Ok ()) ~f:(fun acc rows -> let* () = acc in append a rows) in

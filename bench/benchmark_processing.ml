@@ -68,7 +68,8 @@ let delta before after =
   ; major_collections = after.Stdlib.Gc.major_collections - before.Stdlib.Gc.major_collections
   ; compactions = after.Stdlib.Gc.compactions - before.Stdlib.Gc.compactions }
 
-let measure (config : config) execute process =
+(* Local, so the measured work may use the scoped connection and statement. *)
+let measure (config : config) (execute @ local) (process @ local) =
   Stdlib.Gc.full_major ();
   let execute_start = Mtime_clock.elapsed_ns () in
   let result = execute () in
@@ -104,12 +105,16 @@ let run (config : config) =
   let sql = Printf.sprintf
       "SELECT i::BIGINT, CASE WHEN i %% 10 = 0 THEN NULL ELSE i::BIGINT END FROM range(%d) AS values(i) ORDER BY i"
       config.rows in
-  ignore (fail_error (Duckdb.with_database (fail_error (Duckdb.Config.create Duckdb.Config.Memory)) ~f:(fun database ->
-      Duckdb.with_connection database ~f:(fun connection ->
+  (* An owned connection is global, so the statement callback may use it too. *)
+  let database = fail_error (Duckdb.Owned.open_database (fail_error (Duckdb.Config.create Duckdb.Config.Memory))) in
+  Exn.protect ~finally:(fun () -> fail_error (Duckdb.Owned.close_database database)) ~f:(fun () ->
+  let connection = fail_error (Duckdb.Owned.connect database) in
+  Exn.protect ~finally:(fun () -> fail_error (Duckdb.Owned.close_connection connection)) ~f:(fun () ->
+  ignore (fail_error (
         Duckdb.Statement.with_prepared connection sql ~f:(fun prepared ->
           let request = owned_request sql in
           let measure_owned () = measure config ignore (fun () -> owned connection request ()) in
-          let measure_borrowed () = measure config ignore (borrowed prepared) in
+          let measure_borrowed () = measure config ignore (borrowed prepared) [@nontail] in
           for _ = 1 to config.warmups do
             ignore (measure_owned () : metrics * totals);
             ignore (measure_borrowed () : metrics * totals)
@@ -129,6 +134,6 @@ let run (config : config) =
               emit "owned_rows" measure_owned "borrowed_first"
             end
           done;
-          Ok ())))) : unit)
+          Ok ())) : unit)))
 
 let () = run (parse_config Stdlib.Sys.argv)

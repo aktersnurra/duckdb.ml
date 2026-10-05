@@ -18,14 +18,14 @@ type transaction = [ `Transaction ] session
 module Bridge = struct
   include R.Bridge
   let cancel request = within Connection (cancel request)
-  let run request (Session.Connection c : connection) ~f =
+  let run request (Session.Connection c : connection @ local) ~f =
     R.Bridge.run request c ~f:(fun facade -> f (Session.Connection facade))
 end
-let execute s sql = within (Query sql) (match Session.within s with
+let execute (s @ local) sql = within (Query sql) (match Session.within s with
   | None -> R.execute (Session.connection s) sql
   | Some tx -> R.execute_transaction tx sql)
 let with_database config ~f = R.with_database config ~f:(fun database -> f { Session.database })
-let with_connection (db : database) ~f =
+let with_connection (db : database @ local) ~f =
   R.with_connection db.database ~f:(fun c -> f (Session.Connection c))
 let with_transaction = Request.Session.with_transaction
 
@@ -37,16 +37,16 @@ module Statement = struct
   type prepared = { prepared : Q.prepared @@ global }
   type chunk = Q.chunk
   let in_statement p result = within (Query (Q.sql p)) result
-  let with_prepared s sql ~f =
+  let with_prepared (s @ local) sql ~f =
     let f prepared = f { prepared } in
     match Session.within s with
     | None -> Q.with_prepared ~lifting:(Flat (Query sql)) (Session.connection s) sql ~f
     | Some tx -> Q.with_prepared_transaction ~lifting:(Flat (Query sql)) tx sql ~f
-  let parameter_count { prepared = p } = in_statement p (Q.parameter_count p)
-  let bind { prepared = p } index codec value = in_statement p (Q.bind p index codec value)
-  let reset { prepared = p } = in_statement p (Q.reset p)
-  let fold_chunks { prepared = p } ~init ~f = Q.fold_prepared ~lifting:(Flat (Query (Q.sql p))) p ~init ~f
-  let execute p = fold_chunks p ~init:() ~f:(fun _ () -> Ok (Continue ()))
+  let parameter_count ({ prepared = p } @ local) = in_statement p (Q.parameter_count p)
+  let bind ({ prepared = p } @ local) index codec value = in_statement p (Q.bind p index codec value)
+  let reset ({ prepared = p } @ local) = in_statement p (Q.reset p)
+  let fold_chunks ({ prepared = p } @ local) ~init ~f = Q.fold_prepared ~lifting:(Flat (Query (Q.sql p))) p ~init ~f
+  let execute (p @ local) = fold_chunks p ~init:() ~f:(fun _ () -> Ok (Continue ()))
   let chunk_length = Q.chunk_length
   let column (chunk @ local) ~column ~row codec =
     within (Query (Q.chunk_sql chunk)) (Q.column chunk ~column ~row codec)

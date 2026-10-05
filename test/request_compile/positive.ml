@@ -24,9 +24,9 @@ let connection (c : D.connection) : (unit, D.Error.t) result =
   let* (_ : int) = R.Session.fold c many D.Args.[] ~init:0 ~f:(fun _ n -> Ok (D.Continue (n + 1))) in
   let* (_ : unit list) = R.Session.collect c insert D.Args.[1L; Some "x"; `User 2L; None] in
   R.Session.with_transaction c ~f:(fun tx ->
-    let* () = R.Session.exec tx insert D.Args.[1L; None; `User 2L; None] in
-    let* (_ : int64 * string) = R.Session.find tx one D.Args.[1L] in
-    let* (_ : int64 list) = R.Session.collect tx many D.Args.[] in
+    match R.Session.exec tx insert D.Args.[1L; None; `User 2L; None] with Error e -> Error e | Ok () ->
+    match R.Session.find tx one D.Args.[1L] with Error e -> Error e | Ok (_ : int64 * string) ->
+    match R.Session.collect tx many D.Args.[] with Error e -> Error e | Ok (_ : int64 list) ->
     R.Session.fold tx many D.Args.[] ~init:() ~f:(fun _ () -> Ok (D.Stop ())))
 
 let example = D.Table.(declare "example" Columns.[ "value", int64; "note", nullable string ]
@@ -37,7 +37,7 @@ let tables (c : D.connection) : (unit, D.Error.t) result =
   let* () = R.Session.exec c (D.Table.insert example) D.Args.[1L; Some "x"] in
   let* () = R.Session.ingest c example [[D.Args.[1L; None]]; [D.Args.[2L; Some "y"]]] ~flush:true in
   D.Table.with_appender c example ~f:(fun a ->
-    let* () = D.Table.append a [D.Args.[1L; None]; D.Args.[2L; Some "y"]] in
+    match D.Table.append a [D.Args.[1L; None]; D.Args.[2L; Some "y"]] with Error e -> Error e | Ok () ->
     D.Table.flush a)
 let transactional_table (tx : D.transaction) =
   D.Table.with_appender tx example ~f:(fun a -> D.Table.append a [D.Args.[3L; None]])

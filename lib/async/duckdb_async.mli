@@ -53,37 +53,37 @@ val create : Limits.t -> Duckdb.Config.t -> (t, failure) result Async.Deferred.t
 
 (** Immediate bounded FIFO admission; Queue_full retains no node or offload.
     Native SQL execution and its cleanup run entirely off-scheduler. *)
-val execute : t -> string -> (unit request, error) result
+val execute : t @ local -> string -> (unit request, error) result
 
 (** One lease/offload spans BEGIN, the whole synchronous callback, child cleanup
     and COMMIT/ROLLBACK. Do not invoke Async or suspend in the callback. Return
-    owned usable values only. An escaped token is dynamically revoked (Closed).
+    owned usable values only. The token is local to the callback and cannot escape.
     Returning a Deferred directly is a type error; [Ok existing_deferred] can
     compile but is not awaited and does not extend the transaction lifetime. *)
-val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a request, error) result
+val transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a request, error) result
 
 (** Materializes owned rows on the leased worker. The fields, row constructor and SQL are
     evaluated entirely in one offload; no result/chunk owner crosses Async.
     The [~row] constructor also runs on the worker and, like [f], must not touch
     Async. *)
-val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list request, error) result
+val query : t @ local -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list request, error) result
 
 (** Folds owned decoded rows synchronously on the leased worker. The callback
     must not access Async or retain adapter/core owners. [Stop] is successful
     early termination and returns its accumulator. *)
-val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
+val fold_rows : t @ local -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) ->
   ('a request, error) result
 
 (** Reads exact local filenames in order and folds owned decoded rows on one
     worker. Paths are constructed/resolved only after worker entry. *)
-val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
+val parquet_fold_rows : t @ local -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) ->
   ('a request, error) result
 
 (** Exports through DuckDB's owned temporary/publication protocol on one worker.
     The destination string is converted to a local path only on that worker. *)
-val parquet_export : t -> query:string -> destination:string -> (unit request, error) result
+val parquet_export : t @ local -> query:string -> destination:string -> (unit request, error) result
 
 (** The same request-owned Deferred on every call. Settles once after Bridge
     return/controller retirement and pool accounting/required maintenance, before
@@ -107,7 +107,7 @@ val cancel : 'a request -> (cancel_ack, error) result
     Nonreturning work prevents shutdown; there is no timeout/recycle or bounded
     join guarantee. OOM/asynchronous bookkeeping, arbitrary signals, unsafe
     concurrency and finalizer/whole-process leak guarantees are outside scope. *)
-val shutdown : t -> ((unit, failure) result Async.Deferred.t, error) result
+val shutdown : t @ local -> ((unit, failure) result Async.Deferred.t, error) result
 
 (** Typed requests over the pool. Each is one dispatched request with the same
     admission, retirement, cancellation and shutdown rules as [query]; a typed
@@ -120,31 +120,31 @@ module Request : sig
   type 'a submitted = (('a, Duckdb.Error.t) result request, error) result
 
   type nonrec error = Adapter of failure | Request of Duckdb.Error.t
-  val exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result Async.Deferred.t
-  val find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result Async.Deferred.t
-  val find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+  val exec : t @ local -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result Async.Deferred.t
+  val find : t @ local -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result Async.Deferred.t
+  val find_opt : t @ local -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     ('row option, error) result Async.Deferred.t
-  val collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+  val collect : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     ('row list, error) result Async.Deferred.t
-  val fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
+  val fold : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result Async.Deferred.t
-  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) ->
+  val with_transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) ->
     ('a, error) result Async.Deferred.t
-  val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
+  val ingest : t @ local -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
     (unit, error) result Async.Deferred.t
 
   (** The same operations as an instance, for code generic over backends. *)
   module Generic : Duckdb.Request.CONNECTION
     with type 'k owner = t and type error = error and type 'a future = 'a Async.Deferred.t
 
-  val submit_exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> unit submitted
-  val submit_find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> 'row submitted
-  val submit_find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+  val submit_exec : t @ local -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> unit submitted
+  val submit_find : t @ local -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> 'row submitted
+  val submit_find_opt : t @ local -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     'row option submitted
-  val submit_collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+  val submit_collect : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     'row list submitted
-  val submit_fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+  val submit_fold : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     init:'a -> f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a submitted
-  val submit_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> 'a submitted
-  val submit_ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> unit submitted
+  val submit_transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> 'a submitted
+  val submit_ingest : t @ local -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> unit submitted
 end

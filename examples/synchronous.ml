@@ -47,12 +47,13 @@ let () =
       (* The file is owned by this example and removed on every exit path. *)
       let file = Stdlib.Filename.temp_file "duckdb-synchronous-" ".parquet" in
       Stdlib.Sys.remove file;
-      Exn.protect ~finally:(fun () -> if Stdlib.Sys.file_exists file then Stdlib.Sys.remove file)
+      let rows = Exn.protect ~finally:(fun () -> if Stdlib.Sys.file_exists file then Stdlib.Sys.remove file)
         ~f:(fun () ->
           let path = require "construct local Parquet path" (D.Parquet.path file) in
           require "export local Parquet" (D.Parquet.export connection ~query:"select value, note from example order by value" path);
           (* The fold callback is synchronous; it only builds owned rows. *)
-          Ok (require "read local Parquet" (D.Parquet.fold_table connection [path] example ~init:[]
-            ~f:(fun row rows -> Ok (D.Continue (row :: rows))))))))) in
+          require "read local Parquet" (D.Parquet.fold_table connection [path] example ~init:[]
+            ~f:(fun row rows -> Ok (D.Continue (row :: rows))))) in
+      Ok rows))) in
   List.iter values ~f:(fun (value, note) -> Stdlib.Printf.printf "owned row: %Ld, %d bytes\n" value (String.length note));
   Stdlib.print_endline "synchronous typed request/table transaction and local Parquet roundtrip complete"

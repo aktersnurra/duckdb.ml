@@ -47,38 +47,38 @@ val create : sw:Eio.Switch.t -> limits -> Duckdb.Config.t -> (t, error) result
     Only successful, uncancelled SQL-only [execute] requests reuse their
     connection. Complete typed requests conservatively retire their connection.
     Cancellation does not prove a write did not commit. *)
-val execute : t -> string -> (unit, error) result
+val execute : t @ local -> string -> (unit, error) result
 
-(** Synchronous worker callback; token revoked on return. Adapter reentry is
-    rejected before scheduler effects. EVERY transaction retires its connection,
-    including success. Nonreturning callbacks prevent shutdown completion. *)
-val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, error) result
+(** Synchronous worker callback; the token is local to the callback and cannot
+    escape. Adapter reentry is rejected before scheduler effects. EVERY
+    transaction retires its connection, including success. Nonreturning callbacks prevent shutdown completion. *)
+val transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, error) result
 
 (** Materializes owned rows on one worker. The fields, row constructor and SQL evaluation do not
     let a result, chunk, or connection owner cross back to the Eio scheduler.
     The [~row] constructor also runs on the worker and, like [f], must not touch
     the scheduler. *)
-val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, error) result
+val query : t @ local -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, error) result
 
 (** Folds owned decoded rows synchronously on one worker. [Stop] returns its
     accumulator; callback reentry into this adapter is rejected. *)
-val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
+val fold_rows : t @ local -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
 
 (** Reads exact local filenames in order and folds owned rows on one worker.
     Path construction, including relative-path resolution, occurs on that worker. *)
-val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
+val parquet_fold_rows : t @ local -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
 
 (** Exports through DuckDB's connection-level temporary/publication protocol on
     one worker. The destination is converted to a local path on that worker. *)
-val parquet_export : t -> query:string -> destination:string -> (unit, error) result
+val parquet_export : t @ local -> query:string -> destination:string -> (unit, error) result
 
 (** Stops admission, settles queued requests as [Pool_shutdown], interrupts and
     drains active work, closes all independent owners before publication. A
     failed replacement initiates the same single drain, without retry. Waiter
     cancellation cannot abandon it; repeated callers see the shared outcome. *)
-val shutdown : t -> (unit, error) result
+val shutdown : t @ local -> (unit, error) result
 
 (** Typed requests over the pool, with the admission, retirement, cancellation
     and shutdown rules of [query]. A typed request always retires its
@@ -87,15 +87,15 @@ val shutdown : t -> (unit, error) result
     every other operation. *)
 module Request : sig
   type nonrec error = Adapter of error | Request of Duckdb.Error.t
-  val exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result
-  val find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result
-  val find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row option, error) result
-  val collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
+  val exec : t @ local -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result
+  val find : t @ local -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result
+  val find_opt : t @ local -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row option, error) result
+  val collect : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     ('row list, error) result
-  val fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
+  val fold : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
-  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, error) result
-  val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
+  val with_transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, error) result
+  val ingest : t @ local -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
 
   (** The same operations as an instance, for code generic over backends. *)
   module Generic : Duckdb.Request.CONNECTION with type 'k owner = t and type error = error and type 'a future = 'a

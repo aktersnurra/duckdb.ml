@@ -1,0 +1,4 @@
+module D = Duckdb
+let f (c @ local) = D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
+  D.Statement.fold_chunks p ~init:() ~f:(fun _ () ->
+    Result.map (fun () -> D.Continue ()) (D.Statement.reset p)))

@@ -5,7 +5,7 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <string.h>
-static _Atomic int armed, entered, proceed, waiting, fail_rollback;
+static _Atomic int armed, entered, proceed, fail_rollback;
 CAMLprim value appender_fail_rollback(value u) { (void)u;atomic_store(&fail_rollback,1);return Val_unit; }
 static void pause_at(int point) {
     if (atomic_load(&armed) != point) return;
@@ -14,12 +14,11 @@ static void pause_at(int point) {
     while (!atomic_load(&proceed)) nanosleep(&interval,NULL);
 }
 CAMLprim value appender_arm(value point) {
-    atomic_store(&entered,0); atomic_store(&proceed,0); atomic_store(&waiting,0);
+    atomic_store(&entered,0); atomic_store(&proceed,0);
     atomic_store(&armed,Int_val(point)); return Val_unit;
 }
 CAMLprim value appender_entered(value u) { (void)u;return Val_int(atomic_load(&entered)); }
 CAMLprim value appender_release(value u) { (void)u;atomic_store(&proceed,1);return Val_unit; }
-CAMLprim value appender_waiting(value u) { (void)u;return Val_bool(atomic_load(&waiting)); }
 duckdb_state real_create(duckdb_connection,const char *,const char *,const char *,duckdb_appender *) __asm__("__real_duckdb_appender_create_ext");
 duckdb_state wrapped_create(duckdb_connection,const char *,const char *,const char *,duckdb_appender *) __asm__("__wrap_duckdb_appender_create_ext");
 duckdb_state wrapped_create(duckdb_connection c,const char *catalog,const char *schema,const char *table,duckdb_appender *a) {
@@ -44,6 +43,3 @@ duckdb_state wrapped_query(duckdb_connection c,const char *sql,duckdb_result *r)
         return real_query(c,"invalid rollback fault",r);
     return real_query(c,sql,r);
 }
-value real_wait(value,value) __asm__("__real_caml_ml_condition_wait");
-value wrapped_wait(value,value) __asm__("__wrap_caml_ml_condition_wait");
-value wrapped_wait(value c,value m) { atomic_store(&waiting,1);return real_wait(c,m); }

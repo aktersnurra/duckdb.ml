@@ -1,0 +1,3 @@
+module D = Duckdb
+let leak = ref None
+let f db = D.with_connection db ~f:(fun c -> leak := Some c; Ok ())

@@ -8,7 +8,7 @@ let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64
 let floats32 a b = floats (Stdlib_stable.Float32.to_float a) (Stdlib_stable.Float32.to_float b)
 let write path text = let ch = Stdlib.open_out_bin path in Exn.protect ~finally:(fun () -> Stdlib.close_out ch) ~f:(fun () -> Stdlib.output_string ch text)
 let read path = let ch = Stdlib.open_in_bin path in Exn.protect ~finally:(fun () -> Stdlib.close_in ch) ~f:(fun () -> Stdlib.really_input_string ch (Stdlib.in_channel_length ch))
-let scalar : type a. connection -> string -> a Scalar.t -> a list -> (a -> a -> bool) -> unit = fun c dir typ values equal ->
+let scalar : type a. connection @ local -> string -> a Scalar.t -> a list -> (a -> a -> bool) -> unit = fun c dir typ values equal ->
   let file = Stdlib.Filename.concat dir (Scalar.name typ ^ " quote' ; --.parquet") in
   let p = ok (Parquet.path file) in
   ok (execute c ("CREATE OR REPLACE TABLE scalars(x " ^ Scalar.name typ ^ ")"));

@@ -86,8 +86,12 @@ let metadata_boundaries c =
     assert (Int64.equal (count c "metadata_marker") 0L);
     assert (Int64.equal (count c table) 0L); clean ());
   Stdlib.print_endline "appender metadata: single/exact-chunk acceptance, generated/oversized rejection, poisoning and cleanup passed"
+(* Owned handles are global: callbacks may capture them. *)
 let () =
-  ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
+  let db = ok (Owned.open_database (ok (Config.create Memory))) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
+  let c = ok (Owned.connect db) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_connection c)) ~f:(fun () ->
     metadata_boundaries c;
     scalar c Bool [false;true] Bool.equal;
     scalar c Int8 [-128s;127s] Stdlib_stable.Int8.equal; scalar c Int16 [-32768S;32767S] Stdlib_stable.Int16.equal;
@@ -145,9 +149,8 @@ let () =
     (try ignore (Table.with_appender c t ~f:(fun a -> ok (Table.append a [Args.[1L]]); raise Stdlib.Exit)); assert false with Stdlib.Exit -> ());
     assert (Int64.equal (count c "a") 0L);
     ok (with_transaction c ~f:(fun tx ->
-      ok (Table.with_appender tx t ~f:(fun a ->
-        assert (match execute tx "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
-        Table.append a [Args.[3L]]));
+      (* The appender callback cannot capture [tx] (scope_compile busy_appender). *)
+      ok (Table.with_appender tx t ~f:(fun a -> Table.append a [Args.[3L]]));
       execute tx "INSERT INTO a VALUES (4)"));
     assert (Int64.equal (count c "a") 2L);
     ignore (error (with_transaction c ~f:(fun tx ->
@@ -172,8 +175,7 @@ let () =
           else raise Stdlib.Exit;
           Ok ())) with Stdlib.Exit -> ());
         Ok ())));
-      assert (Int64.equal (count c "a") 2L));
-    Ok ())));
+      assert (Int64.equal (count c "a") 2L))));
   assert (Duckdb_ffi.live_resources () = 0);
   assert (Duckdb_ffi.fallback_reclaims () = 0);
   Stdlib.print_endline "appender: scalar fidelity, validation, batches, constraints, poisoning, transactions, names, aliases and cleanup passed"

@@ -24,7 +24,7 @@ module type S = sig
   val close_slot : slot -> (unit, Duckdb.Error.t) result
   val close_database : database -> (unit, Duckdb.Error.t) result
   val execute : slot -> Duckdb.Bridge.request -> string -> (unit, Duckdb.Error.t) result
-  val transaction : slot -> Duckdb.Bridge.request -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
+  val transaction : slot -> Duckdb.Bridge.request -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
   val query : slot -> Duckdb.Bridge.request -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, Duckdb.Error.t) result
   val fold_rows : slot -> Duckdb.Bridge.request -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
@@ -37,7 +37,7 @@ module type S = sig
   val request_run : slot -> Duckdb.Bridge.request -> ('row, 'out) Duckdb.Owned.shape ->
     ('p, 'row, _) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('out, Duckdb.Error.t) result
   val request_transaction : slot -> Duckdb.Bridge.request ->
-    f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
+    f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
   val table_ingest : slot -> Duckdb.Bridge.request -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
     (unit, Duckdb.Error.t) result
 

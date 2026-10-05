@@ -17,8 +17,12 @@ let failed name predicate = function
   | Error e -> failwith (name ^ ": unexpected " ^ describe e)
   | Ok _ -> failwith (name ^ ": unexpected success")
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
+(* Owned handles are global: callbacks may capture them. *)
 let connected f =
-  core_ok (D.with_database (core_ok (D.Config.create Memory)) ~f:(fun db -> D.with_connection db ~f:(fun c -> f c; Ok ())));
+  let db = core_ok (D.Owned.open_database (core_ok (D.Config.create Memory))) in
+  Exn.protect ~finally:(fun () -> core_ok (D.Owned.close_database db)) ~f:(fun () ->
+    let c = core_ok (D.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> core_ok (D.Owned.close_connection c)) ~f:(fun () -> f c));
   clean ()
 let ddl c sql = ok (R.Session.exec c (R.exec D.Fields.[] sql) D.Args.[])
 let count c table = ok (R.Session.find c (R.one D.Fields.[] D.Fields.[int64] ~row:Fn.id ("SELECT count(*)::BIGINT FROM " ^ table)) D.Args.[])
@@ -33,8 +37,9 @@ let () =
   connected (fun c ->
     ddl c "CREATE TABLE notes(value BIGINT NOT NULL, note VARCHAR)";
     ok (T.with_appender c notes ~f:(fun a ->
-      let* () = T.append a [D.Args.[1L; Some "one"]; D.Args.[2L; None]] in
-      T.flush a));
+      match T.append a [D.Args.[1L; Some "one"]; D.Args.[2L; None]] with
+      | Error _ as e -> e
+      | Ok () -> T.flush a));
     ok (R.Session.exec c (T.insert notes) D.Args.[3L; Some "three"]);
     assert (List.equal equal_note (read c)
       [ { value = 1L; note = Some "one" }; { value = 2L; note = None }; { value = 3L; note = Some "three" } ]));

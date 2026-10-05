@@ -3,7 +3,8 @@ open! Base
 type failure = { exception_ : exn; backtrace : Stdlib.Printexc.raw_backtrace }
 exception Multiple_failures of failure * failure
 type 'a outcome = Returned of 'a | Raised of failure
-let capture f =
+(* Local, so the work may use scoped handles. *)
+let capture (f @ local) =
   try Returned (f ()) with exception_ ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     Raised { exception_; backtrace }

@@ -20,11 +20,14 @@ let one_controller () = check "Query sole controller joined" (count 10 = 1 && co
 let next_suppressed facade = cancelled (D.execute facade "SELECT 42")
 (* A parameter makes execution validate; unrelated DDL then advances the schema
    epoch, so execution re-prepares. That DDL adds one extract, one prepare and
-   one execute to the raw counts. *)
+   one execute to the raw counts. The statement callback cannot capture the
+   local facade, so the DDL runs on a separate owned connection, opened before
+   any test measures live resources: the epoch is process-wide. *)
+let schema_ddl = ok (D.Owned.connect (ok (D.Owned.open_database (ok (D.Config.create D.Config.Memory)))))
 let with_schema_prepared c f =
   D.Statement.with_prepared c "SELECT ?::BIGINT" ~f:(fun p ->
     ok (D.Statement.bind p 1 (D.Codec.Values.int64) 1L);
-    ok (D.execute c "CREATE TEMP TABLE IF NOT EXISTS schema_epoch_bump(x BIGINT)");
+    ok (D.execute schema_ddl "CREATE TEMP TABLE IF NOT EXISTS schema_epoch_bump(x BIGINT)");
     f p)
 (* Statements are scoped: preparing alone is a scope with no work. *)
 let prepare_only c sql = D.Statement.with_prepared c sql ~f:(fun _ -> Ok ())
@@ -69,14 +72,16 @@ let bind_case ~before kind owner =
       | "string" -> "SELECT ?::VARCHAR", (fun p -> D.Statement.bind p 1 (D.Codec.Values.string) "x")
       | "temporal" -> "SELECT ?::TIMESTAMP_S", (fun p -> D.Statement.bind p 1 (D.Codec.Values.timestamp_s) 1L)
       | _ -> "SELECT ?::BIGINT", (fun p -> D.Statement.bind p 1 (D.Codec.Values.int64) 1L) in
-    D.Statement.with_prepared c sql ~f:(fun p ->
+    (* The statement callback cannot capture the facade: the next facade call
+       is checked once the statement scope has closed. *)
+    let result = D.Statement.with_prepared c sql ~f:(fun p ->
       let point = if before then (if String.equal kind "reset" then 15 else 16)
         else if String.equal kind "reset" then 24 else if String.equal kind "temporal" then 26 else 22 in
       gate point true;
       let result = work p in
-      next_suppressed c;
       cancelled (D.Statement.execute p);
-      result)))
+      result) in
+    next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       let point = if before then (if String.equal kind "reset" then 15 else 16)
         else if String.equal kind "reset" then 24 else if String.equal kind "temporal" then 26 else 22 in
@@ -91,10 +96,11 @@ let execute_case ~before owner =
   reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
+    let result = D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
       gate (if before then 17 else 6) true;
       if not before then selected_gate true;
-      let result = D.Statement.execute p in next_suppressed c; result)))
+      D.Statement.execute p) in
+    next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       let point = if before then 17 else 6 in
       wait point; ok (B.cancel request);
@@ -126,13 +132,14 @@ let fetch_case ?(empty = false) point owner =
   reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.Statement.with_prepared c (if empty then "SELECT 1 WHERE false" else "SELECT i FROM range(10000) t(i)") ~f:(fun p ->
+    let result = D.Statement.with_prepared c (if empty then "SELECT 1 WHERE false" else "SELECT i FROM range(10000) t(i)") ~f:(fun p ->
       (* Fetch gates are not reached by the execution that precedes them. *)
       gate point true; if point = 31 then selected_gate true;
       let callbacks = ref 0 in
       let result = D.Statement.fold_chunks p ~init:() ~f:(fun _ () -> Int.incr callbacks; Ok (D.Continue ())) in
       check "Query cancelled fetched chunk not exposed" (!callbacks = 0);
-      next_suppressed c; result)))
+      result) in
+    next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
       if point = 31 then E.await ~label:"Query fetch selected" selected_entered;
@@ -145,14 +152,15 @@ let callback ~stop owner =
   reset ();
   let request = B.create () in
   cancelled (B.run request owner ~f:(fun c ->
-    D.Statement.with_prepared c "SELECT i FROM range(10000) t(i)" ~f:(fun p ->
+    let result = D.Statement.with_prepared c "SELECT i FROM range(10000) t(i)" ~f:(fun p ->
       let callbacks = ref 0 in
       let result = D.Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
         Int.incr callbacks; ok (B.cancel request);
         check "Query borrowed chunk remains live through callback cancellation" (D.Statement.chunk_length chunk > 0);
         if stop then Ok (D.Stop ()) else Ok (D.Continue ())) in
       check "Query callback batch cancellation suppresses next fetch" (!callbacks = 1 && count 24 = 1);
-      next_suppressed c; result))); one_controller ()
+      result) in
+    next_suppressed c; result)); one_controller ()
 (* Observe actual destructor entry OR join; controller selection alone never
    proves the worker reached cleanup. Every failure releases gates before join. *)
 let cleanup_join ~schema ~result owner =
@@ -235,13 +243,14 @@ let caught_callback owner =
   reset ();
   let request = B.create () in
   cancelled (B.run request owner ~f:(fun c ->
-    D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
+    let result = D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
       (match E.capture (fun () -> D.Statement.fold_chunks p ~init:() ~f:(fun chunk () -> query_callback_failure_frame chunk request)) with
        | E.Raised failure ->
          check "Query caught exception identity" (phys_equal failure.exception_ Query_callback_failure);
          check "Query caught exception backtrace" (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string failure.backtrace) ~substring:"query_callback_failure_frame")
        | _ -> failwith "Query expected callback exception");
-      next_suppressed c; Ok ())));
+      Ok ()) in
+    next_suppressed c; result));
   check "Query caught exception cannot clear cancellation" (count 24 = 1); one_controller ()
 let tests =
   ["query-caught-callback", caught_callback;

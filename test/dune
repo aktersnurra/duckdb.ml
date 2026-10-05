@@ -10,8 +10,7 @@
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra)))
  (link_flags :standard -cclib -Wl,--wrap=duckdb_execute_prepared -cclib -Wl,--wrap=duckdb_disconnect
-             -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=duckdb_close
-             -cclib -Wl,--wrap=caml_ml_condition_wait))
+             -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=duckdb_close))
 (test (name async_handoff) (modules async_handoff)
  (libraries duckdb async) (modes exe))
 (test (name eio_handoff) (modules eio_handoff)
@@ -121,8 +120,7 @@
   (flags (:standard -std=c11 -Wall -Wextra)))
  (link_flags :standard -cclib -Wl,--wrap=duckdb_appender_create_ext
   -cclib -Wl,--wrap=duckdb_append_value -cclib -Wl,--wrap=duckdb_appender_flush
-  -cclib -Wl,--wrap=duckdb_appender_close -cclib -Wl,--wrap=duckdb_query
-  -cclib -Wl,--wrap=caml_ml_condition_wait))
+  -cclib -Wl,--wrap=duckdb_appender_close -cclib -Wl,--wrap=duckdb_query))
 
 (executable (name test_appender_signals) (modules test_appender_signals)
  (libraries duckdb duckdb-ffi base)
@@ -223,4 +221,7 @@
 (rule (alias runtest)
  (deps check_request_types.sh ../lib/duckdb/duckdb.mli (glob_files request_compile/*))
  (action (run bash %{dep:check_request_types.sh} %{ocamlc})))
+(rule (alias runtest)
+ (deps check_scope_types.sh ../lib/duckdb/duckdb.mli (glob_files scope_compile/*))
+ (action (run bash %{dep:check_scope_types.sh} %{ocamlc})))
 (test (name test_table) (modules test_table) (libraries base duckdb duckdb-ffi))

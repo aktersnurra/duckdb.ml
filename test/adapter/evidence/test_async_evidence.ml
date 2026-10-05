@@ -9,20 +9,17 @@ let check_failure expected = function
   | S.Raised f -> assert (phys_equal f.exception_ expected)
   | S.Returned _ -> failwith "missing failure"
 
+(* The token cannot escape its scope (scope_compile escape_ref). *)
 let transaction () =
-  let escaped = ref None in
   let rows = ok (Duckdb.with_database (ok (Duckdb.Config.create Memory)) ~f:(fun db ->
     Duckdb.with_connection db ~f:(fun c ->
       Duckdb.with_transaction c ~f:(fun tx ->
-        escaped := Some tx;
         ok (Duckdb.execute tx "CREATE TABLE t(s VARCHAR)");
         ok (Duckdb.execute tx "INSERT INTO t VALUES ('owned')");
         Duckdb.Statement.with_prepared tx "SELECT s FROM t" ~f:(fun p ->
           Duckdb.Statement.fold_chunks p ~init:[] ~f:(fun chunk rows ->
             let text = ok (Duckdb.Statement.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
             Ok (Duckdb.Continue (text :: rows)))))))) in
-  (match Duckdb.execute (Option.value_exn !escaped) "SELECT 1" with
-   | Error { cause = Closed; _ } -> () | _ -> failwith "escaped token usable");
   assert (Duckdb_ffi.live_resources () = 0);
   rows
 

@@ -4,10 +4,10 @@
 #include <caml/mlvalues.h>
 #include <stdatomic.h>
 #include <time.h>
-static _Atomic int armed, entered, proceed, calls, close_trace, waiting;
+static _Atomic int armed, entered, proceed, close_trace;
 static void pause_at(int point) {
     if (atomic_load(&armed) != point) return;
-    atomic_fetch_add(&calls, 1); atomic_store(&entered, point);
+    atomic_store(&entered, point);
     struct timespec interval = {0, 1000000};
     while (!atomic_load(&proceed)) nanosleep(&interval, NULL);
 }
@@ -24,12 +24,11 @@ void wrapped_disconnect(duckdb_connection *c) {
     real_disconnect(c);
 }
 CAMLprim value test_arm(value point) {
-    atomic_store(&entered, 0); atomic_store(&proceed, 0); atomic_store(&calls, 0); atomic_store(&waiting, 0);
+    atomic_store(&entered, 0); atomic_store(&proceed, 0);
     atomic_store(&armed, Int_val(point)); return Val_unit;
 }
 CAMLprim value test_entered(value unit) { (void)unit; return Val_int(atomic_load(&entered)); }
 CAMLprim value test_release(value unit) { (void)unit; atomic_store(&proceed, 1); return Val_unit; }
-CAMLprim value test_calls(value unit) { (void)unit; return Val_int(atomic_load(&calls)); }
 #include <string.h>
 static _Atomic int rollback_failure;
 duckdb_state real_query(duckdb_connection, const char *, duckdb_result *) __asm__("__real_duckdb_query");
@@ -47,10 +46,3 @@ void wrapped_close(duckdb_database *db) {
 CAMLprim value test_fail_rollback(value unit) { (void)unit; atomic_store(&rollback_failure, 1); return Val_unit; }
 CAMLprim value test_trace_reset(value unit) { (void)unit; atomic_store(&close_trace, 0); return Val_unit; }
 CAMLprim value test_trace(value unit) { (void)unit; return Val_int(atomic_load(&close_trace)); }
-
-value real_wait(value, value) __asm__("__real_caml_ml_condition_wait");
-value wrapped_wait(value, value) __asm__("__wrap_caml_ml_condition_wait");
-value wrapped_wait(value condition, value mutex) {
-    atomic_store(&waiting, 1); return real_wait(condition, mutex);
-}
-CAMLprim value test_waiting(value unit) { (void)unit; return Val_bool(atomic_load(&waiting)); }

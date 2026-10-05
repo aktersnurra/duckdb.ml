@@ -11,7 +11,6 @@
   -cclib -Wl,--wrap=duckdb_destroy_result -cclib -Wl,--wrap=duckdb_destroy_prepare
   -cclib -Wl,--wrap=duckdb_destroy_extracted -cclib -Wl,--wrap=duckdb_disconnect
   -cclib -Wl,--wrap=duckdb_query -cclib -Wl,--wrap=caml_thread_new -cclib -Wl,--wrap=caml_thread_join
-  -cclib -Wl,--wrap=caml_ml_condition_wait
   -cclib -Wl,--wrap=ml_duckdb_execute -cclib -Wl,--wrap=ml_duckdb_native_request_create
   -cclib -Wl,--wrap=ml_duckdb_native_request_install -cclib -Wl,--wrap=ml_duckdb_native_request_uninstall
     -cclib -Wl,--wrap=ml_duckdb_prepare

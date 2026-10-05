@@ -39,21 +39,21 @@ module type QUERY = sig
   type _ owner
   type error
   type 'a future
-  val exec : _ owner -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
-  val find : _ owner -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
-  val find_opt : _ owner -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
+  val exec : _ owner @ local -> ('params, unit, [< `Zero ]) t -> 'params Args.t -> (unit, error) result future
+  val find : _ owner @ local -> ('params, 'row, [< `One ]) t -> 'params Args.t -> ('row, error) result future
+  val find_opt : _ owner @ local -> ('params, 'row, [< `Zero | `One ]) t -> 'params Args.t ->
     ('row option, error) result future
-  val collect : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val collect : _ owner @ local -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     ('row list, error) result future
-  val fold : _ owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
+  val fold : _ owner @ local -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, error) result future
 end
 
 module type CONNECTION = sig
   include QUERY
-  val with_transaction : [ `Connection ] owner ->
-    f:([ `Transaction ] Session.t -> ('a, Failure.t) result) -> ('a, error) result future
-  val ingest : [ `Connection ] owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+  val with_transaction : [ `Connection ] owner @ local ->
+    f:([ `Transaction ] Session.t @ local -> ('a, Failure.t) result) -> ('a, error) result future
+  val ingest : [ `Connection ] owner @ local -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
     (unit, error) result future
 end
 
@@ -80,6 +80,6 @@ val with_owned_transaction : connection -> f:(transaction -> ('a, Failure.t) res
 module Session : sig
   include CONNECTION
     with type 'k owner = 'k Session.t and type error = Failure.t and type 'a future = 'a
-  val run : _ Session.t -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t ->
+  val run : _ Session.t @ local -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t ->
     ('out, Failure.t) result
 end

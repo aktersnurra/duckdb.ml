@@ -181,11 +181,9 @@ let transaction_between_statements clock =
   reset (-1);
   Eio.Switch.run (fun sw ->
     let p = pool sw 1 1 in
-    let escaped = ref None in
     hold_between true;
     Exn.protect ~finally:(fun () -> hold_between false) ~f:(fun () ->
       let a = Eio.Fiber.fork_promise ~sw (fun () -> E.transaction p ~f:(fun tx ->
-        escaped := Some tx;
         unwrap (Duckdb.execute tx "CREATE TABLE between_tx(x INTEGER)");
         wait_between ();
         Duckdb.execute tx "INSERT INTO between_tx VALUES (1)")) in
@@ -196,8 +194,7 @@ let transaction_between_statements clock =
       hold_between false;
       unwrap (Eio.Promise.await_exn a); unwrap (Eio.Promise.await_exn b);
       check "two-statement transaction then competing B have ordered native effects" (counter 3 = 3);
-      let tx = Option.value_exn !escaped in
-      check "escaped transaction token is revoked" (match Duckdb.execute tx "SELECT 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false);
+      (* The token cannot escape its callback (scope_compile escape_ref). *)
       check "worker callback outward scheduler effect hits core barrier"
         (match E.transaction p ~f:(fun _ -> Eio.Fiber.yield (); Ok ()) with Error (E.Core { cause = Duckdb.Error.Effects_not_allowed; _ }) -> true | _ -> false);
       unwrap (E.shutdown p)))

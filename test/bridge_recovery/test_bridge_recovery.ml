@@ -104,12 +104,14 @@ let run () =
      "transaction caught exception", transaction_recovery Callback_exception;
      "snapshot native error", snapshot_recovery]
     ~f:(fun (name, test) ->
-      ok (D.with_database (ok (D.Config.create D.Config.Memory)) ~f:(fun database ->
-        D.with_connection database ~f:(fun owner ->
-          D.with_connection database ~f:(fun observer ->
+      (* Owned handles are global: Bridge callbacks may capture the owner. *)
+      let database = ok (D.Owned.open_database (ok (D.Config.create D.Config.Memory))) in
+      Exn.protect ~finally:(fun () -> ok (D.Owned.close_database database)) ~f:(fun () ->
+        let owner = ok (D.Owned.connect database) and observer = ok (D.Owned.connect database) in
+        Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection observer); ok (D.Owned.close_connection owner))
+          ~f:(fun () ->
             ok (D.execute owner "CREATE TABLE recovery_rows (i BIGINT NOT NULL)");
-            test owner observer;
-            Ok ()))));
+            test owner observer));
       check "ordinary recovery has no live-resource leak" (Duckdb_ffi.live_resources () = live);
       check "ordinary recovery never uses fallback reclamation" (Duckdb_ffi.fallback_reclaims () = fallback);
       Stdlib.print_endline ("safe Bridge recovery: " ^ name ^ " passed"));

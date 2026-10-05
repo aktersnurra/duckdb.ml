@@ -152,9 +152,8 @@ let count_rows tx =
 let transaction_exclusion () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
-  let escaped = ref None in
+  (* The token cannot escape its callback (scope_compile escape_ref). *)
   let a = ok (A.transaction p ~f:(fun tx ->
-    escaped := Some tx;
     ok (Duckdb.execute tx "insert into t values (1)");
     Stdlib.Atomic.set entered true; wait_worker release;
     Duckdb.execute tx "insert into t values (2)")) in
@@ -165,8 +164,7 @@ let transaction_exclusion () = with_pool (fun p ->
     Stdlib.Atomic.set release true;
     complete a >>= fun result -> ok result;
     complete b >>| fun result ->
-    require "whole transaction visible to next borrower" (Int64.equal (ok result) 2L);
-    require "escaped transaction revoked" (match Duckdb.execute (Option.value_exn !escaped) "select 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false)))
+    require "whole transaction visible to next borrower" (Int64.equal (ok result) 2L)))
 let commit_cancel ~after () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in

@@ -35,7 +35,7 @@ type execution_gate = { mutex : Gate_mutex.t; mutable execution : execution; mut
 type slot_state = Idle | Leased | Needs_close | Closing | Needs_connect | Connecting | Closed | Close_failed
 type _ operation =
   | Execute : string -> unit operation
-  | Transaction : (Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> 'a operation
+  | Transaction : (Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> 'a operation
   | Query : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn -> 'row list operation
   | Fold_rows : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a operation
   | Parquet_fold_rows : string list * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a operation
@@ -45,7 +45,7 @@ type _ operation =
   | Typed : (W.slot -> Duckdb.Bridge.request -> ('a, Duckdb.Error.t) result)
       -> ('a, Duckdb.Error.t) result operation
 
-type t =
+type pool =
   { limits : Limits.t
   ; database : W.database
   ; maintenance : In_thread.Helper_thread.t
@@ -67,7 +67,7 @@ and slot =
   ; mutable cleanup_result : (unit, failure) result
   }
 and 'a request =
-  { pool : t
+  { pool : pool
   ; observer : Monitor.t
   ; result : ('a, failure) result Ivar.t
   ; gate : execution_gate
@@ -78,6 +78,9 @@ and 'a request =
   ; mutable outcome : ('a, failure) result option
   }
 and packed = Pack : 'a request -> packed
+(* The public handle. Immutable with a global payload, so an operation given a
+   local handle (as [Duckdb.Request.QUERY] requires) can reach the pool. *)
+type t = { pool : pool @@ global }
 
 type cancel_ack = Requested | Already_finished
 let capture f =
@@ -238,7 +241,7 @@ and dispatch_waiting pool =
          | None -> ()
          | Some (Pack r) -> r.node <- None; dispatch pool slot r)
       | Leased | Needs_close | Closing | Needs_connect | Connecting | Closed | Close_failed -> ())
-and dispatch : type a. t -> slot -> a request -> unit = fun pool slot r ->
+and dispatch : type a. pool -> slot -> a request -> unit = fun pool slot r ->
   slot.state <- Leased;
   slot.lease <- Some (Pack r);
   r.state <- Dispatched;
@@ -337,7 +340,7 @@ let create limits config =
             ; queue = Doubly_linked.create (); monitor; shutdown_result = Ivar.create ()
             ; shutdown_observer = None; lifecycle = Accepting; maintenance_busy = false; lifecycle_result = Ok () } in
           pool_ref := Some pool;
-          Ivar.fill_exn completion (Ok pool))) : unit option);
+          Ivar.fill_exn completion (Ok { pool }))) : unit option);
   Ivar.read completion
 let admit pool operation =
   if W.is_in_callback () then Error Reentrant_call
@@ -354,12 +357,12 @@ let admit pool operation =
           | Some slot -> dispatch pool slot r
           | None -> r.node <- Some (Doubly_linked.insert_last pool.queue (Pack r)));
         Ok r)
-let execute pool sql = admit pool (Execute sql)
-let transaction pool ~f = admit pool (Transaction f)
-let query pool sql fields ~row = admit pool (Query (sql, fields, row))
-let fold_rows pool sql fields ~row ~init ~f = admit pool (Fold_rows (sql, fields, row, init, f))
-let parquet_fold_rows pool names fields ~row ~init ~f = admit pool (Parquet_fold_rows (names, fields, row, init, f))
-let parquet_export pool ~query ~destination = admit pool (Parquet_export (query, destination))
+let execute ({ pool } : t @ local) sql = admit pool (Execute sql)
+let transaction ({ pool } : t @ local) ~f = admit pool (Transaction f)
+let query ({ pool } : t @ local) sql fields ~row = admit pool (Query (sql, fields, row))
+let fold_rows ({ pool } : t @ local) sql fields ~row ~init ~f = admit pool (Fold_rows (sql, fields, row, init, f))
+let parquet_fold_rows ({ pool } : t @ local) names fields ~row ~init ~f = admit pool (Parquet_fold_rows (names, fields, row, init, f))
+let parquet_export ({ pool } : t @ local) ~query ~destination = admit pool (Parquet_export (query, destination))
 let completion r = if W.is_in_callback () then Error Reentrant_call else Ok (Ivar.read r.result)
 let cancel (r : _ request) =
   if W.is_in_callback () then Error Reentrant_call
@@ -373,7 +376,7 @@ let cancel (r : _ request) =
         finish r (Error (Expected Cancelled)));
       Ok Requested
     | Dispatched | Settling -> latch r; Ok Requested
-let shutdown pool =
+let shutdown ({ pool } : t @ local) =
   if W.is_in_callback () then Error Reentrant_call
   else (
     if Option.is_none pool.shutdown_observer then (
@@ -387,16 +390,17 @@ module Request = struct
   (* Submission errors are the adapter's own admission errors. *)
   type 'a submitted = (('a, Duckdb.Error.t) result request, error) result
   type nonrec error = Adapter of failure | Request of Duckdb.Error.t
-  let typed pool work = admit pool (Typed work)
-  let submit_run pool shape r args = typed pool (fun slot bridge -> W.request_run slot bridge shape r args)
-  let submit_exec pool r args = submit_run pool Duckdb.Owned.Exec r args
-  let submit_find pool r args = submit_run pool Duckdb.Owned.Find r args
-  let submit_find_opt pool r args = submit_run pool Duckdb.Owned.Find_opt r args
-  let submit_collect pool r args = submit_run pool Duckdb.Owned.Collect r args
-  let submit_fold pool r args ~init ~f = submit_run pool (Duckdb.Owned.Fold { init; f }) r args
-  let submit_transaction pool ~f = typed pool (fun slot bridge -> W.request_transaction slot bridge ~f)
-  let submit_ingest pool table batches ~flush =
-    typed pool (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
+  (* Public operations accept a local handle, as [Generic] requires. *)
+  let typed ({ pool } : t @ local) work = admit pool (Typed work)
+  let submit_run (t @ local) shape r args = typed t (fun slot bridge -> W.request_run slot bridge shape r args)
+  let submit_exec (t @ local) r args = submit_run t Duckdb.Owned.Exec r args
+  let submit_find (t @ local) r args = submit_run t Duckdb.Owned.Find r args
+  let submit_find_opt (t @ local) r args = submit_run t Duckdb.Owned.Find_opt r args
+  let submit_collect (t @ local) r args = submit_run t Duckdb.Owned.Collect r args
+  let submit_fold (t @ local) r args ~init ~f = submit_run t (Duckdb.Owned.Fold { init; f }) r args
+  let submit_transaction (t @ local) ~f = typed t (fun slot bridge -> W.request_transaction slot bridge ~f)
+  let submit_ingest (t @ local) table batches ~flush =
+    typed t (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)
   (* Admission is checked before any Async value is created. *)
   let await = function
     | Error e -> return (Error (Adapter (Expected e)))
@@ -405,13 +409,13 @@ module Request = struct
       | Ok (Ok value) -> Ok value
       | Ok (Error e) -> Error (Request e)
       | Error failure -> Error (Adapter failure)
-  let exec pool r args = await (submit_exec pool r args)
-  let find pool r args = await (submit_find pool r args)
-  let find_opt pool r args = await (submit_find_opt pool r args)
-  let collect pool r args = await (submit_collect pool r args)
-  let fold pool r args ~init ~f = await (submit_fold pool r args ~init ~f)
-  let with_transaction pool ~f = await (submit_transaction pool ~f)
-  let ingest pool table batches ~flush = await (submit_ingest pool table batches ~flush)
+  let exec (t @ local) r args = await (submit_exec t r args)
+  let find (t @ local) r args = await (submit_find t r args)
+  let find_opt (t @ local) r args = await (submit_find_opt t r args)
+  let collect (t @ local) r args = await (submit_collect t r args)
+  let fold (t @ local) r args ~init ~f = await (submit_fold t r args ~init ~f)
+  let with_transaction (t @ local) ~f = await (submit_transaction t ~f)
+  let ingest (t @ local) table batches ~flush = await (submit_ingest t table batches ~flush)
   module Generic = struct
     type 'k owner = t
     type nonrec error = error

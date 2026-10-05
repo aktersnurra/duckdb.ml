@@ -1,0 +1,4 @@
+module D = Duckdb
+let r = D.Request.many D.Fields.[] D.Fields.[int64] ~row:Fun.id "SELECT 1"
+let f (c @ local) = D.Request.Session.fold c r D.Args.[] ~init:() ~f:(fun _ () ->
+  Result.map (fun () -> D.Continue ()) (D.execute c "SELECT 1"))

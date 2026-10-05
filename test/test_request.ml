@@ -2,7 +2,6 @@ open! Base
 module D = Duckdb
 module R = D.Request
 external prepares : unit -> int = "epoch_test_prepares" [@@noalloc]
-let ( let* ) x f = Result.bind x ~f
 let core_ok = function Ok x -> x | Error { D.Error.cause = Native s; _ } -> failwith s | Error _ -> failwith "unexpected core error"
 let rec describe (e : D.Error.t) = match e.cause with
   | Native s -> "Native: " ^ s
@@ -17,9 +16,13 @@ let failed name predicate = function
   | Error e -> failwith (name ^ ": unexpected " ^ describe e)
   | Ok _ -> failwith (name ^ ": unexpected success")
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
+(* Owned handles are global: callbacks may capture them. *)
 let connected ?(statement_cache = 64) f =
   let config = core_ok (D.Config.create ~statement_cache Memory) in
-  core_ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c -> f c; Ok ())));
+  let db = core_ok (D.Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> core_ok (D.Owned.close_database db)) ~f:(fun () ->
+    let c = core_ok (D.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> core_ok (D.Owned.close_connection c)) ~f:(fun () -> f c));
   clean ()
 let count c table = core_ok (D.Statement.with_prepared c ("SELECT count(*)::BIGINT FROM " ^ table) ~f:(fun p ->
   D.Statement.fold_chunks p ~init:0L ~f:(fun chunk _ ->
@@ -143,12 +146,15 @@ let () =
    | Error { cause = Invalid_configuration _; _ } -> () | _ -> failwith "negative statement cache accepted");
   (* Cached statements are not live children: manual close and Bridge succeed. *)
   let config = core_ok (D.Config.create Memory) in
-  core_ok (D.with_database config ~f:(fun db ->
+  let db = core_ok (D.Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> core_ok (D.Owned.close_database db)) ~f:(fun () ->
     let c = core_ok (D.Owned.connect db) in
-    ok (R.Session.exec c create D.Args.[]);
-    ignore (ok (R.Session.collect c rows D.Args.[0L]));
-    core_ok (D.Bridge.run (D.Bridge.create ()) c ~f:(fun facade -> D.execute facade "SELECT 1"));
-    D.Owned.close_connection c));
+    Exn.protect ~finally:(fun () -> core_ok (D.Owned.close_connection c)) ~f:(fun () ->
+      ok (R.Session.exec c create D.Args.[]);
+      ignore (ok (R.Session.collect c rows D.Args.[0L]));
+      (* Manual close succeeds with cached statements (finally then repeats it). *)
+      core_ok (D.Bridge.run (D.Bridge.create ()) c ~f:(fun facade -> D.execute facade "SELECT 1"));
+      core_ok (D.Owned.close_connection c)));
   clean ();
   Stdlib.print_endline "request: cache hit/oneshot/LRU/disabled/negative config/close and Bridge with cached statements=ok"
 
@@ -157,16 +163,16 @@ let () =
   seeded (fun c ->
     ignore (ok (R.Session.collect c rows D.Args.[0L]));
     let in_tx = ok (R.Session.with_transaction c ~f:(fun tx ->
-      let* () = R.Session.exec tx insert D.Args.[3L; Some "three"; None] in
+      match R.Session.exec tx insert D.Args.[3L; Some "three"; None] with Error e -> Error e | Ok () ->
       R.Session.collect tx rows D.Args.[3L])) in
     assert (List.length in_tx = 1);
     let rolled = R.Session.with_transaction c ~f:(fun tx ->
-      let* () = R.Session.exec tx insert D.Args.[4L; None; None] in
+      match R.Session.exec tx insert D.Args.[4L; None; None] with Error e -> Error e | Ok () ->
       R.Session.find tx by_id D.Args.[999L]) in
     ignore (failed "rollback on request error" (fun e -> match e.cause with D.Error.Row_count _ -> true | _ -> false) rolled);
     assert (Int64.equal (count c "t") 3L);
     let changed = R.Session.with_transaction c ~f:(fun tx ->
-      let* () = R.Session.exec tx (R.exec D.Fields.[] "ALTER TABLE t ALTER id TYPE DOUBLE") D.Args.[] in
+      match R.Session.exec tx (R.exec D.Fields.[] "ALTER TABLE t ALTER id TYPE DOUBLE") D.Args.[] with Error e -> Error e | Ok () ->
       R.Session.exec tx insert D.Args.[5L; None; None]) in
     ignore (failed "schema change inside transaction" (fun e -> match e.cause with
       | Parameter_schema_changed | D.Error.Type_mismatch _ -> true
@@ -285,8 +291,8 @@ let () =
     let s = R.Session.exec in
     ok (s c create D.Args.[]);
     ok (R.Session.with_transaction c ~f:(fun tx ->
-      let* () = R.Session.exec tx insert D.Args.[1L; Some "a"; None] in
-      let* n = R.Session.collect tx rows D.Args.[0L] in
+      match R.Session.exec tx insert D.Args.[1L; Some "a"; None] with Error e -> Error e | Ok () ->
+      match R.Session.collect tx rows D.Args.[0L] with Error e -> Error e | Ok n ->
       assert (List.length n = 1); Ok ()));
     assert (List.length (ok (R.Session.collect c rows D.Args.[0L])) = 1));
   Stdlib.print_endline "request: Session ops over connection and transaction=ok"

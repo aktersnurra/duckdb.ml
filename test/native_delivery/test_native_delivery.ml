@@ -9,8 +9,6 @@ external count : int -> int = "delivery_count"
 external selected_gate : bool -> unit = "delivery_selected_gate"
 external selected_entered : unit -> bool = "delivery_selected_entered"
 external fail_start : bool -> unit = "delivery_fail_start"
-external arm_drain_wait : bool -> unit = "delivery_arm_drain_wait"
-external drain_wait_entered : unit -> bool = "delivery_drain_wait_entered"
 let check name condition = if not condition then failwith name
 let ok = function Ok x -> x | Error _ -> failwith "expected Ok"
 let cancelled = function Error { D.Error.cause = Cancelled; _ } -> () | _ -> failwith "expected cancellation"
@@ -23,8 +21,13 @@ let wait_count id n = E.await ~label:("native count " ^ Int.to_string id) (fun (
 let pending r = check "request pending" (match B.settlement r with Pending -> true | Settled -> false)
 let settled r = check "request settled" (match B.settlement r with Settled -> true | Pending -> false)
 let one_controller () = check "one controller started and joined" (count 10 = 1 && count 11 = 1 && count 12 = 1)
-let with_owner f = ok (D.with_database (ok (D.Config.create D.Config.Memory)) ~f:(fun db ->
-  D.with_connection db ~f:(fun owner -> f owner; Ok ())))
+(* Owned handles are global, so worker threads and Bridge callbacks may
+   capture the owner; Bridge facades stay local to their callbacks. *)
+let with_owner f =
+  let db = ok (D.Owned.open_database (ok (D.Config.create D.Config.Memory))) in
+  Exn.protect ~finally:(fun () -> ok (D.Owned.close_database db)) ~f:(fun () ->
+    let owner = ok (D.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection owner)) ~f:(fun () -> f owner))
 let controller_lifecycle owner =
   reset ();
   let request = B.create () in
@@ -149,37 +152,6 @@ let rollback_race ~before owner =
       one_controller (); settled request;
       check "rollback did not commit" (count 8 = 1 && count 7 = 0)));
   ok (D.execute owner "SELECT 3")
-exception Drain_failure
-let rollback_drains_foreign owner =
-  reset (); gate 5 true; selected_gate true;
-  let request = B.create () in
-  let child = ref None and outcome = Stdlib.Atomic.make None in
-  E.with_worker (fun () ->
-    Exn.protect ~finally:(fun () -> arm_drain_wait false; Option.iter !child ~f:Thread.join) ~f:(fun () ->
-      B.run request owner ~f:(fun facade ->
-        D.with_transaction facade ~f:(fun tx ->
-          child := Some (Thread.create (fun () ->
-            Stdlib.Atomic.set outcome (Some (E.capture (fun () ->
-              D.execute tx "SELECT sum(i) FROM range(10000) t(i)")))) ());
-          wait 5; ok (B.cancel request);
-          (* Only this request worker's next Condition.wait can be the drain:
-             the foreign child is held at gate 5 and the callback now raises. *)
-          arm_drain_wait true; raise Drain_failure))))
-    ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 5;
-      E.await ~label:"request worker drain wait or premature join"
-        (fun () -> drain_wait_entered () || count 11 > 0);
-      check "rollback drains foreign before stopping controller"
-        (drain_wait_entered () && count 11 = 0);
-      E.await ~label:"selected while request worker drains foreign" selected_entered;
-      gate 5 false; wait_count 11 1;
-      selected_gate false;
-      (match E.capture join with
-       | E.Raised failure when phys_equal failure.exception_ Drain_failure -> ()
-       | _ -> failwith "concurrent rollback exception preserved");
-      cancelled (E.restore (Option.value_exn (Stdlib.Atomic.get outcome)));
-      one_controller (); settled request));
-  ok (D.execute owner "SELECT 3")
 let snapshot_rollback_race ~before owner =
   ok (D.execute owner "CREATE TABLE snapshot_delivery (i BIGINT NOT NULL)");
   reset (); gate 11 true;
@@ -215,13 +187,15 @@ let before_native point owner =
       if point = 12 then check "cancel during binding starts no controller" (count 10 = 0 && count 13 = 1)
       else one_controller ()));
   ok (B.run (B.create ()) owner ~f:(fun facade -> D.execute facade "SELECT 2"))
-(* Statements are scoped: the scope's close is the child cleanup. *)
+(* Statements are scoped: the scope's close is the child cleanup. The
+   statement callback cannot capture the facade, so the cancelled operation is
+   the live statement's own execution. *)
 let cancelled_child_cleanup owner =
   reset (); gate 6 true; selected_gate true;
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
-    D.Statement.with_prepared facade "SELECT 1" ~f:(fun _ ->
-      let result = D.execute facade "SELECT 2" in
+    D.Statement.with_prepared facade "SELECT 2" ~f:(fun p ->
+      let result = D.Statement.execute p in
       gate 8 true;
       result)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
@@ -260,7 +234,6 @@ let tests = ["controller", controller_lifecycle; "start-failure", controller_fai
   "result-cleanup", cleanup_exclusion 7; "prepare-cleanup", cleanup_exclusion 8;
   "extracted-cleanup", cleanup_exclusion 9; "idle", idle_cancel;
   "rollback-before", rollback_race ~before:true; "rollback-after", rollback_race ~before:false;
-  "rollback-drains-foreign", rollback_drains_foreign;
   "snapshot-rollback-before", snapshot_rollback_race ~before:true;
   "snapshot-rollback-after", snapshot_rollback_race ~before:false;
   "scoped-child-cleanup", cancelled_child_cleanup;

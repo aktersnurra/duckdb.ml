@@ -1,0 +1,2 @@
+module D = Duckdb
+let f db = D.with_connection db ~f:(fun c -> Ok (fun () -> D.execute c "SELECT 1"))

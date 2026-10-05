@@ -113,40 +113,40 @@ let protected_case env ~fail_cleanup =
   assert !reraised;
   assert (Eio.Promise.is_resolved completion)
 
+(* The token cannot escape its scope (scope_compile escape_ref). *)
 let transaction () =
-  let escaped = ref None in
   let rows = ok (Duckdb.with_database (ok (Duckdb.Config.create Memory)) ~f:(fun db ->
     Duckdb.with_connection db ~f:(fun c ->
       Duckdb.with_transaction c ~f:(fun tx ->
-        escaped := Some tx;
         ok (Duckdb.execute tx "CREATE TABLE t(s VARCHAR)");
         ok (Duckdb.execute tx "INSERT INTO t VALUES ('owned')");
         Duckdb.Statement.with_prepared tx "SELECT s FROM t" ~f:(fun p ->
           Duckdb.Statement.fold_chunks p ~init:[] ~f:(fun chunk rows ->
             let text = ok (Duckdb.Statement.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
             Ok (Duckdb.Continue (text :: rows)))))))) in
-  (match Duckdb.execute (Option.value_exn !escaped) "SELECT 1" with
-   | Error { cause = Closed; _ } -> () | _ -> failwith "escaped token usable");
   rows
 
 let effects () =
   let reached_after_yield = ref false and cleanup = ref false and delivered = ref false in
-  ok (Duckdb.with_database (ok (Duckdb.Config.create Memory)) ~f:(fun db ->
-    Duckdb.with_connection db ~f:(fun c ->
+  (* Owned, so the effect-handler thunk may capture the connection. *)
+  let db = ok (Duckdb.Owned.open_database (ok (Duckdb.Config.create Memory))) in
+  Exn.protect ~finally:(fun () -> ok (Duckdb.Owned.close_database db)) ~f:(fun () ->
+    let c = ok (Duckdb.Owned.connect db) in
+    Exn.protect ~finally:(fun () -> ok (Duckdb.Owned.close_connection c)) ~f:(fun () ->
       ok (Duckdb.execute c "CREATE TABLE t(x INTEGER)");
       let outcome = Stdlib.Effect.Deep.try_with (fun () -> Duckdb.with_transaction c ~f:(fun tx ->
         Exn.protect ~finally:(fun () -> cleanup := true) ~f:(fun () ->
           ok (Duckdb.execute tx "INSERT INTO t VALUES (1)");
           Eio.Fiber.yield ();
           reached_after_yield := true;
-          Ok ()))) ()
+          Ok ()) [@nontail])) ()
         { effc = fun (type a) (_ : a Stdlib.Effect.t) ->
           delivered := true;
           Some (fun continuation -> Stdlib.Effect.Deep.discontinue continuation (Failure "outer effect delivery")) } in
       assert (not !delivered);
       (match outcome with Error { cause = Effects_not_allowed; _ } -> () | _ -> assert false);
       assert (!cleanup && not !reached_after_yield);
-      Duckdb.execute c "SELECT CASE WHEN count(*)=0 THEN 1 ELSE error('not rolled back') END FROM t")))
+      ok (Duckdb.execute c "SELECT CASE WHEN count(*)=0 THEN 1 ELSE error('not rolled back') END FROM t")))
 
 let run () =
   Stdlib.Printexc.record_backtrace true;

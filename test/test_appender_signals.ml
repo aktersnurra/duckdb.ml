@@ -26,7 +26,11 @@ let () =
   Exn.protect ~finally:(fun () ->
     arm 0 0; target 0 false; Stdlib.Sys.Safe.set_signal Stdlib.Sys.sigusr1 previous;
     if Stdlib.Sys.file_exists file then Stdlib.Sys.remove file) ~f:(fun () ->
-    ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
+    (* Owned handles are global: the async-exception thunk may capture them. *)
+    let db = ok (Owned.open_database (ok (Config.create Memory))) in
+    Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
+    let c = ok (Owned.connect db) in
+    Exn.protect ~finally:(fun () -> ok (Owned.close_connection c)) ~f:(fun () ->
       ok (execute c "CREATE TABLE a(x VARCHAR)");
       let caught =
         try Stdlib.Sys.with_async_exns (fun () ->
@@ -63,8 +67,7 @@ let () =
         ok (with_connection db ~f:(fun observer -> assert (Int64.equal (count observer) 1L); Ok ())))
       else (assert (Int64.equal (count c) 0L); ok (execute c "SELECT 1"));
       if String.equal mode "export-publish-leave" || String.is_prefix mode ~prefix:"export-remove" then assert (Stdlib.Sys.file_exists file)
-      else assert (not (Stdlib.Sys.file_exists file));
-      Ok ()))) ;
+      else assert (not (Stdlib.Sys.file_exists file))));
     let expected = match mode with
       | "create-enter" -> 7 | "create-leave" -> 10
       | "append-enter" -> 12 | "append-leave" -> 10

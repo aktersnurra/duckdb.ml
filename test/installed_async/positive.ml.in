@@ -11,7 +11,7 @@ let test () =
     await (A.execute p "CREATE TABLE installed(i BIGINT)") >>= fun result -> ok result;
     let r = ok (A.transaction p ~f:(fun tx ->
       Result.bind (Duckdb.execute tx "INSERT INTO installed VALUES (1)") ~f:(fun () ->
-        Result.map (Duckdb.execute tx "INSERT INTO installed VALUES (2)") ~f:(fun () -> 42)))) in
+        Result.map (Duckdb.execute tx "INSERT INTO installed VALUES (2)") ~f:(fun () -> 42)) [@nontail])) in
     require "installed completion shared" (phys_equal (ok (A.completion r)) (ok (A.completion r)));
     ok (A.completion r) >>= fun result -> require "installed owned transaction" (ok result = 42);
     let row = Duckdb.Fields.[int64] in

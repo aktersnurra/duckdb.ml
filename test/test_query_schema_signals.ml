@@ -9,14 +9,21 @@ let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let closed = function Error { Error.cause = Closed; _ } -> () | _ -> failwith "unclean connection was not discarded"
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let config = ok (Config.create Memory)
+(* Owned handles are global: callbacks may capture them. *)
+let owned f =
+  let db = ok (Owned.open_database config) in
+  Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->
+    let connect () = ok (Owned.connect db) in
+    let c = connect () and other = connect () in
+    Exn.protect ~finally:(fun () -> ok (Owned.close_connection other); ok (Owned.close_connection c))
+      ~f:(fun () -> f c other))
 let count c expected = ok (execute c (Stdlib.Printf.sprintf
   "SELECT CASE WHEN count(*)=%d THEN 1 ELSE error('snapshot settlement') END FROM t" expected))
 let signal_case ~revalidate operation boundary ordinal expected_live =
   Stdlib.Atomic.set handled 0;
-  ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
-    with_connection db ~f:(fun observer ->
+  owned (fun c observer ->
       ok (execute c "CREATE TABLE t(x BIGINT)");
-      Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
+      ok (Statement.with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
         ok (Statement.bind p 1 (Codec.Values.int64) 9007199254740993L);
         let rollback = String.equal operation "rollback" in
         let rejection_close = String.equal operation "rejection-close" in
@@ -40,7 +47,7 @@ let signal_case ~revalidate operation boundary ordinal expected_live =
           (live_at_signal ()) expected_live;
         assert (live_at_signal () = expected_live);
         assert (injections () = 1); assert (Stdlib.Atomic.get handled = 1);
-        Ok ())))));
+        Ok ())));
   clean ()
 let () =
   let previous = Stdlib.Sys.Safe.signal Stdlib.Sys.sigusr1
@@ -64,11 +71,10 @@ let () =
 
 let () =
   List.iter [1; 2; 3; 4] ~f:(fun fault ->
-    ok (with_database config ~f:(fun db -> with_connection db ~f:(fun c ->
-      with_connection db ~f:(fun observer ->
+    owned (fun c observer ->
         ok (execute c "CREATE TABLE t(x BIGINT)");
         let sql = if fault = 4 then "SELECT error('primary snapshot query')" else "INSERT INTO t VALUES (?)" in
-        Statement.with_prepared c sql ~f:(fun p ->
+        ok (Statement.with_prepared c sql ~f:(fun p ->
           if fault <> 4 then ok (Statement.bind p 1 (Codec.Values.int64) 9007199254740993L);
           if fault = 2 then ok (execute c "ALTER TABLE t ALTER x TYPE DOUBLE");
           fail_control (if fault = 4 then 2 else fault);
@@ -88,6 +94,6 @@ let () =
              closed (execute c "SELECT 1"); closed (Statement.parameter_count p)
            | _ -> failwith "snapshot control fault lost outcome/discard");
           count observer 0;
-          Ok ())))));
+          Ok ())));
     clean ());
   Stdlib.print_endline "schema faults: BEGIN/COMMIT/ROLLBACK failures preserve outcomes and discard only unclean connections=ok"

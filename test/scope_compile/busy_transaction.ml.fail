@@ -1,0 +1,2 @@
+module D = Duckdb
+let f (c @ local) = D.with_transaction c ~f:(fun _tx -> D.execute c "SELECT 1")

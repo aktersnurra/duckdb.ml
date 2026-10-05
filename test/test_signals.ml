@@ -47,7 +47,7 @@ let () =
                   ok (D.execute c "select case when count(*)=0 then 1 else error('signal rollback') end from t");
                   raise Stdlib.Sys.Break
                 | _ -> failwith "callback Break missing")
-              else transaction_result ())
+              else transaction_result () [@nontail])
             else if String.is_prefix mode ~prefix:"connection-close" then (inject "connection-close"; Ok ())
             else (inject "query"; D.execute c "select sum(i) from range(10000) t(i)")))) in
       Stdlib.Gc.minor (); result) with

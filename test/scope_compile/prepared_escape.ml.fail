@@ -1,0 +1,2 @@
+module D = Duckdb
+let f c = D.Statement.with_prepared c "SELECT 1" ~f:(fun p -> Ok p)
