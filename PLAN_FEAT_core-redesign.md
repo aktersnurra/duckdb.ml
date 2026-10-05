@@ -1722,6 +1722,54 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" && jj new
 
 ### Task 11: Scoped handles are `@ local`
 
+**Amendments from the Task 10 review (authoritative over the steps below):**
+
+- **Where `@ local` goes.** Internal *record-level* modules (`Resource`,
+  `Query`, `Appender`, `Borrowed_chunk`) keep global signatures. Modules
+  re-exported verbatim by `duckdb.ml` and taking public handle types
+  (`Request` — `QUERY`/`CONNECTION`/`Session` —, `Table`, `Parquet`,
+  `Owned.run`) DO carry `@ local` on every handle parameter in their own
+  `.mli` (add `table.mli` if needed); their implementations unwrap through
+  `Session.connection`/`Session.within` (which accept local values) or the
+  `@@ global` wrapper fields (`Statement.prepared`, `Table.appender`,
+  added in the Task 10 fixes).
+- **Adapters (`Generic` and every pool function).** `QUERY`'s owner is
+  `_ owner @ local`, so each adapter's `t` becomes an immutable wrapper
+  record with a global payload, e.g. `type t = { pool : pool @@ global }`
+  (the existing mutable record renamed `pool`), kept abstract in the
+  `.mli`. Public functions take `(t @ local)` where the signature requires
+  it and read `t.pool`. Users are unaffected (global values are accepted
+  where local is expected). This avoids unsafe casts.
+- **Worker.** `with_callback`'s thunk captures a local `tx`, so its
+  parameter must accept a local closure (`f:(unit -> 'a) @ local`); it
+  uses `Base.Exn.protect`, which accepts `@ local once`.
+- **Tests: switch helpers to `Owned` in bulk.** Test helpers that hand a
+  scoped handle to callbacks which capture it (`connected`, `with_owner`,
+  `with_pair`, `test_schema_epoch.connected`, `test_query_schema_signals`
+  helpers, and similar) open handles with `Owned.open_database` /
+  `Owned.connect` and close them in a `Exn.protect` finally. Owned handles
+  are global, so captures and threads keep working and every runtime
+  Busy/Closed expectation stays. Only tests whose *subject* is scoping
+  keep scoped handles.
+- **Known compile-error sites to fix** (from the review; recheck with the
+  compiler): `test/test_duckdb.ml` 41-42, 59-62, 82-87, 133-147, 162, 189;
+  `test/test_query.ml` 117, 172-174; `test/test_query_concurrency.ml` 119
+  and its thread captures; `test/test_appender.ml` 108;
+  `test/test_adapter_bridge.ml` 39, 44, 88, 100; `test/test_request.ml` 147;
+  `test/native_delivery/test_native_delivery.ml` 247 and `E.with_worker`
+  thunks; `query_delivery.ml` `with_schema_prepared` (move DDL to a separate
+  `Owned` connection — the schema epoch is process-wide);
+  `next_suppressed`/`cancelled (D.execute c …)` inside `with_prepared`
+  callbacks; `test_native_delivery.cancelled_child_cleanup`;
+  `bridge_recovery` `still_admitted … owner` inside callbacks. Bridge
+  facades are always local (they are callback arguments): restructure so the
+  facade is used after the inner scope returns; a "facade used while a
+  child is live" scenario that can no longer be written becomes a compile
+  fixture or is deleted with a stated reason.
+- **Rejection counts.** The request-types suite is at 21; the scope suite
+  starts at 8 (this task) and becomes 9 in Task 12.
+
+
 **Files:**
 - Modify: `lib/duckdb/duckdb.mli` (mode annotations, exactly as in "Target
   public interface"), `lib/duckdb/duckdb.ml` (annotate the parameters
