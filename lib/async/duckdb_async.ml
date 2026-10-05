@@ -38,7 +38,6 @@ type _ operation =
   | Transaction : (Duckdb.transaction -> ('a, Duckdb.error) result) -> 'a operation
   | Query : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn -> 'row list operation
   | Fold_rows : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
-  | Ingest : string option * string * Duckdb.cell list list list * bool -> unit operation
   | Parquet_fold_rows : string list * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
   | Parquet_export : string * string -> unit operation
   (* A typed request: its own outcome is the payload, so request errors reach
@@ -262,7 +261,6 @@ and dispatch : type a. t -> slot -> a request -> unit = fun pool slot r ->
           | Transaction f -> W.transaction owner bridge ~f
           | Query (sql, fields, row) -> W.query owner bridge sql fields ~row
           | Fold_rows (sql, fields, row, init, f) -> W.fold_rows owner bridge sql fields ~row ~init ~f
-          | Ingest (schema, table, batches, flush) -> W.ingest owner bridge ~schema ~table ~batches ~flush
           | Parquet_fold_rows (names, fields, row, init, f) -> W.parquet_fold_rows owner bridge names fields ~row ~init ~f
           | Parquet_export (query, destination) -> W.parquet_export owner bridge ~query ~destination
           | Typed work -> Ok (work owner bridge) in
@@ -360,7 +358,6 @@ let execute pool sql = admit pool (Execute sql)
 let transaction pool ~f = admit pool (Transaction f)
 let query pool sql fields ~row = admit pool (Query (sql, fields, row))
 let fold_rows pool sql fields ~row ~init ~f = admit pool (Fold_rows (sql, fields, row, init, f))
-let ingest pool ~schema ~table ~batches ~flush = admit pool (Ingest (schema, table, batches, flush))
 let parquet_fold_rows pool names fields ~row ~init ~f = admit pool (Parquet_fold_rows (names, fields, row, init, f))
 let parquet_export pool ~query ~destination = admit pool (Parquet_export (query, destination))
 let completion r = if W.is_in_callback () then Error Reentrant_call else Ok (Ivar.read r.result)

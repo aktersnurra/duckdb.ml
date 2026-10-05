@@ -12,11 +12,8 @@ let run () =
       let limits = unwrap (E.limits ~connections:1 ~queue_capacity:1) in
       let pool = unwrap (E.create ~sw limits (ok (Duckdb.Config.create Duckdb.Config.Memory))) in
       assert (Result.is_ok (E.execute pool "CREATE TABLE typed(i BIGINT)"));
-      let batches =
-        [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
-          ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ]
-          ] ] in
-      assert (Result.is_ok (E.ingest pool ~schema:None ~table:"typed" ~batches ~flush:true));
+      let typed = Duckdb.Table.(declare "typed" Columns.[ "i", int64 ] ~row:Fn.id) in
+      assert (Result.is_ok (E.Request.ingest pool typed [ [ Duckdb.Args.[1L]; Duckdb.Args.[2L] ] ] ~flush:true));
       assert (equal_rows (unwrap (E.query pool "SELECT i FROM typed ORDER BY i" rows ~row:Fn.id)) [1L; 2L]);
       assert (Int64.equal (unwrap (E.fold_rows pool "SELECT i FROM typed ORDER BY i" rows ~row:Fn.id ~init:0L
         ~f:(fun value total ->

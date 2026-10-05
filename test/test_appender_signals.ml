@@ -9,9 +9,11 @@ let handled = Stdlib.Atomic.make 0
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let rec is_break = function
   | Stdlib.Sys.Break -> true
-  | Rollback_exception (e,_) | Cleanup_exception (_,e) -> is_break e
+  | Rollback_exception (e,_) | Cleanup_exception (_,e) | Request.Cleanup_exception (_,e) -> is_break e
   | Exn.Finally (a,b) -> is_break a || is_break b
   | _ -> false
+let core r = Result.map_error r ~f:(fun (e : Request.request_error) ->
+  match e.cause with Request.Core e -> e | _ -> Native_error "unexpected typed failure")
 let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
   fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
     match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
@@ -37,18 +39,24 @@ let () =
               else "SELECT 9007199254740993::BIGINT" in
             ok (Parquet.export c ~query (ok (Parquet.path file))))
           else ok (with_transaction c ~f:(fun tx ->
-            inject "create";
-            with_appender_transaction tx "a" ~f:(fun a ->
+            (* The declared table's catalog query runs first; arm at the
+               native appender creation itself. *)
+            if String.is_prefix mode ~prefix:"create" then target 5 leave;
+            let table = Table.(declare "a" Columns.[ "x", string ] ~row:Fn.id) in
+            let result = core (Table.with_appender_transaction tx table ~f:(fun a ->
               inject "append";
-              ok (append_rows a [[Cell (String, Some (String.make 10000 'x' ^ "\000end"))]]);
-              inject "flush"; ok (flush_appender a);
+              ok (core (Table.append a [Args.[String.make 10000 'x' ^ "\000end"]]));
+              inject "flush"; ok (core (Table.flush a));
               if String.equal mode "callback" then (trigger ();Stdlib.Gc.minor ());
               if String.is_prefix mode ~prefix:"discard" then (
-                inject "discard"; Error (Native_error "primary callback"))
+                inject "discard";
+                Error { Request.context = Request.Transaction; cause = Request.Core (Native_error "primary callback") })
               else (
+                (* The scope's close flushes, then clears/destroys. *)
                 inject "close-flush";
                 if String.equal mode "close-enter" || String.equal mode "close-leave" then target 4 leave;
-                let result = close_appender a in inject "commit"; result))));
+                Ok ()))) in
+            inject "commit"; result));
           Stdlib.Gc.minor ()); false
         with e when is_break e -> true in
       assert caught;

@@ -19,7 +19,7 @@ CONTROLS = {
         "ingest_semantics",
         "explicit flush plus close flush",
         "duckdb_worker.ml",
-        "Probe.explicit_flush (); D.flush_appender appender",
+        "Probe.explicit_flush (); D.Table.flush appender",
         "Probe.explicit_flush (); Ok ()",
     ),
     "leave_callback_tls": (

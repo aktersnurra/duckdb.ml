@@ -63,12 +63,12 @@ let example () =
     ~finally:(fun () -> require "request Async shutdown" (A.shutdown pool) >>| require_failure "await Async shutdown")
     (fun () ->
     await (A.execute pool "CREATE TABLE example(i BIGINT)") >>= fun () ->
-    let batches =
-      [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
-        ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ]
-        ] ]
-    in
-    await (A.ingest pool ~schema:None ~table:"example" ~batches ~flush:true) >>= fun () ->
+    let table = Duckdb.Table.(declare "example" Columns.[ "i", int64 ] ~row:Fn.id) in
+    A.Request.ingest pool table [ [ Duckdb.Args.[1L]; Duckdb.Args.[2L] ] ] ~flush:true >>| (function
+      | Ok () -> ()
+      | Error (A.Request.Adapter failure) -> failwith ("ingest: " ^ failure_name failure)
+      | Error (A.Request.Request e) -> failwith ("ingest: request error in " ^ Duckdb.Request.query_of_context e.context))
+    >>= fun () ->
     let row = Duckdb.Fields.[int64] in
     await (A.query pool "SELECT i FROM example ORDER BY i" row ~row:Fn.id) >>= fun values ->
     (* This worker fold is synchronous; do not call or suspend Async here. *)

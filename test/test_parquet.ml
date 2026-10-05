@@ -15,7 +15,9 @@ let scalar : type a. connection -> string -> a Scalar.t -> a list -> (a -> a -> 
   let p = ok (Parquet.path file) in
   ok (execute c ("CREATE OR REPLACE TABLE scalars(x " ^ Scalar.name typ ^ ")"));
   let expected = None :: List.map values ~f:Option.some in
-  ok (with_appender c "scalars" ~f:(fun a -> append_rows a (List.map expected ~f:(fun x -> [Cell (typ, x)]))));
+  let table = Table.(declare "scalars" Columns.[ "x", nullable (of_scalar typ) ] ~row:Fn.id) in
+  ok (Result.map_error (Table.with_appender c table ~f:(fun a -> Table.append a (List.map expected ~f:(fun x -> Args.[x]))))
+    ~f:(fun (e : Request.request_error) -> match e.cause with Request.Core e -> e | _ -> Native_error "unexpected typed failure"));
   ok (Parquet.export c ~query:"SELECT x FROM scalars ORDER BY rowid" p);
   let decode paths = ok (fold_core c paths Fields.[nullable (of_scalar typ)] ~row:Fn.id ~init:[]
     ~f:(fun x xs -> Ok (Continue (x::xs)))) |> List.rev in

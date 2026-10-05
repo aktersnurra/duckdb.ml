@@ -357,7 +357,11 @@ let child_cleanup_responsiveness clock =
   let prepared tx = let p = unwrap (Duckdb.prepare_transaction tx "SELECT 1") in Duckdb.close_prepared p in
   let appender tx =
     unwrap (Duckdb.execute_transaction tx "CREATE TABLE cleanup_appender(x INTEGER)");
-    Duckdb.close_appender (unwrap (Duckdb.open_appender tx "cleanup_appender")) in
+    (* The declared table's scope opens and closes the appender. *)
+    Result.map_error ~f:(fun (e : Duckdb.Request.request_error) ->
+      match e.cause with Duckdb.Request.Core e -> e | _ -> failwith "unexpected typed failure")
+      (Duckdb.Table.with_appender_transaction tx
+        Duckdb.Table.(declare "cleanup_appender" Columns.[ "x", int32 ] ~row:Fn.id) ~f:(fun _ -> Ok ())) in
   List.iter [9, "result", result; 10, "prepared", prepared; 11, "appender", appender; 15, "chunk", chunk]
     ~f:(fun (kind, name, callback) -> held_child_cleanup clock kind name callback false;
       held_child_cleanup clock kind (name ^ " cancellation") callback true);

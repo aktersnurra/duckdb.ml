@@ -77,9 +77,11 @@ let work seam request =
               activate (); ok (B.cancel request); Ok (D.Stop ())))
         | Appender_clear | Appender_destroy ->
           ok (D.execute facade "CREATE TABLE t(x BIGINT)");
-          D.with_appender facade "t" ~f:(fun a ->
-            ok (D.append_rows a [[D.Cell (D.Scalar.Int64, Some 42L)]]);
-            activate (); ok (B.cancel request); Ok ())
+          Result.map_error ~f:(fun (e : D.Request.request_error) ->
+            match e.cause with D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
+            (D.Table.with_appender facade D.Table.(declare "t" Columns.[ "x", int64 ] ~row:Fn.id) ~f:(fun a ->
+              ok (D.Table.append a [D.Args.[42L]]);
+              activate (); ok (B.cancel request); Ok ()))
         | Publication | Unlink ->
           let destination = Stdlib.Filename.temp_file "bridge-heartbeat-" ".parquet" in
           Stdlib.Sys.remove destination;

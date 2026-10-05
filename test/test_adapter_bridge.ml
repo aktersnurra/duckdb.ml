@@ -14,6 +14,9 @@ external request_failure : int -> unit = "adapter_bridge_request_failure"
 let ok = function Ok x -> x | Error _ -> failwith "expected Ok"
 let expect error = function Error actual when Poly.equal error actual -> () | _ -> failwith "unexpected result"
 let check label condition = if not condition then failwith label
+let core r = Result.map_error r ~f:(fun (e : D.Request.request_error) ->
+  match e.cause with D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
+let bigints name = D.Table.(declare name Columns.[ "i", int64 ] ~row:Fn.id)
 let memory f = ok (D.with_database (ok (D.Config.create D.Config.Memory)) ~f)
 let connection db f = D.with_connection db ~f
 let rows c sql = D.with_prepared c sql ~f:(fun p ->
@@ -82,13 +85,14 @@ let live_children db = connection db (fun owner ->
   expect D.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
   ok (D.close_result r); ok (D.close_prepared p);
   ok (D.execute owner "CREATE TABLE live_appender (i BIGINT)");
+  let live = bigints "live_appender" in
   ok (D.with_transaction owner ~f:(fun tx ->
-    D.with_appender_transaction tx "live_appender" ~f:(fun _ ->
+    core (D.Table.with_appender_transaction tx live ~f:(fun _ ->
       expect D.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
-      Ok ())));
+      Ok ()))));
   let a = ok (B.run (B.create ()) owner ~f:(fun facade ->
-    D.with_appender facade "live_appender" ~f:(fun a -> Ok a))) in
-  expect D.Closed (D.flush_appender a); Ok ())
+    core (D.Table.with_appender facade live ~f:(fun a -> Ok a)))) in
+  expect D.Closed (core (D.Table.flush a)); Ok ())
 let concurrent db = connection db (fun owner ->
   let entered = A.make false and release = A.make false in
   let request = B.create () in
@@ -130,17 +134,17 @@ let transactions db = connection db (fun owner -> connection db (fun observer ->
   (* Dropped snapshot result and cancelled appender both roll back, not flush. *)
   ok (D.execute owner "CREATE SEQUENCE appender_flush_probe START 1");
   ok (D.execute owner "CREATE TABLE discarded_buffer (i BIGINT CHECK (nextval('appender_flush_probe') > 0))");
+  let discarded = bigints "discarded_buffer" in
   let request = B.create () in
   expect D.Cancelled (B.run request owner ~f:(fun facade ->
-    D.with_appender facade "discarded_buffer" ~f:(fun a ->
-      ok (D.append_rows a [[D.Cell (D.Scalar.Int64, Some 9L)]]);
-      ok (B.cancel request); ignore (D.flush_appender a); Ok ())));
+    core (D.Table.with_appender facade discarded ~f:(fun a ->
+      ok (D.Table.append a [D.Args.[9L]]);
+      ok (B.cancel request); ignore (D.Table.flush a); Ok ()))));
   check "appender discarded" (Poly.equal (ok (rows observer "SELECT count(*) FROM discarded_buffer")) [0L]);
   (* Sequences are not rolled back: this distinguishes discard from a flush
      followed by rollback, without an unsafe appender/test FFI entry point. *)
   check "cancelled appender never flushed" (Poly.equal (ok (rows observer "SELECT nextval('appender_flush_probe')")) [1L]);
-  ok (D.with_appender owner "discarded_buffer" ~f:(fun a ->
-    D.append_rows a [[D.Cell (D.Scalar.Int64, Some 10L)]]));
+  ok (D.Table.with_appender owner discarded ~f:(fun a -> D.Table.append a [D.Args.[10L]]));
   check "ordinary appender flush control" (match ok (rows observer "SELECT nextval('appender_flush_probe')") with [n] -> Int64.(n > 2L) | _ -> false);
   let request = B.create () in
   expect D.Cancelled (B.run request owner ~f:(fun facade ->

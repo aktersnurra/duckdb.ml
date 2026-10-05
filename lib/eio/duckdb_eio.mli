@@ -65,12 +65,6 @@ val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row li
 val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, error) result
 
-(** Runs the complete explicit transaction and appender lifecycle on one worker.
-    No appender or transaction owner escapes; [flush] requests an additional
-    explicit flush after all batches. *)
-val ingest : t -> schema:string option -> table:string ->
-  batches:Duckdb.cell list list list -> flush:bool -> (unit, error) result
-
 (** Reads exact local filenames in order and folds owned rows on one worker.
     Path construction, including relative-path resolution, occurs on that worker. *)
 val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->

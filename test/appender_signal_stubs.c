@@ -26,3 +26,8 @@ value wrapped_remove(value w,value s) { select_target(3);return real_remove(w,s)
 value real_appender_close(value,value) __asm__("__real_ml_duckdb_close_appender");
 value wrapped_appender_close(value,value) __asm__("__wrap_ml_duckdb_close_appender");
 value wrapped_appender_close(value a,value flush) { select_target(4);return real_appender_close(a,flush); }
+/* Declared-table appenders query the catalog first; target the native
+   appender creation rather than the first runtime transition after arming. */
+value real_appender_create(value,value,value) __asm__("__real_ml_duckdb_create_appender");
+value wrapped_appender_create(value,value,value) __asm__("__wrap_ml_duckdb_create_appender");
+value wrapped_appender_create(value a,value s,value t) { select_target(5);return real_appender_create(a,s,t); }

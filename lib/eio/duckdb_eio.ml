@@ -277,8 +277,6 @@ let transaction t ~f = submit t ~reuse:false (fun slot request -> W.transaction 
 let query t sql fields ~row = submit t ~reuse:false (fun slot request -> W.query slot request sql fields ~row)
 let fold_rows t sql fields ~row ~init ~f =
   submit t ~reuse:false (fun slot request -> W.fold_rows slot request sql fields ~row ~init ~f)
-let ingest t ~schema ~table ~batches ~flush =
-  submit t ~reuse:false (fun slot request -> W.ingest slot request ~schema ~table ~batches ~flush)
 let parquet_fold_rows t names fields ~row ~init ~f =
   submit t ~reuse:false (fun slot request -> W.parquet_fold_rows slot request names fields ~row ~init ~f)
 let parquet_export t ~query ~destination =

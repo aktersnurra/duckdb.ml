@@ -16,6 +16,11 @@
 /* Independently releasable already-unlocked native boundaries, plus a normal-
    ABI selected pause. No test wait belongs to the noalloc interrupt chain. */
 static _Atomic int gates[96], entries[96], counts[96];
+/* Declared-table appenders run a typed catalog query through the same
+   prepare/bind/execute/fetch/destroy boundaries before the native appender.
+   Deferred gates arm, and those query counters restart, at the native
+   appender creation entry, so they observe the appender's own metadata. */
+static _Atomic bool deferred[96];
 static _Atomic bool selected_gate, selected_entered, fail_start;
 static _Thread_local bool request_worker, controller_expected, drain_wait_armed;
 static _Atomic bool drain_wait_entered, query_only;
@@ -70,6 +75,7 @@ CAMLprim value delivery_reset(value unit) {
   (void)unit;
   for (int i = 0; i < 96; ++i) { atomic_store(&gates[i], 0); atomic_store(&entries[i], 0); }
   for (int i = 0; i < 96; ++i) atomic_store(&counts[i], 0);
+  for (int i = 0; i < 96; ++i) atomic_store(&deferred[i], false);
   atomic_store(&selected_gate, false); atomic_store(&selected_entered, false);
   atomic_store(&appender_auto_row, 0);
   atomic_store(&control_failure, 0); atomic_store(&unlink_failure, 0);
@@ -291,9 +297,26 @@ void __wrap_duckdb_destroy_data_chunk(duckdb_data_chunk *c) {
 
 /* Appender gates share the existing request-worker filter and reservation hook.
    Normal ABI entry gates root ML arguments; engine gates are already unlocked. */
+CAMLprim value delivery_gate_at_create(value id) {
+  atomic_store(&deferred[Int_val(id)], true); return Val_unit;
+}
+/* The reset list must cover every counter the Table catalog query touches
+   (extract/prepare/execute/execute-failure 0-3, bind/clear/value/fetch/chunk/
+   prepare 20-27, bind_varchar 37): appender_delivery.ml's metadata checks read
+   counters 0, 1, 2, 24 and 27 as the appender's own metadata work. Controller
+   and appender counters are kept. Not filtered on request_worker: it assumes
+   one appender creation at a time, as each delivery case runs alone. */
+static void arm_deferred(void) {
+  static const int query[] = {0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 26, 27, 37};
+  bool armed = false;
+  for (int i = 0; i < 96; ++i)
+    if (atomic_exchange(&deferred[i], false)) { atomic_store(&gates[i], 1); armed = true; }
+  if (armed)
+    for (size_t i = 0; i < sizeof query / sizeof query[0]; ++i) atomic_store(&counts[query[i]], 0);
+}
 value __real_ml_duckdb_create_appender(value, value, value);
 value __wrap_ml_duckdb_create_appender(value v, value schema, value table) {
-  CAMLparam3(v, schema, table); query_entry(33);
+  CAMLparam3(v, schema, table); arm_deferred(); query_entry(33);
   value result = __real_ml_duckdb_create_appender(v, schema, table);
   query_entry(34); CAMLreturn(result);
 }

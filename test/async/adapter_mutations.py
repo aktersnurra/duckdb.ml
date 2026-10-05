@@ -104,8 +104,8 @@ try:
             mutate(
                 "explicit_flush_omission",
                 root / "lib/worker/duckdb_worker.ml",
-                "Probe.explicit_flush (); D.flush_appender appender",
-                "if false then (Probe.explicit_flush (); D.flush_appender appender) else Ok ()",
+                "Probe.explicit_flush (); D.Table.flush appender",
+                "if false then (Probe.explicit_flush (); D.Table.flush appender) else Ok ()",
                 "ingest_rollback_and_auto_flush",
                 "explicit flush is adapter initiated before close",
                 instrumented=True,

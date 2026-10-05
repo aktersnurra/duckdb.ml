@@ -15,9 +15,8 @@ let run () =
         ~finally:(fun () -> ok (E.shutdown pool))
         ~f:(fun () ->
           ok (E.execute pool "CREATE TABLE installed(i BIGINT)");
-          let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
-                            ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ] ] ] in
-          ok (E.ingest pool ~schema:None ~table:"installed" ~batches ~flush:true);
+          let installed = Duckdb.Table.(declare "installed" Columns.[ "i", int64 ] ~row:Fn.id) in
+          ok (E.Request.ingest pool installed [ [ Duckdb.Args.[1L]; Duckdb.Args.[2L] ] ] ~flush:true);
           let rows = Duckdb.Fields.[int64] in
           require "installed typed query" (match E.query pool "SELECT i FROM installed ORDER BY i" rows ~row:Fn.id with
             | Ok [1L; 2L] -> true | _ -> false);

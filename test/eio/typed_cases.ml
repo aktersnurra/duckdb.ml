@@ -20,7 +20,8 @@ let until clock name condition =
 let pool ?(connections = 1) sw =
   unwrap (E.create ~sw (unwrap (E.limits ~connections ~queue_capacity:1))
     (unwrap (Duckdb.Config.create Duckdb.Config.Memory)))
-let cell value = Duckdb.Cell (Duckdb.Scalar.Int64, Some value)
+let bigints name = Duckdb.Table.(declare name Columns.[ "i", int64 ] ~row:Fn.id)
+let row value = Duckdb.Args.[value]
 let whole name f =
   let before = P.operations () and native = H.execute_entries 3 in
   let disconnects = H.execute_entries 1 in
@@ -75,26 +76,28 @@ let ingest_semantics () =
   Eio.Switch.run (fun sw ->
     let p = pool sw in
     unwrap (E.execute p "CREATE TABLE typed_ingest(i BIGINT NOT NULL)");
-    let good = [[[cell 1L]]] in
+    let table = Duckdb.Table.(declare "typed_ingest" Columns.[ "i", nullable int64 ] ~row:Fn.id) in
+    let good = [[row (Some 1L)]] in
     let destroys = H.execute_entries 11 in
+    (* Malformed rows are static errors now; NULL in NOT NULL fails at run time. *)
     check "later batch failure rolls back earlier batches"
-      (Result.is_error (E.ingest p ~schema:None ~table:"typed_ingest" ~batches:(good @ [[[]]]) ~flush:false));
+      (Result.is_error (E.Request.ingest p table (good @ [[row None]]) ~flush:false));
     check "failed implicit appender cleanup destroys child" (H.execute_entries 11 = destroys + 1);
     check "rollback leaves no rows" (match E.query p "SELECT i FROM typed_ingest" rows ~row:Fn.id with Ok [] -> true | _ -> false);
     let flushes = H.appender_flushes () and explicit = P.flushes () in
-    unwrap (whole "ingest" (fun () -> E.ingest p ~schema:None ~table:"typed_ingest" ~batches:good ~flush:true));
+    unwrap (whole "ingest" (fun () -> E.Request.ingest p table good ~flush:true));
     check "explicit flush reaches native appender flush" (H.appender_flushes () > 0);
     check "explicit flush plus close flush" (H.appender_flushes () = flushes + 2);
     if P.enabled then check "explicit adapter flush before close" (P.flushes () = explicit + 1);
     check "explicit flush commits row" (match E.query p "SELECT i FROM typed_ingest" rows ~row:Fn.id with Ok [1L] -> true | _ -> false);
     let flushes = H.appender_flushes () and destroys = H.execute_entries 11 in
-    unwrap (E.ingest p ~schema:None ~table:"typed_ingest" ~batches:[List.init 3000 ~f:(fun i -> [cell (Int64.of_int i)])] ~flush:false);
+    unwrap (E.Request.ingest p table [List.init 3000 ~f:(fun i -> row (Some (Int64.of_int i)))] ~flush:false);
     check "implicit close flush and destruction" (H.appender_flushes () = flushes + 1 && H.execute_entries 11 = destroys + 1);
     check "implicit flush committed all rows" (match E.query p "SELECT count(*)::BIGINT FROM typed_ingest" rows ~row:Fn.id with Ok [3001L] -> true | _ -> false);
-    let duplicates = List.init 220000 ~f:(fun _ -> [cell 0L]) in
+    let duplicates = List.init 220000 ~f:(fun _ -> row 0L) in
     unwrap (E.execute p "CREATE TABLE typed_auto(i BIGINT PRIMARY KEY)");
     H.reset ();
-    check "automatic flush reports duplicate before close" (Result.is_error (E.ingest p ~schema:None ~table:"typed_auto" ~batches:[duplicates] ~flush:false));
+    check "automatic flush reports duplicate before close" (Result.is_error (E.Request.ingest p (bigints "typed_auto") [duplicates] ~flush:false));
     Stdlib.Printf.printf "AUTO_CONTROL end_rows=%d errors=%d commits=%d\n%!" (H.appender_end_rows ()) (H.counter 1) (H.counter 2);
     check "automatic flush actual first end-row error at 204800" (H.appender_end_rows () = 204800 && H.counter 1 = 1);
     check "automatic flush no COMMIT" (H.counter 2 = 0);
@@ -155,11 +158,11 @@ let native_cancellation clock =
           ~f:(fun _ () -> ignore (Stdlib.Atomic.fetch_and_add calls 1); Ok (Duckdb.Continue ()))) None);
     List.iter [3, "end_row"; 4, "flush"; 5, "appender_destroy"] ~f:(fun (kind, boundary) ->
       run ("ingest_" ^ boundary) kind 1
-        (fun _ -> E.ingest p ~schema:None ~table:"typed_cancel" ~batches:[[[cell 1L]]; [[cell 2L]]] ~flush:true)
+        (fun _ -> E.Request.ingest p (bigints "typed_cancel") [[row 1L]; [row 2L]] ~flush:true)
         (Some (if kind = 3 then 1 else 2)));
     run "ingest_auto_204800" 3 204800
-      (fun _ -> E.ingest p ~schema:None ~table:"typed_cancel"
-        ~batches:[List.init 204801 ~f:(fun i -> [cell (Int64.of_int i)])] ~flush:false) (Some 204800);
+      (fun _ -> E.Request.ingest p (bigints "typed_cancel")
+        [List.init 204801 ~f:(fun i -> row (Int64.of_int i))] ~flush:false) (Some 204800);
     unwrap (E.shutdown p))
 let native_success clock =
   Eio.Switch.run (fun sw ->
@@ -179,7 +182,7 @@ let native_success clock =
         Result.map (E.fold_rows p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id ~init:0
           ~f:(fun _ count -> Ok (Duckdb.Continue (count + 1)))) ~f:(fun count -> check "held fold successful control" (count = 3000))));
     List.iter [3; 4; 5] ~f:(fun kind ->
-      run ("ingest_success_" ^ Int.to_string kind) kind (fun () -> E.ingest p ~schema:None ~table:"typed_success" ~batches:[[[cell 1L]]] ~flush:true));
+      run ("ingest_success_" ^ Int.to_string kind) kind (fun () -> E.Request.ingest p (bigints "typed_success") [[row 1L]] ~flush:true));
     check "held ingestion controls committed exact rows" (match E.query p "SELECT count(*)::BIGINT FROM typed_success" rows ~row:Fn.id with Ok [3L] -> true | _ -> false);
     unwrap (E.shutdown p))
 let metadata_race clock =
@@ -188,7 +191,7 @@ let metadata_race clock =
     unwrap (E.execute p "CREATE TABLE typed_metadata(i BIGINT)");
     H.reset ();
     let result = held_request clock sw "metadata" 3 1
-      (fun () -> E.ingest p ~schema:None ~table:"typed_metadata" ~batches:[[[cell 1L]]] ~flush:false)
+      (fun () -> E.Request.ingest p (bigints "typed_metadata") [[row 1L]] ~flush:false)
       (fun _ request ->
         unwrap (E.execute p "ALTER TABLE typed_metadata ADD COLUMN changed BIGINT");
         check "metadata committed while original ingestion held" (not (Eio.Promise.is_resolved request))) in

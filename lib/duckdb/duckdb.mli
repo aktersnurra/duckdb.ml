@@ -209,39 +209,6 @@ val chunk_length : chunk @ local -> int
     validates the exact engine type; returned strings/blobs/scalars are owned. *)
 val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, error) result
 
-(** Complete owned rows, not a decoder. Every cell carries its exact witness.
-    [None] is NULL. Entire batches are checked before any native row mutation;
-    NOT NULL columns reject [None] there. *)
-type cell = Cell : 'a Scalar.t * 'a option -> cell
-type appender
-
-(** Opens a bulk-insert appender on [table] inside the transaction.
-    Opens a child in the current database and explicit schema (default main).
-    Holds the transaction snapshot and reserves the connection until close.
-    Other token operations return Busy. Names use their stored catalog spelling.
-    Generated-column tables and metadata larger than one native chunk are rejected.
-    An unclosed manual child at transaction exit forces rollback. *)
-val open_appender : transaction -> ?schema:string -> string -> (appender, error) result
-
-(** One admission/unlock for a complete batch. An engine error (including an
-    automatic flush), interrupted native work, or validation error poisons this
-    appender and the transaction. Ignoring it cannot commit previous rows.
-    Later operations return the first error; close still destroys the handle. *)
-val append_rows : appender -> cell list list -> (unit, error) result
-val flush_appender : appender -> (unit, error) result
-
-(** Flushes on success, then clears/destroys. Never commits the transaction.
-    Poisoned owners discard buffered data; repeated completed close succeeds.
-    Failure after an auto/explicit flush requires outer rollback. *)
-val close_appender : appender -> (unit, error) result
-
-(** The connection scope owns BEGIN/COMMIT/ROLLBACK; the transaction scope
-    never settles its caller. Callback errors/exceptions/effect denial poison
-    settlement even after manual appender close. Unjoined admitted work is
-    drained on exit; a Busy implicit close rolls back rather than committing. *)
-val with_appender : connection -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
-val with_appender_transaction : transaction -> ?schema:string -> string -> f:(appender -> ('a, error) result) -> ('a, error) result
-
 (** Declared parameters or result columns, e.g. [Fields.[int64; nullable string]].
     ['list] identifies the values; ['fn] is the curried row constructor type
     returning ['result]. *)
@@ -357,16 +324,30 @@ module Table : sig
 
   type ('columns, 'row) appender
 
-  (** Opens the core appender on the declared columns and checks them against
-      the catalog before any row is accepted. Scope and poisoning semantics are
-      those of [with_appender]/[with_appender_transaction]. *)
+  (** Opens an appender on the declared columns and checks them against the
+      catalog before any row is accepted. The appender holds the transaction
+      snapshot and reserves the connection until the scope exits; other token
+      operations return Busy. Generated-column or very wide (metadata larger
+      than one native chunk) tables are rejected. The connection scope owns
+      BEGIN/COMMIT/ROLLBACK; the transaction scope never settles its caller.
+      Callback errors/exceptions/effect denial poison settlement. On success
+      the scope flushes and closes; it never commits a transaction it does not
+      own. Unjoined admitted work is drained on exit; a Busy implicit close
+      discards the appender: the connection scope rolls back rather than
+      committing, and the caller's transaction can no longer commit. *)
   val with_appender : connection -> ('columns, 'row) t ->
     f:(('columns, 'row) appender -> ('a, Request.request_error) result) -> ('a, Request.request_error) result
   val with_appender_transaction : transaction -> ('columns, 'row) t ->
     f:(('columns, 'row) appender -> ('a, Request.request_error) result) -> ('a, Request.request_error) result
 
-  (** One validated batch, as [append_rows]. *)
+  (** One admission for a complete batch, validated before any native row
+      mutation. A codec rejection rejects the batch without native work. An
+      engine error (including an automatic flush), interrupted native work, or
+      a [None] in a NOT NULL column poisons this appender and the transaction;
+      later operations return the first error. *)
   val append : ('columns, _) appender -> 'columns Args.t list -> (unit, Request.request_error) result
+
+  (** Explicit flush; an engine error poisons as [append]. *)
   val flush : (_, _) appender -> (unit, Request.request_error) result
 end
 

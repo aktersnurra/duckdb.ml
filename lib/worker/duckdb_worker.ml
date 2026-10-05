@@ -23,8 +23,6 @@ module type S = sig
   val query : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> ('row list, D.error) result
   val fold_rows : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.error) result) -> ('a, D.error) result
-  val ingest : slot -> D.Bridge.request -> schema:string option -> table:string ->
-    batches:D.cell list list list -> flush:bool -> (unit, D.error) result
   val parquet_fold_rows : slot -> D.Bridge.request -> string list -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.error) result) -> ('a, D.error) result
   val parquet_export : slot -> D.Bridge.request -> query:string -> destination:string -> (unit, D.error) result
@@ -94,13 +92,6 @@ module Make (Probe : Probe) = struct
       Result.map_error ~f:core_error
         (D.Request.Connection.fold c (raw sql fields ~row) D.Args.[] ~init
            ~f:(fun v acc -> Result.map_error (in_callback f v acc) ~f:(callback_error (D.Request.Query sql)))))
-  let ingest slot request ~schema ~table ~batches ~flush =
-    let append appender = List.fold_result batches ~init:() ~f:(fun () batch -> D.append_rows appender batch) in
-    bridged slot request (fun c ->
-      D.with_transaction c ~f:(fun transaction ->
-        D.with_appender_transaction transaction ?schema table ~f:(fun appender ->
-          let* () = append appender in
-          if flush then (Probe.explicit_flush (); D.flush_appender appender) else Ok ())))
   let parquet_fold_rows slot request names fields ~row ~init ~f =
     bridged slot request (fun c ->
       let* paths = Result.all (List.map names ~f:D.Parquet.path) in

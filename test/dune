@@ -134,7 +134,8 @@
   -cclib -Wl,--wrap=ml_duckdb_execute_prepared
   -cclib -Wl,--wrap=ml_duckdb_publish_local_file_admitted
   -cclib -Wl,--wrap=ml_duckdb_remove_local_file
-  -cclib -Wl,--wrap=ml_duckdb_close_appender))
+  -cclib -Wl,--wrap=ml_duckdb_close_appender
+  -cclib -Wl,--wrap=ml_duckdb_create_appender))
 (rule (alias runtest) (action (progn
  (run timeout 30 ./%{exe:test_appender_signals.exe} create-enter)
  (run timeout 30 ./%{exe:test_appender_signals.exe} create-leave)

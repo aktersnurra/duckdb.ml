@@ -31,7 +31,7 @@ LD_LIBRARY_PATH="$tmp/native" "$tmp/ffi-consumer/_build/default/main.exe"
 # Build safe package with the FFI source package excluded, using the installation.
 local_dune build -p duckdb --build-dir "$safe_build"
 local_dune install --root "$root" --build-dir "$safe_build" --prefix "$prefix" duckdb
-test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb/META")" = "base duckdb-ffi threads"
+test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb/META")" = "base duckdb-ffi stdlib_stable threads"
 mkdir "$tmp/safe-consumer"
 printf '(lang dune 3.20)\n(name safe_consumer)\n' >"$tmp/safe-consumer/dune-project"
 printf '(executable (name main) (libraries base duckdb))\n' >"$tmp/safe-consumer/dune"

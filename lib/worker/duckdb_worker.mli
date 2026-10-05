@@ -28,8 +28,6 @@ module type S = sig
   val query : slot -> Duckdb.Bridge.request -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, Duckdb.error) result
   val fold_rows : slot -> Duckdb.Bridge.request -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, Duckdb.error) result
-  val ingest : slot -> Duckdb.Bridge.request -> schema:string option -> table:string ->
-    batches:Duckdb.cell list list list -> flush:bool -> (unit, Duckdb.error) result
   val parquet_fold_rows : slot -> Duckdb.Bridge.request -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, Duckdb.error) result
   val parquet_export : slot -> Duckdb.Bridge.request -> query:string -> destination:string -> (unit, Duckdb.error) result

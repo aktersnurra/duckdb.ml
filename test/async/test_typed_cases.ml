@@ -8,19 +8,18 @@ let complete request = ok (A.completion request)
 let close pool = ok (A.shutdown pool) >>| ok
 let rows = Duckdb.Fields.[int64]
 let equal_rows = List.equal Int64.equal
+(* Typed ingestion: the request's own outcome is the payload. *)
+let ingest pool table batches ~flush = ok (A.Request.submit_ingest pool table batches ~flush)
+let failed = function Ok (Ok ()) -> false | _ -> true
+let bigints name = Duckdb.Table.(declare name Columns.[ "i", int64 ] ~row:Fn.id)
 let typed_requests () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
   let pool = match created with Ok pool -> pool | Error _ -> failwith "typed pool creation failed" in
   Monitor.protect ~finally:(fun () -> close pool) (fun () ->
     complete (ok (A.execute pool "CREATE TABLE typed(i BIGINT)")) >>= fun result -> ok result;
-    let batches =
-      [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
-        ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ]
-        ]
-      ; [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 3L) ] ]
-      ] in
-    complete (ok (A.ingest pool ~schema:None ~table:"typed" ~batches ~flush:true)) >>= fun result -> ok result;
+    let batches = [ [ Duckdb.Args.[1L]; Duckdb.Args.[2L] ]; [ Duckdb.Args.[3L] ] ] in
+    complete (ingest pool (bigints "typed") batches ~flush:true) >>= fun result -> ok (ok result);
     complete (ok (A.query pool "SELECT i FROM typed ORDER BY i" rows ~row:Fn.id)) >>= fun result ->
     let result = ok result in
     require "owned typed query" (equal_rows result [1L; 2L; 3L]);
@@ -113,16 +112,18 @@ let ingest_rollback_and_auto_flush () =
   let pool = ok created in
   Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
     complete (ok (A.execute pool "CREATE TABLE batches(i BIGINT NOT NULL)")) >>= fun result -> ok result;
-    let good = [ [ [Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L)] ] ] in
-    let bad = good @ [[[]]] in
-    complete (ok (A.ingest pool ~schema:None ~table:"batches" ~batches:bad ~flush:false)) >>= fun result ->
-    require "later batch failure retained" (Result.is_error result);
+    let batches = Duckdb.Table.(declare "batches" Columns.[ "i", nullable int64 ] ~row:Fn.id) in
+    let good = [ [ Duckdb.Args.[Some 1L] ] ] in
+    (* Malformed rows are static errors now; NULL in NOT NULL fails at run time. *)
+    let bad = good @ [ [ Duckdb.Args.[None] ] ] in
+    complete (ingest pool batches bad ~flush:false) >>= fun result ->
+    require "later batch failure retained" (failed result);
     complete (ok (A.query pool "SELECT i FROM batches" rows ~row:Fn.id)) >>= fun result ->
     require "failed later batch rolled back earlier append" (List.is_empty (ok result));
-    (* This gate is the adapter's explicit D.flush_appender call, not close-time flush. *)
+    (* This gate is the adapter's explicit D.Table.flush call, not close-time flush. *)
     native_hold Appender_flush;
     let commits_before_explicit = commits () in
-    let explicit = ok (A.ingest pool ~schema:None ~table:"batches" ~batches:good ~flush:true) in
+    let explicit = ingest pool batches good ~flush:true in
     wait_scheduler (fun () -> native_entered Appender_flush > 0) >>= fun () ->
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "explicit flush is adapter initiated before close" (Test_support.explicit_flush_observations () = 1);
@@ -144,14 +145,13 @@ let ingest_rollback_and_auto_flush () =
     let automatic_flush_end_row = 100 * 2048 in
     let automatic_flush_control_rows = 220000 in
     complete (ok (A.execute pool "CREATE TABLE automatic_flush(i BIGINT PRIMARY KEY)")) >>= fun result -> ok result;
-    let rows_of value =
-      [List.init automatic_flush_control_rows ~f:(fun _ ->
-        [Duckdb.Cell (Duckdb.Scalar.Int64, Some value)])] in
+    let automatic_flush = bigints "automatic_flush" in
+    let rows_of value = [List.init automatic_flush_control_rows ~f:(fun _ -> Duckdb.Args.[value])] in
     let control_rows_before = appender_end_rows () in
     let control_errors_before = appender_end_row_errors () in
     let control_commits_before = commits () in
-    complete (ok (A.ingest pool ~schema:None ~table:"automatic_flush" ~batches:(rows_of 0L) ~flush:false)) >>= fun result ->
-    require "automatic flush constraint is reported by end-row" (Result.is_error result);
+    complete (ingest pool automatic_flush (rows_of 0L) ~flush:false) >>= fun result ->
+    require "automatic flush constraint is reported by end-row" (failed result);
     let control_rows = appender_end_rows () - control_rows_before in
     let control_errors = appender_end_row_errors () - control_errors_before in
     printf "AUTO_CONTROL vector=2048 observed_end_row=%d end_row_errors=%d commits=%d\n%!"
@@ -166,9 +166,8 @@ let ingest_rollback_and_auto_flush () =
     let commits_before_automatic = commits () in
     select_appender_end_row (cancellation_rows_before + automatic_flush_end_row);
     native_hold Appender_end_row;
-    let automatic_cancel = ok (A.ingest pool ~schema:None ~table:"automatic_flush"
-      ~batches:[List.init automatic_flush_end_row ~f:(fun i ->
-        [Duckdb.Cell (Duckdb.Scalar.Int64, Some (Int64.of_int i))])] ~flush:false) in
+    let automatic_cancel = ingest pool automatic_flush
+      [List.init automatic_flush_end_row ~f:(fun i -> Duckdb.Args.[Int64.of_int i])] ~flush:false in
     wait_scheduler (fun () -> native_entered Appender_end_row > 0) >>= fun () ->
     ignore (ok (A.cancel automatic_cancel)); native_release Appender_end_row;
     complete automatic_cancel >>= fun result ->
@@ -186,7 +185,7 @@ let ingest_rollback_and_auto_flush () =
        before its end-row native call; the ingestion must roll back rather than commit. *)
     native_hold Appender_end_row;
     let commits_before_concurrent = commits () in
-    let concurrent = ok (A.ingest pool ~schema:None ~table:"batches" ~batches:good ~flush:false) in
+    let concurrent = ingest pool batches good ~flush:false in
     wait_scheduler (fun () -> native_entered Appender_end_row > 1) >>= fun () ->
     let alter = ok (A.execute pool "ALTER TABLE batches ADD COLUMN changed BIGINT") in
     complete alter >>= fun result -> ok result;
@@ -194,15 +193,14 @@ let ingest_rollback_and_auto_flush () =
        append order while the first is held at its real end-row boundary. *)
     native_release Appender_end_row;
     complete concurrent >>= fun result ->
-    require "concurrent metadata invalidates appender transaction" (Result.is_error result);
+    require "concurrent metadata invalidates appender transaction" (failed result);
     require "concurrent metadata ingestion suppresses COMMIT" (commits () = commits_before_concurrent);
     let commits_before_success = commits () in
-    let many = List.init 2048 ~f:(fun i ->
-      [[ Duckdb.Cell (Duckdb.Scalar.Int64, Some (Int64.of_int i))
-       ; Duckdb.Cell (Duckdb.Scalar.Int64, None)
-       ]]) in
+    let changed = Duckdb.Table.(declare "batches" Columns.[ "i", nullable int64; "changed", nullable int64 ]
+      ~row:(fun i changed -> i, changed)) in
+    let many = List.init 2048 ~f:(fun i -> [ Duckdb.Args.[Some (Int64.of_int i); None] ]) in
     let admissions = dispatch_count () in
-    complete (ok (A.ingest pool ~schema:None ~table:"batches" ~batches:many ~flush:false)) >>= fun result -> ok result;
+    complete (ingest pool changed many ~flush:false) >>= fun result -> ok (ok result);
     require "automatic end-row reached sufficient rows" (appender_end_rows () >= 2050);
     require "automatic-flush ingestion commits" (commits () = commits_before_success + 1);
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
@@ -249,8 +247,7 @@ let heartbeat_and_cancel_ingest () =
   Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
     complete (ok (A.execute pool "CREATE TABLE cancel_ingest(i BIGINT)")) >>= fun result -> ok result;
     native_hold Appender_clear;
-    let batches = [[ [Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L)] ]] in
-    let request = ok (A.ingest pool ~schema:None ~table:"cancel_ingest" ~batches ~flush:false) in
+    let request = ingest pool (bigints "cancel_ingest") [ [ Duckdb.Args.[1L] ] ] ~flush:false in
     wait_scheduler (fun () -> native_entered Appender_clear > 0) >>= fun () ->
     Scheduler.yield () >>= fun () ->
     require "ingest scheduler heartbeat after appender native entry" (not (Deferred.is_determined (complete request)));

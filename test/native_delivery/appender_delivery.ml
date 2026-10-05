@@ -9,6 +9,8 @@ external entered : int -> int = "delivery_entered"
 external count : int -> int = "delivery_count"
 external selected_gate : bool -> unit = "delivery_selected_gate"
 external selected_entered : unit -> bool = "delivery_selected_entered"
+external gate_at_create : int -> unit = "delivery_gate_at_create"
+module T = D.Table
 let check name condition = if not condition then failwith name
 let ok = function Ok x -> x | Error _ -> failwith "Appender expected Ok"
 let cancelled = function Error D.Cancelled -> () | _ -> failwith "Appender expected Cancelled"
@@ -17,7 +19,10 @@ let release () = for i = 1 to 63 do gate i false done; selected_gate false
 let wait id = E.await ~label:("Appender native boundary " ^ Int.to_string id) (fun () -> entered id > 0)
 let wait_count id n = E.await ~label:("Appender count " ^ Int.to_string id) (fun () -> count id >= n)
 let one_controller () = check "Appender sole controller joined" (count 10 = 1 && count 12 = 1)
-let row = [D.Cell (D.Scalar.Int64, Some 1L)]
+let row = D.Args.[1L]
+let app = T.(declare "app" Columns.[ "i", int64 ] ~row:Fn.id)
+let core r = Result.map_error r ~f:(fun (e : D.Request.request_error) ->
+  match e.cause with D.Request.Core e -> e | _ -> failwith "Appender unexpected typed failure")
 (* Raw execute accepts exactly one statement. The sequence does not roll back:
    observing its next value proves no flush, unlike transactional row counts. *)
 let setup owner =
@@ -38,10 +43,12 @@ let metadata ?(view = false) point ~user ~native_error owner =
     ok (D.execute owner "CREATE SEQUENCE app_flush");
     ok (D.execute owner "CREATE VIEW app AS SELECT 1::BIGINT AS i"))
   else setup owner;
-  reset (); gate point true; if user then selected_gate true;
+  (* The table's catalog query runs first; gate the appender's own metadata. *)
+  reset (); gate_at_create point; if user then selected_gate true;
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    let result = D.with_appender c (if native_error && not view then "absent_app" else "app") ~f:(fun _ -> failwith "cancelled appender exposed") in
+    let table = if native_error && not view then T.(declare "absent_app" Columns.[ "i", int64 ] ~row:Fn.id) else app in
+    let result = core (T.with_appender c table ~f:(fun _ -> failwith "cancelled appender exposed")) in
     next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
@@ -66,11 +73,11 @@ let mutation point owner =
   setup owner; reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.with_appender c "app" ~f:(fun a ->
+    core (T.with_appender c app ~f:(fun a ->
       gate point true; if point = 45 then selected_gate true;
-      let result = D.append_rows a [row; row] in
-      cancelled (D.append_rows a [row]); cancelled (D.flush_appender a);
-      result)))
+      let result = T.append a [row; row] in
+      cancelled (core (T.append a [row])); cancelled (core (T.flush a));
+      result))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
       if point = 45 then E.await ~label:"Appender end-row selected" selected_entered;
@@ -88,9 +95,10 @@ let flush ~close ~before owner =
   let request = B.create () in
   let point = if before then 36 else 54 in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.with_appender c "app" ~f:(fun a ->
-      ok (D.append_rows a [row]); gate point true; if not before then selected_gate true;
-      if close then D.close_appender a else D.flush_appender a)))
+    core (T.with_appender c app ~f:(fun a ->
+      ok (T.append a [row]); gate point true; if not before then selected_gate true;
+      (* [close]: the scope's own close flushes, then clears/destroys. *)
+      if close then Ok () else T.flush a))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
       if not before then E.await ~label:"Appender flush selected" selected_entered;
@@ -107,9 +115,10 @@ let cleanup ?destructor ~internal owner =
   let point = if internal then (if destructor = 32 then 31 else 4) else 39 in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
     D.with_transaction c ~f:(fun tx ->
-      (* BEGIN has its own result destruction; arm only after it completes. *)
-      gate point true; gate destructor true; selected_gate true;
-      D.with_appender_transaction tx "app" ~f:(fun _ -> failwith "cancelled create published"))))
+      (* BEGIN has its own result destruction; arm only after it completes,
+         and after the table's catalog query, at the native appender creation. *)
+      gate_at_create point; gate_at_create destructor; selected_gate true;
+      core (T.with_appender_transaction tx app ~f:(fun _ -> failwith "cancelled create published")))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
       if internal then E.await ~label:"Appender internal metadata selection" selected_entered;
@@ -127,7 +136,7 @@ let cleanup ?destructor ~internal owner =
   no_flush owner
 let paired_control owner =
   setup owner; reset ();
-  ok (B.run (B.create ()) owner ~f:(fun c -> D.with_appender c "app" ~f:(fun a -> D.append_rows a [row])));
+  ok (B.run (B.create ()) owner ~f:(fun c -> core (T.with_appender c app ~f:(fun a -> T.append a [row]))));
   one_controller ();
   check "Appender normal close flush paired control" (Int64.(scalar owner "SELECT nextval('app_flush')" > 1L));
   check "Appender normal close commits" (Int64.equal (scalar owner "SELECT count(*) FROM app") 1L)
@@ -136,9 +145,10 @@ let close_cleanup destructor owner =
   setup owner; reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.with_appender c "app" ~f:(fun a ->
-      ok (D.append_rows a [row]); gate 54 true; gate destructor true; selected_gate true;
-      D.close_appender a)))
+    core (T.with_appender c app ~f:(fun a ->
+      (* The scope's own close flushes (54), then clears/destroys. *)
+      ok (T.append a [row]); gate 54 true; gate destructor true; selected_gate true;
+      Ok ()))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 54; ok (B.cancel request); E.await ~label:"Appender close selected" selected_entered;
       gate 54 false;
@@ -156,9 +166,9 @@ let automatic ~running owner =
   let request = B.create () in
   let point = if running then 59 else 61 in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.with_appender c "app" ~f:(fun a ->
+    core (T.with_appender c app ~f:(fun a ->
       gate point true; if not running then selected_gate true;
-      D.append_rows a (List.init 220000 ~f:(fun _ -> row)))))
+      T.append a (List.init 220000 ~f:(fun _ -> row))))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request);
       if running then wait_count 4 1 else E.await ~label:"Appender automatic selected" selected_entered;
@@ -180,11 +190,11 @@ let native_failure ~automatic owner =
   let request = B.create () in
   let point = if automatic then 60 else 54 in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    let result = D.with_appender c "app" ~f:(fun a ->
+    let result = core (T.with_appender c app ~f:(fun a ->
       gate point true; selected_gate true;
-      let result = if automatic then D.append_rows a (List.init 220000 ~f:(fun _ -> row))
-        else (ok (D.append_rows a [row]); D.flush_appender a) in
-      cancelled (D.append_rows a [row]); result) in
+      let result = if automatic then T.append a (List.init 220000 ~f:(fun _ -> row))
+        else (ok (T.append a [row]); T.flush a) in
+      cancelled (core (T.append a [row])); result)) in
     next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; ok (B.cancel request); E.await ~label:"Appender native error selected" selected_entered;
@@ -201,8 +211,8 @@ let caught_callback owner =
   setup owner; reset ();
   let request = B.create () in
   cancelled (B.run request owner ~f:(fun c ->
-    (match E.capture (fun () -> D.with_appender c "app" ~f:(fun a ->
-      ok (D.append_rows a [row]); appender_callback_failure_frame request)) with
+    (match E.capture (fun () -> T.with_appender c app ~f:(fun a ->
+      ok (T.append a [row]); appender_callback_failure_frame request)) with
      | E.Raised failure ->
        check "Appender caught exception identity" (phys_equal failure.exception_ Appender_callback_failure);
        check "Appender caught exception source backtrace" (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string failure.backtrace) ~substring:"appender_callback_failure_frame")
@@ -214,10 +224,10 @@ let batch_and_transaction ~cancel owner =
   let request = B.create () in
   let result = B.run request owner ~f:(fun c ->
     let result = D.with_transaction c ~f:(fun tx ->
-      D.with_appender_transaction tx "app" ~f:(fun a ->
-        ok (D.append_rows a [row]);
-        if cancel then (ok (B.cancel request); cancelled (D.append_rows a [row]); Ok ())
-        else D.append_rows a [row])) in
+      core (T.with_appender_transaction tx app ~f:(fun a ->
+        ok (T.append a [row]);
+        if cancel then (ok (B.cancel request); cancelled (core (T.append a [row])); Ok ())
+        else T.append a [row]))) in
     if cancel then (cancelled result; next_suppressed c; Ok ()) else result) in
   if cancel then (cancelled result; no_flush owner) else (
     ok result; check "Appender transaction variant two batches commit" (Int64.equal (scalar owner "SELECT count(*) FROM app") 2L));
@@ -227,9 +237,10 @@ let rollback ~cancel owner =
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
     gate 11 true;
-    let result = D.with_appender c "app" ~f:(fun a ->
-      ok (D.append_rows a [row]); Error D.Unsupported_statement) in
-    check "Appender rollback primary error retained" (match result with Error D.Unsupported_statement -> true | _ -> false);
+    let primary = { D.Request.context = D.Request.Transaction; cause = D.Request.Core D.Unsupported_statement } in
+    let result = T.with_appender c app ~f:(fun a ->
+      ok (T.append a [row]); Error primary) in
+    check "Appender rollback primary error retained" (match result with Error e -> phys_equal e primary | _ -> false);
     if cancel then (next_suppressed c; Ok ()) else D.execute c "SELECT 42"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 11;
@@ -244,10 +255,9 @@ let cleanup_admitted destructor owner =
   setup owner; reset ();
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun c ->
-    D.with_appender c "app" ~f:(fun a ->
-      ok (D.append_rows a [row]); gate destructor true;
-      let result = D.close_appender a in
-      cancelled result; check "Appender closed alias revoked" (match D.append_rows a [row] with Error D.Closed -> true | _ -> false); result)))
+    (* The scope's own close clears/destroys (destructor) after its flush. *)
+    core (T.with_appender c app ~f:(fun a ->
+      ok (T.append a [row]); gate destructor true; Ok ()))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait destructor;
       check "Appender ordinary destruction retains controller" (count 11 = 0);
@@ -257,8 +267,9 @@ let cleanup_admitted destructor owner =
 let temporal_value owner =
   ok (D.execute owner "CREATE TABLE app(i TIMESTAMP_S)"); reset ();
   let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c -> D.with_appender c "app" ~f:(fun a ->
-    gate 26 true; D.append_rows a [[D.Cell (D.Scalar.Timestamp_s, Some 1L)]])))
+  let app = T.(declare "app" Columns.[ "i", of_scalar D.Scalar.Timestamp_s ] ~row:Fn.id) in
+  E.with_worker (fun () -> B.run request owner ~f:(fun c -> core (T.with_appender c app ~f:(fun a ->
+    gate 26 true; T.append a [D.Args.[1L]]))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 26; ok (B.cancel request); gate 26 false; cancelled (join ());
       check "Appender temporary value second admission suppresses append" (count 30 = 0 && count 26 = 1);
@@ -268,10 +279,11 @@ let running_flush ~close owner =
   ok (D.execute owner "CREATE TABLE app(i BIGINT CHECK(length(sha256(repeat(i::VARCHAR, 100))) > 0))");
   reset ();
   let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c -> D.with_appender c "app" ~f:(fun a ->
-    ok (D.append_rows a (List.init 200000 ~f:(fun _ -> row)));
+  E.with_worker (fun () -> B.run request owner ~f:(fun c -> core (T.with_appender c app ~f:(fun a ->
+    ok (T.append a (List.init 200000 ~f:(fun _ -> row)));
     gate 53 true;
-    if close then D.close_appender a else D.flush_appender a)))
+    (* [close]: the scope's own close flushes (53), then clears/destroys. *)
+    if close then Ok () else T.flush a))))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 53; ok (B.cancel request); wait_count 4 1;
       let before = count 4 in gate 53 false;

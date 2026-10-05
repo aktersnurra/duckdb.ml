@@ -198,10 +198,14 @@ let heartbeat_typed seam ~cancel () = with_pool (fun p ->
           if phys_equal seam Chunk then native_hold Chunk;
           Ok (Duckdb.Stop ())))
     | Appender_clear | Appender_destroy ->
-      Duckdb.with_appender_transaction tx "t" ~f:(fun appender ->
-        ok (Duckdb.append_rows appender [[Duckdb.Cell (Duckdb.Scalar.Int64, Some 42L)]]);
-        native_hold seam;
-        if cancel then Error (Duckdb.Native_error "intentional rollback") else Ok ())
+      let t = Duckdb.Table.(declare "t" Columns.[ "i", int64 ] ~row:Fn.id) in
+      Result.map_error ~f:(fun (e : Duckdb.Request.request_error) ->
+        match e.cause with Duckdb.Request.Core e -> e | _ -> failwith "unexpected typed failure")
+        (Duckdb.Table.with_appender_transaction tx t ~f:(fun appender ->
+          ok (Duckdb.Table.append appender [Duckdb.Args.[42L]]);
+          native_hold seam;
+          if cancel then Error { Duckdb.Request.context = Transaction; cause = Core (Duckdb.Native_error "intentional rollback") }
+          else Ok ()))
     | _ -> assert false)) in
   heartbeat (complete r) seam >>= fun () ->
   if cancel then ignore (ok (A.cancel r));

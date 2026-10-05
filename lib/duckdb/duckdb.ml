@@ -2,7 +2,6 @@ module Scalar = Scalar
 module Codec = Codec
 include Resource
 include Query
-include Appender
 module Fields = Fields
 module Args = Args
 module Request = Request

@@ -50,9 +50,12 @@ let run () =
           | Error error -> failwith ("Eio shutdown: " ^ error_name error))
         ~f:(fun () ->
           require "create example table" (E.execute pool "CREATE TABLE example(i BIGINT)");
-          let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 40L) ]
-                            ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ] ] ] in
-          require "ingest owned rows" (E.ingest pool ~schema:None ~table:"example" ~batches ~flush:true);
+          let table = Duckdb.Table.(declare "example" Columns.[ "i", int64 ] ~row:Fn.id) in
+          (match E.Request.ingest pool table [ [ Duckdb.Args.[40L]; Duckdb.Args.[2L] ] ] ~flush:true with
+           | Ok () -> ()
+           | Error (E.Request.Adapter error) -> failwith ("ingest owned rows: " ^ error_name error)
+           | Error (E.Request.Request e) ->
+             failwith ("ingest owned rows: request error in " ^ Duckdb.Request.query_of_context e.context));
           let rows = Duckdb.Fields.[int64] in
           (match E.query pool "SELECT i FROM example ORDER BY i" rows ~row:Fn.id with
            | Ok values when List.length values = 2 -> ()

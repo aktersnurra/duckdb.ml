@@ -9,6 +9,9 @@ let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let await f = let rec loop n = if f () then () else if n = 0 then failwith "handshake timeout" else (Thread.delay 0.001;loop (n-1)) in loop 10000
 let spawn f = let result = ref None in let t = Thread.create (fun () -> result := Some (try Ok (f ()) with e -> Error e)) () in t,result
 let join (t,r) = Thread.join t; match !r with Some (Ok x) -> x | Some (Error e) -> raise e | None -> failwith "worker missing outcome"
+let core r = Result.map_error r ~f:(fun (e : Request.request_error) ->
+  match e.cause with Request.Core e -> e | _ -> Native_error "unexpected typed failure")
+let bigints = Table.(declare "a" Columns.[ "x", int64 ] ~row:Fn.id)
 let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
   fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
     match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
@@ -17,10 +20,10 @@ let race explicit point =
     ok (execute c "CREATE TABLE a(x BIGINT)"); arm point;
     let worker = spawn (fun () ->
       let callback a =
-        ok (append_rows a [[Cell (Int64, Some 9007199254740993L)]]);
-        if point = 3 then flush_appender a else Ok () in
-      if explicit then with_transaction c ~f:(fun tx -> with_appender_transaction tx "a" ~f:callback)
-      else with_appender c "a" ~f:callback) in
+        ok (core (Table.append a [Args.[9007199254740993L]]));
+        if point = 3 then Table.flush a else Ok () in
+      if explicit then with_transaction c ~f:(fun tx -> core (Table.with_appender_transaction tx bigints ~f:callback))
+      else core (Table.with_appender c bigints ~f:callback)) in
     Exn.protect ~finally:release ~f:(fun () ->
       await (fun () -> entered () = point);
       assert (match execute c "SELECT 1" with Error Busy -> true | _ -> false);
@@ -33,38 +36,58 @@ let race explicit point =
        otherwise the original connection remains clean and reusable. *)
     (match execute c "SELECT 1" with Ok () | Error Closed -> () | _ -> failwith "unclean connection");
     ok (execute other "SELECT 1"); arm 0; Ok ()))))
-let gc_and_drain () =
+(* The scope's implicit close meets the still-admitted append and returns Busy;
+   the drained child is then discarded, so nothing commits. [explicit] runs it
+   in a caller-owned transaction, which can then no longer commit. *)
+let gc_and_drain ~explicit =
   ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
     ok (execute c "CREATE TABLE a(x VARCHAR)");
     let append_worker = ref None in
     let inspector = ref None in
-    let outcome = with_appender c "a" ~f:(fun a ->
+    let table = Table.(declare "a" Columns.[ "x", string ] ~row:Fn.id) in
+    let body a =
       arm 2;
-      append_worker := Some (spawn (fun () -> append_rows a [[Cell (String, Some (String.make 200000 'x' ^ "\000end"))]]));
+      append_worker := Some (spawn (fun () -> core (Table.append a [Args.[String.make 200000 'x' ^ "\000end"]])));
       await (fun () -> entered () = 2);
-      assert (match close_appender a with Error Busy -> true | _ -> false);
-      assert (match append_rows a [] with Error Busy -> true | _ -> false);
+      assert (match core (Table.flush a) with Error Busy -> true | _ -> false);
+      assert (match core (Table.append a []) with Error Busy -> true | _ -> false);
       inspector := Some (spawn (fun () ->
         Exn.protect ~finally:release ~f:(fun () -> await waiting; Stdlib.Gc.compact ())));
-      Ok ()) in
+      Ok () in
+    let busy_close = function Error { Request.cause = Request.Core Busy; _ } -> true | _ -> false in
+    let settled =
+      if explicit then (
+        let inner = ref None in
+        let settled = with_transaction c ~f:(fun tx ->
+          inner := Some (Table.with_appender_transaction tx table ~f:body); Ok ()) in
+        assert (busy_close (Option.value_exn !inner));
+        settled)
+      else (
+        let outcome = Table.with_appender c table ~f:body in
+        assert (busy_close outcome);
+        Ok ()) in
     ignore (join (Option.value_exn !inspector));
     ok (join (Option.value_exn !append_worker));
-    assert (Result.is_error outcome); arm 0;
+    if explicit then assert (Result.is_error settled);
+    arm 0;
     let n = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
   match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e))) in
     assert (Int64.equal n 0L); Ok ())))
 let () =
   List.iter [false;true] ~f:(fun explicit -> List.iter [1;2;3;4;5] ~f:(race explicit));
-  gc_and_drain ();
+  gc_and_drain ~explicit:false; gc_and_drain ~explicit:true;
   ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
     ok (execute c "CREATE TABLE a(x BIGINT UNIQUE)");
     let original = ref None in
-    let outcome = with_appender c "a" ~f:(fun a ->
-      ok (append_rows a [[Cell (Int64, Some 1L)];[Cell (Int64, Some 1L)]]);
-      match flush_appender a with
+    let outcome = Table.with_appender c bigints ~f:(fun a ->
+      ok (core (Table.append a [Args.[1L]; Args.[1L]]));
+      match Table.flush a with
       | Ok () -> failwith "constraint did not fail"
       | Error e -> original := Some e; fail_rollback (); Error e) in
-    assert (match outcome with Error (Rollback_failed (primary, Native_error _)) -> phys_equal primary (Option.value_exn !original) | _ -> false);
+    assert (match outcome with
+      | Error { cause = Request.Rollback_failed { primary; rollback = Native_error _ }; _ } ->
+        phys_equal primary (Option.value_exn !original)
+      | _ -> false);
     assert (match execute c "SELECT 1" with Error Closed -> true | _ -> false);
     with_connection db ~f:(fun observer -> assert (Int64.equal (count observer) 0L); Ok ()))));
   assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0);

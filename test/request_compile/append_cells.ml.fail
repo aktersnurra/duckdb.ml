@@ -1,5 +1,0 @@
-module D = Duckdb
-let t = D.Table.(declare "t" Columns.[ "value", int64; "note", string ] ~row:(fun v n -> (v, n)))
-let u = D.Table.(declare "u" Columns.[ "flag", bool ] ~row:(fun b -> b))
-let f c = D.Table.with_appender c t ~f:(fun a ->
-  D.Table.append a [[D.Cell (D.Scalar.Int64, Some 1L)]])
