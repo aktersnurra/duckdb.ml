@@ -1511,82 +1511,75 @@ type transaction = [ `Transaction ] session
 
 (Abstract in the `.mli`: `type database`, `type _ session`.)
 
-Errors cross scopes through *lifted* internals. A callback returns
-`Error.t`, but the internal scope functions return `Error.cause`. Each
-internal scope used by the facade gets a variant that is polymorphic in the
-callback's error type, following the existing `with_transaction_lifted`.
-Add these to `resource.mli` and `query.mli`:
+Errors cross scopes through the `'e lifting` GADT that Task 9 introduced in
+`resource.mli` (the private error module is `Failure`; the public alias is
+`Duckdb.Error`):
 
 ```ocaml
-(* resource.mli *)
-val with_database_lifted : lift:(Error.cause -> 'e) -> Config.t -> f:(database -> ('a, 'e) result) -> ('a, 'e) result
-val with_connection_lifted : lift:(Error.cause -> 'e) -> database -> f:(connection -> ('a, 'e) result) -> ('a, 'e) result
-(* query.mli *)
-val with_prepared_lifted : lift:(Error.cause -> 'e) -> connection -> transaction option -> string ->
-  f:(prepared -> ('a, 'e) result) -> ('a, 'e) result
-val fold_prepared_lifted : lift:(Error.cause -> 'e) -> prepared -> init:'a ->
-  f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
+type 'e lifting = Cause : Failure.context -> error lifting | Flat : Failure.context -> Failure.t lifting
 ```
 
-Implement each by applying `Result.map_error ~f:lift` to every internal
-result, and passing the callback's result through unchanged. The existing
-cause-typed function becomes `…_lifted ~lift:Fn.id`. `Resource.scope`'s
-`result_error` ref, which pairs a cleanup exception with the primary error,
-becomes polymorphic in the same way; it only stores the value.
-
-The facade in `duckdb.ml`:
+`Flat ctx` is used by every facade scope: the callback returns `Error.t`,
+which passes through unchanged; the scope's own causes, rollback failures
+and cleanup pairings get `ctx`. The internal scopes already have the right
+shapes (from Task 9):
 
 ```ocaml
-let in_context context cause = { Error.context; cause }
-let with_database config ~f =
-  Resource.with_database_lifted ~lift:(in_context Database) config ~f:(fun database -> f { Session.database })
+val Resource.with_database : Config.t -> f:(database -> ('a, Failure.t) result) -> ('a, Failure.t) result
+val Resource.with_connection : database -> f:(connection -> ('a, Failure.t) result) -> ('a, Failure.t) result
+val Resource.with_transaction : lifting:'e lifting -> connection -> f:(transaction -> ('a, 'e) result) -> ('a, 'e) result
+val Query.with_prepared : lifting:'e lifting -> connection -> string -> f:(prepared -> ('a, 'e) result) -> ('a, 'e) result
+val Query.with_prepared_transaction : lifting:'e lifting -> transaction -> string -> f:(prepared -> ('a, 'e) result) -> ('a, 'e) result
+val Query.fold_chunks : lifting:'e lifting -> query_result -> init:'a -> f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
+val Resource.Bridge.run : request -> connection -> f:(connection -> ('a, Failure.t) result) -> ('a, Failure.t) result
+```
+
+Add one internal function to `query.ml{,i}`, executing and folding inside the
+lease (replacing the public `execute_prepared` + `fold_chunks` pair):
+
+```ocaml
+val fold_prepared : lifting:'e lifting -> prepared -> init:'a ->
+  f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
+let fold_prepared ~lifting p ~init ~f =
+  match execute_prepared p with
+  | Error cause -> Error (Resource.lift lifting cause)
+  | Ok r -> fold_chunks ~lifting r ~init ~f
+```
+
+`execute_prepared`, `fold_chunks` and `close_result` stay internal to `Query`.
+`Query.sql` and `Query.chunk_sql` already exist (Task 9).
+
+The facade in `duckdb.ml` (`module Error = Failure` is already there):
+
+```ocaml
+let with_database config ~f = Resource.with_database config ~f:(fun database -> f { Session.database })
 let with_connection (db : database) ~f =
-  Resource.with_connection_lifted ~lift:(in_context Connection) db.database ~f:(fun c -> f (Session.Connection c))
+  Resource.with_connection db.database ~f:(fun c -> f (Session.Connection c))
 let with_transaction (Session.Connection c : connection) ~f =
-  Request.with_transaction_on c ~f:(fun tx -> f (Session.Transaction tx))
-let execute s sql = Error.within (Query sql) (match Session.within s with
+  Resource.with_transaction ~lifting:(Flat Transaction) c ~f:(fun tx -> f (Session.Transaction tx))
+let execute s sql = Failure.within (Query sql) (match Session.within s with
   | None -> Resource.execute (Session.connection s) sql
   | Some tx -> Resource.execute_transaction tx sql)
 
 module Statement = struct
   type prepared = Query.prepared
   type chunk = Query.chunk
-  let in_statement p = in_context (Query (Query.sql p))
-  let with_prepared s sql ~f =
-    Query.with_prepared_lifted ~lift:(in_context (Query sql)) (Session.connection s) (Session.within s) sql ~f
-  let parameter_count p = Result.map_error (Query.parameter_count p) ~f:(in_statement p)
-  let bind p i codec v = Result.map_error (Query.bind p i codec v) ~f:(in_statement p)
-  let reset p = Result.map_error (Query.reset p) ~f:(in_statement p)
-  let fold_chunks p ~init ~f = Query.fold_prepared_lifted ~lift:(in_statement p) p ~init ~f
+  let in_statement p r = Failure.within (Query (Query.sql p)) r
+  let with_prepared s sql ~f = match Session.within s with
+    | None -> Query.with_prepared ~lifting:(Flat (Query sql)) (Session.connection s) sql ~f
+    | Some tx -> Query.with_prepared_transaction ~lifting:(Flat (Query sql)) tx sql ~f
+  let parameter_count p = in_statement p (Query.parameter_count p)
+  let bind p i codec v = in_statement p (Query.bind p i codec v)
+  let reset p = in_statement p (Query.reset p)
+  let fold_chunks p ~init ~f = Query.fold_prepared ~lifting:(Flat (Query (Query.sql p))) p ~init ~f
   let chunk_length = Query.chunk_length
   let column chunk ~column ~row codec =
-    Result.map_error (Query.column chunk ~column ~row codec) ~f:(in_context (Query (Borrowed_chunk.sql chunk)))
+    Failure.within (Query (Query.chunk_sql chunk)) (Query.column chunk ~column ~row codec)
 end
 ```
 
-`Request.with_transaction_on` is today's `Request.Connection.with_transaction`
-(lifted, with `transaction_outcome`), renamed. `Query.with_prepared_lifted`
-dispatches on its `transaction option` argument: `None` prepares on the
-connection, `Some tx` prepares in the transaction. This replaces the two
-functions `with_prepared`/`with_prepared_transaction`.
-
-`Query.fold_prepared_lifted` (new, in `query.ml`) executes and folds inside the
-lease, replacing the public `execute_prepared` + `fold_chunks` pair:
-
-```ocaml
-let fold_prepared_lifted ~lift p ~init ~f =
-  match execute_prepared p with
-  | Error cause -> Error (lift cause)
-  | Ok r -> fold_chunks_lifted ~lift r ~init ~f
-```
-
-`fold_chunks_lifted` is today's `fold_chunks` (via `fold_internal`), made
-polymorphic in the callback's error type as described above.
-`execute_prepared` and `fold_chunks` stay internal to `Query`.
-
-`Query.sql p = p.sql` is added. `Borrowed_chunk.t` becomes
-`{ native : F.prepared; sql : string }` with `val sql : t @ local -> string`.
-`fold_internal` builds it as `stack_ { Borrowed_chunk.native; sql = r.prepared.sql }`.
+(Match the existing facade's actual helper names where they differ; keep the
+contexts Task 9 established and its context tests green.)
 
 `Request.Session` (in `request.ml`): rename `run_shape` to dispatch on a
 session:
@@ -1602,7 +1595,8 @@ module Session = struct
   let find_opt s r args = run s Find_opt r args
   let collect s r args = run s Collect r args
   let fold s r args ~init ~f = run s (Fold { init; f }) r args
-  let with_transaction (Session.Connection c) ~f = with_transaction_on c ~f:(fun tx -> f (Session.Transaction tx))
+  let with_transaction (Session.Connection c) ~f =
+    Resource.with_transaction ~lifting:(Flat Transaction) c ~f:(fun tx -> f (Session.Transaction tx))
   let ingest (Session.Connection c) table batches ~flush = (* today's Connection.ingest body on c *)
 end
 ```
@@ -1612,17 +1606,18 @@ end
 `Session`, `Session` must not depend on `Request`; it does not.
 
 `Table.with_appender s table ~f` dispatches the same way: a connection wraps
-`with_transaction_on`, a transaction uses today's
-`with_appender_transaction`. `Table.with_appender_transaction` is deleted.
+`Resource.with_transaction ~lifting:(Flat Transaction)` around today's
+`with_appender_transaction`; a transaction uses `with_appender_transaction`
+directly. `Table.with_appender_transaction` is deleted from the public API.
 
 `Owned` (in `duckdb.ml`):
 
 ```ocaml
 module Owned = struct
-  let open_database config = Error.within Database (Result.map (Resource.open_database config) ~f:(fun database -> { Session.database }))
-  let close_database (db : database) = Error.within Database (Resource.close_database db.database)
-  let connect (db : database) = Error.within Connection (Result.map (Resource.connect db.database) ~f:(fun c -> Session.Connection c))
-  let close_connection (Session.Connection c : connection) = Error.within Connection (Resource.close_connection c)
+  let open_database config = Failure.within Database (Result.map (Resource.open_database config) ~f:(fun database -> { Session.database }))
+  let close_database (db : database) = Failure.within Database (Resource.close_database db.database)
+  let connect (db : database) = Failure.within Connection (Result.map (Resource.connect db.database) ~f:(fun c -> Session.Connection c))
+  let close_connection (Session.Connection c : connection) = Failure.within Connection (Resource.close_connection c)
   type ('row, 'out) shape = ('row, 'out) Request.shape =
     | Exec : (unit, unit) shape
     | Find : ('row, 'row) shape
@@ -1651,12 +1646,11 @@ and unwrap it with `Session.connection`.
 
 ```ocaml
 let run request (Session.Connection c : connection) ~f =
-  Resource.Bridge.run_lifted ~lift:(fun cause -> { Error.context = Connection; cause }) request c
-    ~f:(fun facade -> f (Session.Connection facade))
+  Resource.Bridge.run request c ~f:(fun facade -> f (Session.Connection facade))
 ```
 
-`Resource.Bridge.run_lifted` is today's `run`, made polymorphic in the
-callback's error type in the same way as `with_connection_lifted`.
+(`Resource.Bridge.run` already reports bridge failures in `Connection` and
+passes the callback's `Error.t` through.)
 
 - [ ] **Step 5: Migrate the worker and adapters**
 
@@ -1953,17 +1947,17 @@ internally), and add:
     if not (List.is_empty k.bound) && List.for_all k.bound ~f:(fun s ->
       request_locked s (fun () -> match s.request_state with Finished -> true | _ -> false))
     then Settled else Pending)
-  let run_lifted ~lift (h : handle) c ~f = run_state ~lift h.state c ~f
+  let run (h : handle) c ~f = run_state h.state c ~f
 ```
 
-Here `run_state` is the Task 10 `run_lifted` on a single state, renamed. `consume` keeps its runtime
+Here `run_state` is today's `Bridge.run` on a single state, renamed. `consume` keeps its runtime
 `Closed`/`Busy` check: it is unreachable through the unique public API but
 remains the backstop for `Owned` misuse. `create` becomes private. `cancel`
 and `settlement` on a single state are deleted; the canceller versions
 replace them.
 
 `resource.mli` exposes `canceller`, `handle` (abstract), `request`,
-`cancel`, `settlement` and `run_lifted : lift:(Error.cause -> 'e) -> handle -> connection -> f:(connection -> ('a, 'e) result) -> ('a, 'e) result`.
+`cancel`, `settlement` and `run : handle -> connection -> f:(connection -> ('a, Failure.t) result) -> ('a, Failure.t) result`.
 
 In `duckdb.mli`/`duckdb.ml`, the facade:
 
@@ -1977,7 +1971,7 @@ module Bridge = struct
   let cancel = Resource.Bridge.cancel
   let settlement = Resource.Bridge.settlement
   let run (r @ unique) (Session.Connection c : connection) ~f =
-    Resource.Bridge.run_lifted ~lift:(fun cause -> { Error.context = Connection; cause }) r.cell c
+    Resource.Bridge.run r.cell c
       ~f:(fun facade -> f (Session.Connection facade))
 end
 ```
