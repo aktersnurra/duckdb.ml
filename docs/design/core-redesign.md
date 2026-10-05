@@ -66,6 +66,21 @@ Probes run before the plan (P1–P3), all done:
   `-extension-universe beta`, with literals `1.5s`, `1s` and `1S`. An
   out-of-range literal (`200s : int8`) is a compile error: "Integer literal
   exceeds the range of representable integers of type int8".
+- **P4 (done, found while planning).** Every scope runs its callback through
+  the effect barrier (`Resource.scope`, then `without_escaping_effects`, then
+  `Stdlib.Effect.Deep.try_with`). `try_with` and `Sys.with_async_exns` take
+  plain (global, many) closures. Scope callbacks therefore cannot be
+  `@ local` or `@ once` without an unsafe mode cast, which `AGENTS.md`
+  forbids. Callbacks stay ordinary closures that *receive* `@ local` handles.
+  Consequence: no scope callback can capture any local handle. The
+  busy-capture rule covers every scope, including `with_connection` and
+  `with_prepared`. Combining two scoped handles needs `Owned`, or folding
+  into an OCaml value.
+- **P5 (done).** A GADT whose payloads carry `@@ global`
+  (`Connection : inner @@ global -> [ \`Connection ] session`) lets a
+  function matching a `@ local` session store the global payload. Storing,
+  returning or capturing the session itself is rejected ("is \"local\" to the
+  parent region").
 
 ## 1. Handles and modes
 
@@ -120,8 +135,8 @@ val with_connection : database @ local -> f:(connection @ local -> ('a, Error.t)
 `close_prepared`, `open_appender` and `close_appender` leave the public
 synchronous API. A handle cannot end up in a result, a ref or a global
 closure, so use-after-close cannot be written. The runtime alias-revocation
-machinery is no longer needed for synchronous code. `@ once` lets callers
-pass closures that capture unique values.
+machinery is no longer needed for synchronous code. Callbacks are ordinary
+closures (P4); they receive local handles but cannot capture one.
 
 `query_result`, `execute_prepared` and `close_result` are removed.
 `Statement.fold_chunks : prepared @ local -> init:'a -> f:(chunk @ local -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result`
@@ -141,8 +156,8 @@ compile errors:
 
 The cost: those callbacks cannot capture any local value, such as a second
 connection. Moving data between two databases means folding into an OCaml
-value first. Scope callbacks that are not busy periods (`with_connection`,
-`with_prepared`) accept local closures.
+value first. Because of P4 this applies to every scope callback, not only
+busy periods.
 
 ### Uniqueness where ownership really transfers
 
@@ -290,13 +305,18 @@ exception Cleanup_exception of Error.t * exn
 
 - **Removed causes, now impossible:**
   - `Live_children`: handles are scoped and folds stay inside the lease.
-  - `Unbound_parameter` and `Index`: arguments are typed `Args`, and
-    low-level binding goes through codecs.
   - `Range`: values are exact `int8`/`int16`/`float32` (P3).
 - **Kept but narrowed:** `Closed` and `Busy` are reachable only through
   `Owned`/the adapters, overlapping `Bridge` use, and the capture cases that
   the global-callback rule does not cover. Each function documents which
   causes it can return.
+- `Unbound_parameter` and `Index` are kept, reachable only through
+  `Statement` (positional `bind`, chunk `column` access). Typed requests
+  cannot produce them.
+- Where `Live_children` used to be returned, `Owned.close_database` with open
+  connections and `Bridge.run` on an owner with live statements return `Busy`.
+- `Bridge.cancel : canceller -> unit`: with no failure mode left, it returns
+  `unit`.
 - **Type names, not native ids:** `actual` fields carry a type name instead
   of a raw native id.
 - **One exception:** `Rollback_exception` and the two `Cleanup_exception`s
