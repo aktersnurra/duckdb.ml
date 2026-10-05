@@ -4,8 +4,8 @@ let submit pool = A.transaction pool ~f:(fun tx ->
   Result.map (Duckdb.execute_transaction tx "select 42") ~f:(fun () -> "owned"))
 let observe request = A.completion request
 let typed pool =
-  let row = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
-  A.query pool "SELECT 1::BIGINT" row
+  let row = Duckdb.Fields.[int64] in
+  A.query pool "SELECT 1::BIGINT" row ~row:Fn.id
 let lifecycle limits config =
   Async.Deferred.bind (A.create limits config) ~f:(function
     | Error _ -> Async.Deferred.unit

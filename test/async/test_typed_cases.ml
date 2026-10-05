@@ -6,8 +6,8 @@ let config () = ok (Duckdb.Config.create Memory)
 let limits () = ok (A.Limits.create ~connections:1 ~queue_capacity:2)
 let complete request = ok (A.completion request)
 let close pool = ok (A.shutdown pool) >>| ok
-let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
-let equal_rows = List.equal (fun (left, ()) (right, ()) -> Int64.equal left right)
+let rows = Duckdb.Fields.[int64]
+let equal_rows = List.equal Int64.equal
 let typed_requests () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
@@ -21,11 +21,11 @@ let typed_requests () =
       ; [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 3L) ] ]
       ] in
     complete (ok (A.ingest pool ~schema:None ~table:"typed" ~batches ~flush:true)) >>= fun result -> ok result;
-    complete (ok (A.query pool "SELECT i FROM typed ORDER BY i" rows)) >>= fun result ->
+    complete (ok (A.query pool "SELECT i FROM typed ORDER BY i" rows ~row:Fn.id)) >>= fun result ->
     let result = ok result in
-    require "owned typed query" (equal_rows result [1L, (); 2L, (); 3L, ()]);
-    complete (ok (A.fold_rows pool "SELECT i FROM typed ORDER BY i" rows ~init:0L
-      ~f:(fun (value, ()) total -> Ok (if Int64.equal value 2L then Duckdb.Stop (Int64.(total + value)) else Duckdb.Continue Int64.(total + value)))))
+    require "owned typed query" (equal_rows result [1L; 2L; 3L]);
+    complete (ok (A.fold_rows pool "SELECT i FROM typed ORDER BY i" rows ~row:Fn.id ~init:0L
+      ~f:(fun value total -> Ok (if Int64.equal value 2L then Duckdb.Stop (Int64.(total + value)) else Duckdb.Continue Int64.(total + value)))))
     >>= fun result ->
     let result = ok result in
     require "owned typed fold Stop" (Int64.equal result 3L);
@@ -33,38 +33,38 @@ let typed_requests () =
     Stdlib.Sys.remove path;
     Monitor.protect ~finally:(fun () -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path; return ()) (fun () ->
       complete (ok (A.parquet_export pool ~query:"SELECT i FROM typed ORDER BY i" ~destination:path)) >>= fun result -> ok result;
-      complete (ok (A.parquet_fold_rows pool [path] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values)))))
+      complete (ok (A.parquet_fold_rows pool [path] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values)))))
       >>| fun result ->
-      require "worker-local Parquet read/export" (equal_rows (List.rev (ok result)) [1L, (); 2L, (); 3L, ()]))
+      require "worker-local Parquet read/export" (equal_rows (List.rev (ok result)) [1L; 2L; 3L]))
     >>= fun () ->
     close pool >>= fun () ->
     require "typed post-shutdown admission rejected"
-      (match A.query pool "SELECT 1::BIGINT" rows with Error A.Pool_shutdown -> true | _ -> false);
+      (match A.query pool "SELECT 1::BIGINT" rows ~row:Fn.id with Error A.Pool_shutdown -> true | _ -> false);
     return ())
-let wide_rows =
-  Duckdb.Row.(Column (Duckdb.Codec.Values.int8,
-    Column (Duckdb.Codec.Values.(nullable string),
-      Column (Duckdb.Codec.Values.int64, Empty))))
+let wide_rows = Duckdb.Fields.[int8; nullable string; int64]
 let wide_and_multichunk () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
   let pool = ok created in
   Monitor.protect ~finally:(fun () -> close pool) (fun () ->
-    complete (ok (A.query pool "SELECT 127::TINYINT, NULL::VARCHAR, 9223372036854775807::BIGINT" wide_rows)) >>= fun result ->
+    complete (ok (A.query pool "SELECT 127::TINYINT, NULL::VARCHAR, 9223372036854775807::BIGINT" wide_rows ~row:(fun a b c -> a, b, c))) >>= fun result ->
     let result = ok result in
-    require "NULL and width owned roundtrip" (match result with [127s, (None, (value, ()))] -> Int64.equal value Int64.max_value | _ -> false);
+    require "NULL and width owned roundtrip" (match result with [127s, None, value] -> Int64.equal value Int64.max_value | _ -> false);
     let admissions = dispatch_count () in
-    complete (ok (A.query pool "SELECT i::BIGINT FROM range(3000) t(i)" rows)) >>| fun result ->
-    require "multi-chunk ordered owned query" (List.equal (fun (value, ()) (expected, ()) -> Int64.equal value expected) (ok result) (List.init 3000 ~f:(fun i -> Int64.of_int i, ())));
+    complete (ok (A.query pool "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id)) >>= fun result ->
+    require "multi-chunk ordered owned query" (equal_rows (ok result) (List.init 3000 ~f:Int64.of_int));
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
-      require "multi-chunk query has one request offload plus close/replacement" (dispatch_count () = admissions + 3))
+      require "multi-chunk query has one request offload plus close/replacement" (dispatch_count () = admissions + 3);
+    complete (ok (A.query pool "SELECT ?::BIGINT" rows ~row:Fn.id)) >>| fun result ->
+    require "unbound parameter keeps its core error"
+      (match result with Error (A.Expected (A.Core (Duckdb.Data_error (Duckdb.Scalar.Unbound_parameter 1)))) -> true | _ -> false))
 let fold_callbacks () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
   let pool = ok created in
   Monitor.protect ~finally:(fun () -> close pool) (fun () ->
-    let stopped = ok (A.fold_rows pool "SELECT i::BIGINT FROM range(4) t(i)" rows ~init:0L
-      ~f:(fun (value, ()) total ->
+    let stopped = ok (A.fold_rows pool "SELECT i::BIGINT FROM range(4) t(i)" rows ~row:Fn.id ~init:0L
+      ~f:(fun value total ->
         require "fold callback reentrancy rejected" (match A.execute pool "select 1" with Error A.Reentrant_call -> true | _ -> false);
         Ok (if Int64.equal value 2L then Duckdb.Stop Int64.(total + value) else Duckdb.Continue Int64.(total + value)))) in
     complete stopped >>= fun result ->
@@ -72,12 +72,12 @@ let fold_callbacks () =
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "worker callback TLS clear after Stop" (callback_cleanup_observations () = 3 && callback_cleanup_is_clear ());
     let admissions = dispatch_count () in
-    complete (ok (A.fold_rows pool "SELECT i::BIGINT FROM range(4) t(i)" rows ~init:[]
+    complete (ok (A.fold_rows pool "SELECT i::BIGINT FROM range(4) t(i)" rows ~row:Fn.id ~init:[]
       ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
-    require "fold owned accumulation" (equal_rows (List.rev (ok result)) [0L, (); 1L, (); 2L, (); 3L, ()]);
+    require "fold owned accumulation" (equal_rows (List.rev (ok result)) [0L; 1L; 2L; 3L]);
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "fold has one whole-request offload plus bounded maintenance" (dispatch_count () = admissions + 3);
-    let failed = ok (A.fold_rows pool "SELECT 1::BIGINT" rows ~init:()
+    let failed = ok (A.fold_rows pool "SELECT 1::BIGINT" rows ~row:Fn.id ~init:()
       ~f:(fun _ () -> Error (Duckdb.Native_error "fold callback error"))) in
     complete failed >>= fun result ->
     require "fold callback error retained" (match result with Error (A.Expected (A.Core (Duckdb.Native_error _))) -> true | _ -> false);
@@ -93,7 +93,7 @@ let fold_callbacks () =
        | None -> ());
       Ivar.fill_if_empty notified (Monitor.extract_exn error));
     let raised = Option.value_exn (Scheduler.within_v ~monitor:observer (fun () ->
-      ok (A.fold_rows pool "SELECT 1::BIGINT" rows ~init:()
+      ok (A.fold_rows pool "SELECT 1::BIGINT" rows ~row:Fn.id ~init:()
         ~f:(fun _ () -> raise Exit)))) in
     raised_ref := Some raised;
     complete raised >>= fun result ->
@@ -117,7 +117,7 @@ let ingest_rollback_and_auto_flush () =
     let bad = good @ [[[]]] in
     complete (ok (A.ingest pool ~schema:None ~table:"batches" ~batches:bad ~flush:false)) >>= fun result ->
     require "later batch failure retained" (Result.is_error result);
-    complete (ok (A.query pool "SELECT i FROM batches" rows)) >>= fun result ->
+    complete (ok (A.query pool "SELECT i FROM batches" rows ~row:Fn.id)) >>= fun result ->
     require "failed later batch rolled back earlier append" (List.is_empty (ok result));
     (* This gate is the adapter's explicit D.flush_appender call, not close-time flush. *)
     native_hold Appender_flush;
@@ -134,7 +134,7 @@ let ingest_rollback_and_auto_flush () =
     complete explicit >>= fun result ->
     require "explicit flush cancellation settled" (match result with Error (A.Expected A.Cancelled) | Error (A.During_cancellation _) -> true | _ -> false);
     require "explicit flush cancellation suppresses COMMIT" (commits () = commits_before_explicit);
-    complete (ok (A.query pool "SELECT i FROM batches" rows)) >>= fun result ->
+    complete (ok (A.query pool "SELECT i FROM batches" rows ~row:Fn.id)) >>= fun result ->
     require "explicit flush cancellation leaves no committed rows" (List.is_empty (ok result));
     (* Pinned appender.cpp:393-418,760-781 follows FlushChunk -> ShouldFlush ->
        FlushInternal. The duplicate-primary-key control independently observes
@@ -159,7 +159,7 @@ let ingest_rollback_and_auto_flush () =
     require "automatic flush first collection boundary" (control_rows = automatic_flush_end_row);
     require "automatic flush constraint returned from end-row" (control_errors = 1);
     require "automatic flush control suppresses COMMIT" (commits () = control_commits_before);
-    complete (ok (A.query pool "SELECT i FROM automatic_flush" rows)) >>= fun result ->
+    complete (ok (A.query pool "SELECT i FROM automatic_flush" rows ~row:Fn.id)) >>= fun result ->
     require "automatic flush control has no committed rows" (List.is_empty (ok result));
     let cancellation_rows_before = appender_end_rows () in
     let disconnects_before_automatic = disconnects () in
@@ -180,7 +180,7 @@ let ingest_rollback_and_auto_flush () =
     printf "AUTO_CANCEL selected_end_row=%d end_rows=%d commits=%d disconnect_delta=%d\n%!"
       automatic_flush_end_row (appender_end_rows () - cancellation_rows_before)
       (commits () - commits_before_automatic) (disconnects () - disconnects_before_automatic);
-    complete (ok (A.query pool "SELECT i FROM automatic_flush" rows)) >>= fun result ->
+    complete (ok (A.query pool "SELECT i FROM automatic_flush" rows ~row:Fn.id)) >>= fun result ->
     require "automatic flush cancellation leaves no committed rows" (List.is_empty (ok result));
     (* Independent pool slot changes metadata while the first transaction is paused
        before its end-row native call; the ingestion must roll back rather than commit. *)
@@ -207,14 +207,14 @@ let ingest_rollback_and_auto_flush () =
     require "automatic-flush ingestion commits" (commits () = commits_before_success + 1);
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "ingest has one whole-request offload plus bounded maintenance" (dispatch_count () = admissions + 3);
-    complete (ok (A.query pool "SELECT count(*)::BIGINT FROM batches" rows)) >>| fun result ->
-    require "automatic flush committed every row" (equal_rows (ok result) [2048L, ()]))
+    complete (ok (A.query pool "SELECT count(*)::BIGINT FROM batches" rows ~row:Fn.id)) >>| fun result ->
+    require "automatic flush committed every row" (equal_rows (ok result) [2048L]))
 let heartbeat_and_cancel_query () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
   let pool = ok created in
   native_hold Execute;
-  let request = ok (A.query pool "SELECT sum(sin(i::DOUBLE))::BIGINT FROM range(10000000000) t(i)" rows) in
+  let request = ok (A.query pool "SELECT sum(sin(i::DOUBLE))::BIGINT FROM range(10000000000) t(i)" rows ~row:Fn.id) in
   Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
     wait_scheduler (fun () -> native_entered Execute > 0) >>= fun () ->
     Scheduler.yield () >>= fun () ->
@@ -230,7 +230,7 @@ let heartbeat_and_cancel_fold () =
   A.create (limits ()) (config ()) >>= fun created ->
   let pool = ok created in
   native_hold Execute;
-  let request = ok (A.fold_rows pool "SELECT sum(sin(i::DOUBLE))::BIGINT FROM range(10000000000) t(i)" rows ~init:0L
+  let request = ok (A.fold_rows pool "SELECT sum(sin(i::DOUBLE))::BIGINT FROM range(10000000000) t(i)" rows ~row:Fn.id ~init:0L
     ~f:(fun _ total -> Ok (Duckdb.Continue total))) in
   Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
     wait_scheduler (fun () -> native_entered Execute > 0) >>= fun () ->
@@ -291,27 +291,27 @@ let parquet_read_failures_and_callbacks () =
     Monitor.protect ~finally:(fun () -> close pool) (fun () ->
       complete (ok (A.parquet_export pool ~query:"SELECT 1::BIGINT AS i" ~destination:first)) >>= fun result -> ok result;
       complete (ok (A.parquet_export pool ~query:"SELECT 'wrong'::VARCHAR AS i" ~destination:second)) >>= fun result -> ok result;
-      complete (ok (A.parquet_fold_rows pool [first; second] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
+      complete (ok (A.parquet_fold_rows pool [first; second] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
       require "later Parquet schema mismatch retained" (match result with Error (A.Expected (A.Core (Duckdb.Data_error _))) -> true | _ -> false);
       In_thread.run (fun () ->
         let channel = Stdlib.open_out_bin corrupt in
         Stdlib.output_string channel "not parquet";
         Stdlib.close_out channel) >>= fun () ->
-      complete (ok (A.parquet_fold_rows pool [corrupt] rows ~init:() ~f:(fun _ () -> Ok (Duckdb.Continue ())))) >>= fun result ->
+      complete (ok (A.parquet_fold_rows pool [corrupt] rows ~row:Fn.id ~init:() ~f:(fun _ () -> Ok (Duckdb.Continue ())))) >>= fun result ->
       require "corrupt Parquet retained" (Result.is_error result);
-      complete (ok (A.parquet_fold_rows pool [first] rows ~init:0L
-        ~f:(fun (value, ()) _ ->
+      complete (ok (A.parquet_fold_rows pool [first] rows ~row:Fn.id ~init:0L
+        ~f:(fun value _ ->
           require "Parquet callback reentrancy rejected" (match A.execute pool "select 1" with Error A.Reentrant_call -> true | _ -> false);
           Ok (Duckdb.Stop value)))) >>= fun result ->
       require "Parquet fold Stop" (Int64.equal (ok result) 1L);
-      let callback_error = ok (A.parquet_fold_rows pool [first] rows ~init:()
+      let callback_error = ok (A.parquet_fold_rows pool [first] rows ~row:Fn.id ~init:()
         ~f:(fun _ () -> Error (Duckdb.Native_error "Parquet callback error"))) in
       complete callback_error >>= fun result ->
       require "Parquet callback error retained" (match result with Error (A.Expected (A.Core (Duckdb.Native_error _))) -> true | _ -> false);
       let observer = Monitor.create () and notified = Ivar.create () in
       Monitor.detach_and_iter_errors observer ~f:(fun error -> Ivar.fill_if_empty notified (Monitor.extract_exn error));
       let callback_exception = Option.value_exn (Scheduler.within_v ~monitor:observer (fun () ->
-        ok (A.parquet_fold_rows pool [first] rows ~init:() ~f:parquet_callback_failure_frame))) in
+        ok (A.parquet_fold_rows pool [first] rows ~row:Fn.id ~init:() ~f:parquet_callback_failure_frame))) in
       complete callback_exception >>= fun result ->
       require "Parquet callback exception retained with raw callback backtrace" (match result with
         | Error (A.Raised { exception_ = Exit; backtrace }) ->
@@ -333,7 +333,7 @@ let parquet_cancel_between_files () =
       select_parquet_first true;
       native_hold Prepared_return;
       let admissions = dispatch_count () in
-      let request = ok (A.parquet_fold_rows pool [first; second] rows ~init:()
+      let request = ok (A.parquet_fold_rows pool [first; second] rows ~row:Fn.id ~init:()
         ~f:(fun _ () -> Stdlib.Atomic.incr callbacks; Ok (Duckdb.Continue ()))) in
       wait_scheduler (fun () -> native_entered Prepared_return > 0) >>= fun () ->
       require "first Parquet file callback drained" (Stdlib.Atomic.get callbacks = 1);
@@ -345,8 +345,8 @@ let parquet_cancel_between_files () =
       require "cancellation between Parquet files settled" (match result with Error (A.Expected A.Cancelled) | Error (A.During_cancellation _) -> true | _ -> false);
       require "second Parquet file never executed" (parquet_second_exec () = 0 && Stdlib.Atomic.get callbacks = 1);
       require "Parquet cancellation retired slot" (disconnects () = 3 && connects () = 4);
-      complete (ok (A.parquet_fold_rows pool [first; second] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>| fun result ->
-      require "successful multi-file Parquet control" (equal_rows (List.rev (ok result)) [1L, (); 2L, ()]);
+      complete (ok (A.parquet_fold_rows pool [first; second] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>| fun result ->
+      require "successful multi-file Parquet control" (equal_rows (List.rev (ok result)) [1L; 2L]);
       if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
         require "multi-file Parquet uses whole request offloads" (dispatch_count () = admissions + 6))))
 let parquet_read_heartbeat () =
@@ -358,12 +358,12 @@ let parquet_read_heartbeat () =
     Monitor.protect ~finally:(fun () -> native_release_all (); close pool) (fun () ->
       complete (ok (A.parquet_export pool ~query:"SELECT 4::BIGINT AS i" ~destination:source)) >>= fun result -> ok result;
       native_hold Execute;
-      let request = ok (A.parquet_fold_rows pool [source] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values)))) in
+      let request = ok (A.parquet_fold_rows pool [source] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values)))) in
       wait_scheduler (fun () -> native_entered Execute > 0) >>= fun () ->
       Scheduler.yield () >>= fun () ->
       require "Parquet read scheduler heartbeat after native entry" (not (Deferred.is_determined (complete request)));
       native_release Execute;
-      complete request >>| fun result -> require "Parquet read after heartbeat" (equal_rows (List.rev (ok result)) [4L, ()])))
+      complete request >>| fun result -> require "Parquet read after heartbeat" (equal_rows (List.rev (ok result)) [4L])))
 let parquet_export_cancellation_and_publication () =
   reset (-1);
   let directory = parquet_directory () in
@@ -409,21 +409,21 @@ let parquet_export_cancellation_and_publication () =
         require "export cancellation after publication settled" (match result with Error (A.Expected A.Cancelled) | Error (A.During_cancellation _) -> true | _ -> false);
         require "published final from cancelled request survives" (Stdlib.Sys.file_exists destination);
         require "published cancellation removes only its owned temporary" (temporary_unlinks () = unlinks_before_cancel + 1 && List.is_empty (owned_temporaries directory));
-        complete (ok (A.parquet_fold_rows pool [destination] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
-        require "cancelled request's published final contents survive" (equal_rows (List.rev (ok result)) [7L, ()]);
+        complete (ok (A.parquet_fold_rows pool [destination] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
+        require "cancelled request's published final contents survive" (equal_rows (List.rev (ok result)) [7L]);
         (* A failed publication has a distinct owned temporary and keeps its preexisting final. *)
         complete (ok (A.parquet_export pool ~query:"SELECT 8::BIGINT AS i" ~destination:failure)) >>= fun result -> ok result;
         let unlinks_before_failure = temporary_unlinks () in
         complete (ok (A.parquet_export pool ~query:"SELECT 9::BIGINT AS i" ~destination:failure)) >>= fun result ->
         require "export publication failure retained" (Result.is_error result);
         require "export failure removes its owned temporary" (temporary_unlinks () = unlinks_before_failure + 1 && List.is_empty (owned_temporaries directory));
-        complete (ok (A.parquet_fold_rows pool [failure] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
-        require "export failure preserves preexisting final" (equal_rows (List.rev (ok result)) [8L, ()]);
+        complete (ok (A.parquet_fold_rows pool [failure] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
+        require "export failure preserves preexisting final" (equal_rows (List.rev (ok result)) [8L]);
         let completed = ok (A.parquet_export pool ~query:"SELECT 10::BIGINT AS i" ~destination:terminal) in
         complete completed >>= fun result -> ok result;
         require "post-terminal export reports Already_finished" (match A.cancel completed with Ok A.Already_finished -> true | _ -> false);
-        complete (ok (A.parquet_fold_rows pool [terminal] rows ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>| fun result ->
-        require "post-terminal control preserves its own output" (equal_rows (List.rev (ok result)) [10L, ()]))))
+        complete (ok (A.parquet_fold_rows pool [terminal] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>| fun result ->
+        require "post-terminal control preserves its own output" (equal_rows (List.rev (ok result)) [10L]))))
 let cases =
   [ "typed_requests", typed_requests
   ; "wide_and_multichunk", wide_and_multichunk

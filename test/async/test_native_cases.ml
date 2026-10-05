@@ -146,8 +146,10 @@ let replacement_stop () = with_pool (fun p ->
 let count_rows tx =
   Duckdb.with_prepared_transaction tx "select count(*)::BIGINT from t" ~f:(fun prepared ->
     Result.bind (Duckdb.execute_prepared prepared) ~f:(fun result ->
-      Duckdb.fold_rows result Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) ~init:0L
-        ~f:(fun (count, ()) _ -> Ok (Duckdb.Stop count))))
+      Duckdb.fold_chunks result ~init:0L ~f:(fun chunk _ ->
+        match Duckdb.column chunk ~column:0 ~row:0 Duckdb.Codec.Values.int64 with
+        | Ok count -> Ok (Duckdb.Stop count)
+        | Error e -> Error e)))
 let transaction_exclusion () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
@@ -251,8 +253,10 @@ let result_error () = with_pool (fun p ->
   let r = ok (A.transaction p ~f:(fun tx ->
     Duckdb.with_prepared_transaction tx "select 'text'::VARCHAR" ~f:(fun prepared ->
       Result.bind (Duckdb.execute_prepared prepared) ~f:(fun result ->
-        Duckdb.fold_rows result Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) ~init:()
-          ~f:(fun _ () -> Ok (Duckdb.Stop ())))))) in
+        Duckdb.fold_chunks result ~init:() ~f:(fun chunk () ->
+          match Duckdb.column chunk ~column:0 ~row:0 Duckdb.Codec.Values.int64 with
+          | Ok _ -> Ok (Duckdb.Stop ())
+          | Error e -> Error e))))) in
   complete r >>| fun result ->
   require "typed result error retained" (match result with Error (A.Expected (A.Core (Duckdb.Data_error _))) -> true | _ -> false);
   require "typed result failed lease retired" (connects () = 2))

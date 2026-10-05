@@ -62,14 +62,16 @@ val execute : t -> string -> (unit request, error) result
     compile but is not awaited and does not extend the transaction lifetime. *)
 val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.error) result) -> ('a request, error) result
 
-(** Materializes owned rows on the leased worker. The decoder and SQL are
-    evaluated entirely in one offload; no result/chunk owner crosses Async. *)
-val query : t -> string -> 'row Duckdb.Row.t -> ('row list request, error) result
+(** Materializes owned rows on the leased worker. The fields, row constructor and SQL are
+    evaluated entirely in one offload; no result/chunk owner crosses Async.
+    The [~row] constructor also runs on the worker and, like [f], must not touch
+    Async. *)
+val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list request, error) result
 
 (** Folds owned decoded rows synchronously on the leased worker. The callback
     must not access Async or retain adapter/core owners. [Stop] is successful
     early termination and returns its accumulator. *)
-val fold_rows : t -> string -> 'row Duckdb.Row.t -> init:'a ->
+val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) ->
   ('a request, error) result
 
@@ -82,7 +84,7 @@ val ingest : t -> schema:string option -> table:string ->
 
 (** Reads exact local filenames in order and folds owned decoded rows on one
     worker. Paths are constructed/resolved only after worker entry. *)
-val parquet_fold_rows : t -> string list -> 'row Duckdb.Row.t -> init:'a ->
+val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) ->
   ('a request, error) result
 

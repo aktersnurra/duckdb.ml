@@ -9,7 +9,9 @@ let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let await f = let rec loop n = if f () then () else if n = 0 then failwith "handshake timeout" else (Thread.delay 0.001;loop (n-1)) in loop 10000
 let spawn f = let result = ref None in let t = Thread.create (fun () -> result := Some (try Ok (f ()) with e -> Error e)) () in t,result
 let join (t,r) = Thread.join t; match !r with Some (Ok x) -> x | Some (Error e) -> raise e | None -> failwith "worker missing outcome"
-let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_rows (ok (execute_prepared p)) Row.(Column (Codec.Values.int64,Empty)) ~init:0L ~f:(fun (n,()) _ -> Ok (Stop n))))
+let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
+  fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
+    match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
 let race explicit point =
   ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c -> with_connection db ~f:(fun other ->
     ok (execute c "CREATE TABLE a(x BIGINT)"); arm point;
@@ -48,7 +50,8 @@ let gc_and_drain () =
     ignore (join (Option.value_exn !inspector));
     ok (join (Option.value_exn !append_worker));
     assert (Result.is_error outcome); arm 0;
-    let n = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_rows (ok (execute_prepared p)) Row.(Column (Codec.Values.int64,Empty)) ~init:0L ~f:(fun (n,()) _ -> Ok (Stop n)))) in
+    let n = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
+  match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e))) in
     assert (Int64.equal n 0L); Ok ())))
 let () =
   List.iter [false;true] ~f:(fun explicit -> List.iter [1;2;3;4;5] ~f:(race explicit));

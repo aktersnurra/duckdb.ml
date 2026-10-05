@@ -62,17 +62,6 @@ module Codec : sig
   end
 end
 
-module Row : sig
-
-(** An owned decoder describes every result column in order. Schema types are
-    checked before fetching (even for an empty result). Non-null codecs reject
-    NULL per row; DuckDB arbitrary-SQL metadata does not prove non-nullability. *)
-type _ t =
-  | Empty : unit t
-  | Column : ('a, _) Codec.t * 'b t -> ('a * 'b) t
-  | Map : 'a t * ('a -> 'b) -> 'b t
-end
-
 (** Synchronous resources. No scheduler is started. Handles may move between
     system threads, but are not portable/domain-safe. Busy operations fail fast.
     Scoped callbacks cannot send effects to an outer handler. *)
@@ -219,8 +208,6 @@ val chunk_length : chunk @ local -> int
 (** Zero-based column and row indices, checked before reading. Each access
     validates the exact engine type; returned strings/blobs/scalars are owned. *)
 val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, error) result
-val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
-
 
 (** Complete owned rows, not a decoder. Every cell carries its exact witness.
     [None] is NULL. Entire batches are checked before any native row mutation;
@@ -323,7 +310,7 @@ module Request : sig
     val collect : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
       ('row list, error) result future
 
-    (** [f] runs synchronously on the owning thread or worker, as [fold_rows]. *)
+    (** [f] runs synchronously on the owning thread or worker. *)
     val fold : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
       init:'a -> f:('row -> 'a -> ('a step, request_error) result) -> ('a, error) result future
   end
@@ -392,12 +379,6 @@ type path
     No URI, remote storage, glob expansion or extension management. *)
 val path : string -> (path, error) result
 
-(** Reads each file separately in order, using the exact Row schema for each
-    materialized result, including empty files. No cross-file type coercion.
-    An empty list is rejected. Earlier callbacks may run before a later file
-    fails; external file mutation is not a transaction snapshot guarantee. *)
-val fold_rows : connection -> path list -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
-
 (** Writes the rows of [query] to a new Parquet file at the destination.
     Export one engine-parsed, parameter-free SELECT through DuckDB COPY.
     Omit a trailing statement terminator. The destination is a bound parameter.
@@ -411,8 +392,12 @@ val fold_rows : connection -> path list -> 'row Row.t -> init:'a -> f:('row -> '
     crash durability, hostile-directory or atomic transaction/file claim. *)
 val export : connection -> query:string -> path -> (unit, error) result
 
-(** Folds each file as [fold_rows] does, decoding through [Fields] or a declared
-    table's columns (matched by position; the file must have exactly those). *)
+(** Reads each file separately in order, validating the schema of each (even an
+    empty file) before fetching; no cross-file type coercion. Decodes through
+    [Fields] or a declared table's columns (matched by position; the file must
+    have exactly those). An empty list is rejected. Earlier callbacks may run
+    before a later file fails; external file mutation is not a transaction
+    snapshot guarantee. *)
 val fold : connection -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a step, Request.request_error) result) -> ('a, Request.request_error) result
 val fold_table : connection -> path list -> (_, 'row) Table.t -> init:'a ->

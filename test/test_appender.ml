@@ -7,17 +7,19 @@ let rec message = function
   | _ -> "structured error"
 let ok = function Ok x -> x | Error e -> failwith (message e)
 let error = function Error e -> e | Ok _ -> failwith "expected error"
-let rows c sql decoder = ok (with_prepared c sql ~f:(fun p ->
-  fold_rows (ok (execute_prepared p)) decoder ~init:[] ~f:(fun row xs -> Ok (Continue (row::xs))))) |> List.rev
-let count c table = match rows c ("SELECT count(*) FROM " ^ table) Row.(Column (Codec.Values.int64,Empty)) with
-  | [(n,())] -> n | _ -> assert false
+let rows c sql fields ~row =
+  match Request.Connection.collect c (Request.many ~oneshot:true Fields.[] fields ~row sql) Args.[] with
+  | Ok values -> values
+  | Error _ -> failwith "typed request failed"
+let count c table = match rows c ("SELECT count(*) FROM " ^ table) Fields.[int64] ~row:Fn.id with
+  | [n] -> n | _ -> assert false
 let scalar : type a. connection -> a Scalar.t -> a list -> (a -> a -> bool) -> unit = fun c typ values equal ->
   ok (execute c ("CREATE OR REPLACE TABLE scalars(x " ^ Scalar.name typ ^ ")"));
   let expected = None :: List.map values ~f:Option.some in
   ok (with_appender c "scalars" ~f:(fun a ->
     ok (append_rows a []);
     append_rows a (List.map expected ~f:(fun x -> [Cell (typ,x)]))));
-  let actual = rows c "SELECT x FROM scalars ORDER BY rowid" Row.(Column (Codec.Values.(nullable (of_scalar typ)),Empty)) |> List.map ~f:fst in
+  let actual = rows c "SELECT x FROM scalars ORDER BY rowid" Fields.[nullable (of_scalar typ)] ~row:Fn.id in
   assert (List.equal (Option.equal equal) actual expected)
 let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b)
 let floats32 a b = floats (Stdlib_stable.Float32.to_float a) (Stdlib_stable.Float32.to_float b)
@@ -42,8 +44,8 @@ let metadata_boundaries c =
     ok (with_appender c table ~f:(fun a -> append_rows a [valid_row physical]));
     assert (Int64.equal (count c table) 1L);
     assert (match rows c ("SELECT c0,c1 FROM " ^ table)
-      Row.(Column (Codec.Values.int64,Column (Codec.Values.(nullable int64),Empty))) with
-      | [(42L,(None,()))] -> true | _ -> false);
+      Fields.[int64; nullable int64] ~row:(fun a b -> a, b) with
+      | [42L, None] -> true | _ -> false);
     let result = with_appender c table ~f:(fun a ->
       ok (append_rows a [valid_row physical]);
       let null_row = List.init physical ~f:(fun _ -> Cell (Int64, None)) in

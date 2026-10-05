@@ -30,14 +30,18 @@ let check (config : config) totals =
      not (Int64.equal totals.checksum target.checksum)
   then failwith "benchmark result mismatch"
 
-let row_decoder =
-  Duckdb.Row.Column
-    (Duckdb.Codec.Values.int64,
-     Duckdb.Row.Column (Duckdb.Codec.Values.(nullable int64), Duckdb.Row.Empty))
+(* Typed requests execute and decode in one call, so the owned time includes
+   execute and has no separate execute time. The request is built once, so
+   warmups populate the statement cache and later samples exclude prepare. *)
+let owned_request sql =
+  Duckdb.Request.many Duckdb.Fields.[] Duckdb.Fields.[int64; nullable int64]
+    ~row:(fun required nullable -> required, nullable) sql
 
-let owned result =
-  fail_error (Duckdb.fold_rows result row_decoder ~init:{ rows = 0; nulls = 0; checksum = 0L }
-                ~f:(fun (required, (nullable, ())) totals -> Ok (Duckdb.Continue (add required nullable totals))))
+let owned connection request () =
+  match Duckdb.Request.Connection.fold connection request Duckdb.Args.[] ~init:{ rows = 0; nulls = 0; checksum = 0L }
+    ~f:(fun (required, nullable) totals -> Ok (Duckdb.Continue (add required nullable totals))) with
+  | Ok totals -> totals
+  | Error e -> failwith ("benchmark owned request failed in " ^ Duckdb.Request.query_of_context e.context)
 
 let borrowed result =
   fail_error (Duckdb.fold_chunks result ~init:{ rows = 0; nulls = 0; checksum = 0L }
@@ -62,10 +66,10 @@ let delta before after =
   ; major_collections = after.Stdlib.Gc.major_collections - before.Stdlib.Gc.major_collections
   ; compactions = after.Stdlib.Gc.compactions - before.Stdlib.Gc.compactions }
 
-let measure (config : config) prepared process =
+let measure (config : config) execute process =
   Stdlib.Gc.full_major ();
   let execute_start = Mtime_clock.elapsed_ns () in
-  let result = fail_error (Duckdb.execute_prepared prepared) in
+  let result = execute () in
   let execute_ns = Stdlib.Int64.sub (Mtime_clock.elapsed_ns ()) execute_start in
   let before = Stdlib.Gc.quick_stat () in
   let process_start = Mtime_clock.elapsed_ns () in
@@ -101,23 +105,27 @@ let run (config : config) =
   ignore (fail_error (Duckdb.with_database (fail_error (Duckdb.Config.create Duckdb.Config.Memory)) ~f:(fun database ->
       Duckdb.with_connection database ~f:(fun connection ->
         Duckdb.with_prepared connection sql ~f:(fun prepared ->
+          let execute () = fail_error (Duckdb.execute_prepared prepared) in
+          let request = owned_request sql in
+          let measure_owned () = measure config ignore (fun () -> owned connection request ()) in
+          let measure_borrowed () = measure config execute borrowed in
           for _ = 1 to config.warmups do
-            ignore (measure config prepared owned : metrics * totals);
-            ignore (measure config prepared borrowed : metrics * totals)
+            ignore (measure_owned () : metrics * totals);
+            ignore (measure_borrowed () : metrics * totals)
           done;
           Stdlib.Printf.printf "# benchmark_processing rows=%d warmups=%d samples=%d\n" config.rows config.warmups config.samples;
           Stdlib.Printf.printf "sample\tpath\torder\trows\tchecksum\tnulls\texecute_ns\tprocess_ns\tminor_words\tpromoted_words\tmajor_words\tminor_collections\tmajor_collections\tcompactions\n%!";
           for sample = 0 to config.samples - 1 do
             let first_owned = sample % 2 = 0 in
-            let emit path process order =
-              let metrics, totals = measure config prepared process in
+            let emit path measured order =
+              let metrics, totals = measured () in
               print_row sample path order config metrics totals in
             if first_owned then begin
-              emit "owned_rows" owned "owned_first";
-              emit "borrowed_chunks" borrowed "owned_first"
+              emit "owned_rows" measure_owned "owned_first";
+              emit "borrowed_chunks" measure_borrowed "owned_first"
             end else begin
-              emit "borrowed_chunks" borrowed "borrowed_first";
-              emit "owned_rows" owned "borrowed_first"
+              emit "borrowed_chunks" measure_borrowed "borrowed_first";
+              emit "owned_rows" measure_owned "borrowed_first"
             end
           done;
           Ok ())))) : unit)

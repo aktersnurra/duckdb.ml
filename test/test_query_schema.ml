@@ -7,8 +7,10 @@ let rejected = function
   | _ -> failwith "expected Parameter_schema_changed"
 let count c = ok (with_prepared c "SELECT count(*)::BIGINT FROM t" ~f:(fun p ->
   Result.bind (execute_prepared p) ~f:(fun r ->
-    fold_rows r Row.(Column (Codec.Values.int64, Empty)) ~init:0L
-      ~f:(fun (n, ()) _ -> Ok (Continue n)))))
+    fold_chunks r ~init:0L ~f:(fun chunk _ ->
+      match column chunk ~column:0 ~row:0 Codec.Values.int64 with
+      | Ok n -> Ok (Continue n)
+      | Error e -> Error e))))
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let () =

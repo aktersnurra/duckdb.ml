@@ -7,7 +7,7 @@ type one = [ `One ]
 type zero_or_one = [ `Zero | `One ]
 type many = [ `Zero | `One | `Many ]
 type 'params params = Params : ('params, _, _) Fields.t -> 'params params
-type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows
+type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows | No_rows : unit rows
 type ('params, 'row, 'multiplicity) t =
   { id : int; sql : string; oneshot : bool; params : 'params params; rows : 'row rows }
 (* A declared table; its SELECT and INSERT are built once so that they share
@@ -21,7 +21,7 @@ type ('columns, 'row) table =
 let next_id = Stdlib.Atomic.make 0
 let make ?(oneshot = false) params rows sql =
   { id = Stdlib.Atomic.fetch_and_add next_id 1; sql; oneshot; params = Params params; rows }
-let exec ?oneshot params sql = make ?oneshot params (Rows (Fields.[], ())) sql
+let exec ?oneshot params sql = make ?oneshot params No_rows sql
 let one ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
 let zero_or_one ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
 let many ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
@@ -96,29 +96,30 @@ let rec scalar_ids : type l f r. (l, f, r) Fields.t -> (int * string) list = fun
 
 (* Unresolved engine types (ANY/INVALID) accept the declaration, as [bind] does. *)
 let unresolved actual = actual = Duckdb_ffi.Type_id.invalid || actual = Duckdb_ffi.Type_id.any
-let check_types ~declared ~actual ~count_error =
+let check_types ~lift ~declared ~actual ~count_error =
   if Array.length actual <> List.length declared then Error (count_error (List.length declared) (Array.length actual))
   else
     List.foldi declared ~init:(Ok ()) ~f:(fun i acc (id, name) ->
       let* () = acc in
       if unresolved actual.(i) || actual.(i) = id then Ok ()
-      else Error (Core (Data_error (Scalar.Type_mismatch { index = i; expected = name; actual = actual.(i) }))))
+      else Error (lift (Data_error (Scalar.Type_mismatch { index = i; expected = name; actual = actual.(i) }))))
 let check_parameters params p =
-  check_types ~declared:(scalar_ids params) ~actual:(Query.parameter_types p)
+  check_types ~lift:(fun e -> Core e) ~declared:(scalar_ids params) ~actual:(Query.parameter_types p)
     ~count_error:(fun expected actual -> Parameter_count { expected; actual })
-(* Statements without declared rows (exec) are not constrained: DuckDB reports
-   e.g. a Count column for INSERT. *)
-let check_columns : type row. row rows -> int array -> (unit, cause) Result.t = fun (Rows (fields, _)) actual ->
-  match fields with
-  | Fields.[] -> Ok ()
-  | Fields.(_ :: _) ->
-    check_types ~declared:(scalar_ids fields) ~actual
-      ~count_error:(fun expected actual -> Core (Data_error (Scalar.Column_count { expected; actual })))
+(* Declared rows are always checked, including zero columns. Statements without
+   declared rows (exec, [No_rows]) are not constrained: DuckDB reports e.g. a
+   Count column for INSERT. *)
+let check_columns : type row. row rows -> int array -> (unit, error) Result.t = fun rows actual ->
+  match rows with
+  | No_rows -> Ok ()
+  | Rows (fields, _) ->
+    check_types ~lift:Fn.id ~declared:(scalar_ids fields) ~actual
+      ~count_error:(fun expected actual -> Data_error (Scalar.Column_count { expected; actual }))
 let validate r p =
   let Params params = r.params in
   let* () = check_parameters params p in
   let* columns = Result.map_error (Query.column_types p) ~f:(fun e -> Core e) in
-  check_columns r.rows columns
+  Result.map_error (check_columns r.rows columns) ~f:(fun e -> Core e)
 
 (* Decoding a borrowed row into an owned value through the declared codecs. *)
 let decode_value : type a n. (a, n) Codec.t -> Query.chunk @ local -> column:int -> row:int -> seen:int ->
@@ -138,15 +139,15 @@ let rec decode_row : type l f r. (l, f, r) Fields.t -> f -> Query.chunk @ local 
 
 (* Folds decoded rows. The accumulator carries a request failure as an early
    Stop so the core fold still closes the result on every exit. *)
-let fold_result context (Rows (fields, fn) as rows) result ~init ~f =
-  let validate types = Result.map_error (check_columns rows types) ~f:(function
-    | Core e -> e | _ -> Data_error (Scalar.Column_count { expected = 0; actual = Array.length types })) in
+let fold_decoded context fields fn ~validate result ~init ~f =
   let+ outcome, _ = core context (Query.fold_validated result ~validate ~init:(Ok init, 0)
     ~f:(fun (chunk @ local) (acc, seen) ->
       let length = Query.chunk_length chunk in
       let rec loop row acc =
         if row = length then Ok (Query.Continue (Ok acc, seen + length))
-        else match decode_row fields fn chunk ~column:0 ~row ~seen with
+        else match Query.result_checkpoint result with
+        | Error e -> Ok (Query.Stop (Error { context; cause = Core e }, seen + row))
+        | Ok () -> match decode_row fields fn chunk ~column:0 ~row ~seen with
           | Error cause -> Ok (Query.Stop (Error { context; cause }, seen + row))
           | Ok value ->
             match f value acc with
@@ -157,7 +158,13 @@ let fold_result context (Rows (fields, fn) as rows) result ~init ~f =
       | Error _ -> Ok (Query.Stop (acc, seen))
       | Ok acc -> loop 0 acc [@nontail])) in
   outcome
-let fold_result context rows result ~init ~f = Result.join (fold_result context rows result ~init ~f)
+let fold_result : type row a. context -> row rows -> Query.query_result -> init:a ->
+  f:(row -> a -> (a Query.step, request_error) result) -> (a, request_error) result =
+  fun context rows result ~init ~f ->
+  let validate = check_columns rows in
+  Result.join (match rows with
+    | Rows (fields, fn) -> fold_decoded context fields fn ~validate result ~init ~f
+    | No_rows -> fold_decoded context Fields.[] () ~validate result ~init ~f)
 
 let witness : Query.prepared Type_equal.Id.t = Type_equal.Id.create ~name:"Duckdb.Request.prepared" (fun _ -> Sexp.Atom "<prepared>")
 
@@ -276,7 +283,7 @@ let open_typed tx (Table_def t as table) =
     let* () =
       if List.equal Int.equal indices (List.init (List.length catalog) ~f:Fn.id) then Ok ()
       else core context (Appender.select_columns a ~names:(Array.of_list names) ~indices:(Array.of_list indices)) in
-    with_context context (check_types ~declared:(scalar_ids (fields_of_columns t.columns))
+    with_context context (check_types ~lift:(fun e -> Core e) ~declared:(scalar_ids (fields_of_columns t.columns))
       ~actual:(Appender.types a)
       ~count_error:(fun expected actual -> Core (Data_error (Scalar.Column_count { expected; actual })))) in
   match checked with

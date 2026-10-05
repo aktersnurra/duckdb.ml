@@ -27,8 +27,10 @@ let scalar owner sql =
   let p = ok (D.prepare owner sql) in
   Exn.protect ~finally:(fun () -> ok (D.close_prepared p)) ~f:(fun () ->
     let r = ok (D.execute_prepared p) in
-    ok (D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:0L
-      ~f:(fun (n, ()) _ -> Ok (D.Continue n))))
+    ok (D.fold_chunks r ~init:0L ~f:(fun chunk _ ->
+      match D.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with
+      | Ok n -> Ok (D.Continue n)
+      | Error e -> Error e)))
 let no_flush owner = check "Appender cancelled cleanup never flushes sequence" (Int64.equal (scalar owner "SELECT nextval('app_flush')") 1L)
 let next_suppressed c = cancelled (D.execute c "SELECT 42")
 let metadata ?(view = false) point ~user ~native_error owner =

@@ -69,11 +69,11 @@ let example () =
         ] ]
     in
     await (A.ingest pool ~schema:None ~table:"example" ~batches ~flush:true) >>= fun () ->
-    let row = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
-    await (A.query pool "SELECT i FROM example ORDER BY i" row) >>= fun values ->
+    let row = Duckdb.Fields.[int64] in
+    await (A.query pool "SELECT i FROM example ORDER BY i" row ~row:Fn.id) >>= fun values ->
     (* This worker fold is synchronous; do not call or suspend Async here. *)
-    await (A.fold_rows pool "SELECT i FROM example ORDER BY i" row ~init:0L
-      ~f:(fun (value, ()) total -> Ok (Duckdb.Continue Int64.(total + value)))) >>= fun sum ->
+    await (A.fold_rows pool "SELECT i FROM example ORDER BY i" row ~row:Fn.id ~init:0L
+      ~f:(fun value total -> Ok (Duckdb.Continue Int64.(total + value)))) >>= fun sum ->
     let parquet = Stdlib.Filename.temp_file "duckdb_async_example" ".parquet" in
     Stdlib.Sys.remove parquet;
     Monitor.protect
@@ -81,7 +81,7 @@ let example () =
       (fun () ->
         await (A.parquet_export pool ~query:"SELECT i FROM example ORDER BY i" ~destination:parquet) >>= fun () ->
         (* This worker fold is synchronous; it returns owned rows only. *)
-        await (A.parquet_fold_rows pool [parquet] row ~init:[]
+        await (A.parquet_fold_rows pool [parquet] row ~row:Fn.id ~init:[]
           ~f:(fun value values -> Ok (Duckdb.Continue (value :: values)))) >>= fun parquet_values ->
         Stdlib.Printf.printf "ingested %d rows; query/fold sum=%Ld; Parquet read %d owned rows\n%!"
           (List.length values) sum (List.length parquet_values);

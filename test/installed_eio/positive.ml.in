@@ -18,18 +18,18 @@ let run () =
           let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 1L) ]
                             ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ] ] ] in
           ok (E.ingest pool ~schema:None ~table:"installed" ~batches ~flush:true);
-          let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
-          require "installed typed query" (match E.query pool "SELECT i FROM installed ORDER BY i" rows with
-            | Ok [1L, (); 2L, ()] -> true | _ -> false);
+          let rows = Duckdb.Fields.[int64] in
+          require "installed typed query" (match E.query pool "SELECT i FROM installed ORDER BY i" rows ~row:Fn.id with
+            | Ok [1L; 2L] -> true | _ -> false);
           let path = Stdlib.Filename.temp_file "duckdb_installed_eio" ".parquet" in
           Stdlib.Sys.remove path;
           Exn.protect
             ~finally:(fun () -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path)
             ~f:(fun () ->
               ok (E.parquet_export pool ~query:"SELECT i FROM installed ORDER BY i" ~destination:path);
-              require "installed Parquet fold" (match E.parquet_fold_rows pool [path] rows ~init:[]
+              require "installed Parquet fold" (match E.parquet_fold_rows pool [path] rows ~row:Fn.id ~init:[]
                 ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))) with
-                | Ok [2L, (); 1L, ()] -> true | _ -> false)))));
+                | Ok [2L; 1L] -> true | _ -> false)))));
   Stdlib.print_endline "installed duckdb-eio typed operations and shutdown: passed"
 
 let () = run ()

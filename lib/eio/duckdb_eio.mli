@@ -54,13 +54,15 @@ val execute : t -> string -> (unit, error) result
     including success. Nonreturning callbacks prevent shutdown completion. *)
 val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.error) result) -> ('a, error) result
 
-(** Materializes owned rows on one worker. The decoder and SQL evaluation do not
-    let a result, chunk, or connection owner cross back to the Eio scheduler. *)
-val query : t -> string -> 'row Duckdb.Row.t -> ('row list, error) result
+(** Materializes owned rows on one worker. The fields, row constructor and SQL evaluation do not
+    let a result, chunk, or connection owner cross back to the Eio scheduler.
+    The [~row] constructor also runs on the worker and, like [f], must not touch
+    the scheduler. *)
+val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, error) result
 
 (** Folds owned decoded rows synchronously on one worker. [Stop] returns its
     accumulator; callback reentry into this adapter is rejected. *)
-val fold_rows : t -> string -> 'row Duckdb.Row.t -> init:'a ->
+val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, error) result
 
 (** Runs the complete explicit transaction and appender lifecycle on one worker.
@@ -71,7 +73,7 @@ val ingest : t -> schema:string option -> table:string ->
 
 (** Reads exact local filenames in order and folds owned rows on one worker.
     Path construction, including relative-path resolution, occurs on that worker. *)
-val parquet_fold_rows : t -> string list -> 'row Duckdb.Row.t -> init:'a ->
+val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, error) result
 
 (** Exports through DuckDB's connection-level temporary/publication protocol on

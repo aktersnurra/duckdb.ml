@@ -13,25 +13,6 @@ let path p =
   with Stdlib.Sys_error e -> Error (Native_error e)
 let literal s = "'" ^ String.substr_replace_all s ~pattern:"'" ~with_:"''" ^ "'"
 
-(* Folds one file; [stopped] records whether the callback asked to stop. *)
-let fold_file c p decoder ~init ~f =
-  let stopped = ref false in
-  let observe step = (match step with Query.Stop _ -> stopped := true | Query.Continue _ -> ()); step in
-  let+ acc = Query.with_prepared c ("SELECT * FROM read_parquet(" ^ literal p ^ ")") ~f:(fun statement ->
-    let* result = Query.execute_prepared statement in
-    Query.fold_rows result decoder ~init ~f:(fun row acc -> Result.map (f row acc) ~f:observe)) in
-  acc, !stopped
-let fold_rows c paths decoder ~init ~f =
-  let rec loop paths acc =
-    let* () = checkpoint c in
-    match paths with
-    | [] -> Ok acc
-    | p :: rest ->
-      let* acc, stopped = fold_file c p decoder ~init:acc ~f in
-      if stopped then Ok acc else loop rest acc in
-  if List.is_empty paths then Error (Invalid_configuration "Parquet read requires at least one file")
-  else loop paths init
-
 (* The pinned writer/reader normalizes TIMESTAMP_S/MS to microseconds. *)
 let exportable =
   List.filter_map Scalar.all ~f:(fun (Scalar.Packed typ) ->

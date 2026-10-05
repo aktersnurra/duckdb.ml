@@ -25,7 +25,8 @@ let connected ?(statement_cache = 64) f =
   clean ()
 let count c table = core_ok (D.with_prepared c ("SELECT count(*)::BIGINT FROM " ^ table) ~f:(fun p ->
   let* r = D.execute_prepared p in
-  D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:0L ~f:(fun (n, ()) _ -> Ok (D.Stop n))))
+  D.fold_chunks r ~init:0L ~f:(fun chunk _ ->
+    match D.column chunk ~column:0 ~row:0 D.Codec.Values.int64 with Ok n -> Ok (D.Stop n) | Error e -> Error e)))
 
 let create = R.exec D.Fields.[] "CREATE TABLE t(id BIGINT, note VARCHAR, score DOUBLE)"
 let insert = R.exec D.Fields.[int64; nullable string; nullable float64] "INSERT INTO t VALUES (?, ?, ?)"
@@ -194,3 +195,14 @@ let () =
       assert (Int64.equal (Stdlib.Int64.bits_of_float (Stdlib_stable.Float32.to_float f2)) Int64.min_value)
     | _ -> failwith "small numerics: unexpected rows");
   Stdlib.print_endline "request: int8/int16/float32 boundaries roundtrip exactly=ok"
+let () =
+  connected (fun c ->
+    (match C.collect c (R.many D.Fields.[] D.Fields.[] ~row:() "SELECT 1") D.Args.[] with
+     | Error { cause = R.Core (D.Data_error (D.Scalar.Column_count { expected = 0; actual = 1 })); _ } -> ()
+     | _ -> failwith "zero-column decoder must fail with Column_count");
+    ok (C.exec c (R.exec D.Fields.[] "CREATE TABLE z(i INT)") D.Args.[]);
+    (* An exec request folded as rows yields units: the unconstrained No_rows path. *)
+    match ok (C.collect c (R.exec D.Fields.[] "INSERT INTO z VALUES (1)") D.Args.[]) with
+    | [ () ] -> ()
+    | _ -> failwith "exec collected as rows must yield one unit");
+  Stdlib.print_endline "request: zero-column decoders are column-checked=ok"

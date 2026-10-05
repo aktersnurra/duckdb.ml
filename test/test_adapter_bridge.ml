@@ -18,8 +18,15 @@ let memory f = ok (D.with_database (ok (D.Config.create D.Config.Memory)) ~f)
 let connection db f = D.with_connection db ~f
 let rows c sql = D.with_prepared c sql ~f:(fun p ->
   Result.bind (D.execute_prepared p) ~f:(fun r ->
-    D.fold_rows r D.Row.(Column (D.Codec.Values.int64, Empty)) ~init:[]
-      ~f:(fun (x, ()) xs -> Ok (D.Continue (x :: xs)))))
+    D.fold_chunks r ~init:[] ~f:(fun chunk xs ->
+      let xs = ref xs and failure = ref None in
+      for row = 0 to D.chunk_length chunk - 1 do
+        if Option.is_none !failure then
+          (match D.column chunk ~column:0 ~row D.Codec.Values.int64 with
+           | Ok x -> xs := x :: !xs
+           | Error e -> failure := Some e)
+      done;
+      match !failure with None -> Ok (D.Continue !xs) | Some e -> Error e)))
 exception Callback_failure
 let callback_failure () = raise Callback_failure
 let aliases db = connection db (fun owner ->
@@ -253,8 +260,10 @@ let parquet db = connection db (fun owner ->
     let request = B.create () in
     reset_counts ();
     expect D.Cancelled (B.run request owner ~f:(fun facade ->
-      D.Parquet.fold_rows facade [path; missing] D.Row.(Column (D.Codec.Values.int64, Empty))
-        ~init:() ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ()))));
+      Result.map_error ~f:(fun (e : D.Request.request_error) -> match e.cause with
+        | D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
+        (D.Parquet.fold facade [path; missing] D.Fields.[int64] ~row:Fn.id
+          ~init:() ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ())))));
     check "next parquet suppressed" (count 0 = 1); Ok ()))
 exception Native_create_failure
 let[@inline never] run_create_failure request owner =
@@ -351,13 +360,24 @@ let native_snapshot_discard db = connection db (fun owner ->
        | _ -> failwith "snapshot discard composite");
       check "snapshot detaches before close" (count 6 = 1 && count 7 = 1 && count 4 = 1)));
   expect D.Closed (D.execute owner "SELECT 1"); Ok ())
+let mid_chunk_cancel db = connection db (fun owner ->
+  let request = B.create () and calls = ref 0 in
+  expect D.Cancelled (B.run request owner ~f:(fun facade ->
+    Result.map_error ~f:(fun (e : D.Request.request_error) -> match e.cause with
+      | D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
+      (D.Request.Connection.fold facade
+        (D.Request.many D.Fields.[] D.Fields.[int64] ~row:Fn.id "SELECT * FROM range(100)") D.Args.[] ~init:()
+        ~f:(fun _ () -> Int.incr calls; ok (B.cancel request); Ok (D.Continue ())))));
+  check "mid-chunk cancel stops per-row fold" (!calls = 1);
+  Stdlib.print_endline "bridge: mid-chunk cancel stops per-row fold=ok";
+  Ok ())
 let run () =
   Stdlib.Printexc.record_backtrace true;
   memory (fun db ->
     List.iter ["native_admission_failures", native_admission_failures; "native_lifecycle", native_lifecycle; "native_root_lifetime", native_root_lifetime;
       "native_snapshot_discard", native_snapshot_discard; "aliases", aliases; "pre_entry", pre_entry; "live_children", live_children;
       "concurrent", concurrent; "transactions", transactions; "snapshots", snapshots; "traversal", traversal; "diagnostics", diagnostics; "effects_and_rollback", effects_and_rollback;
-      "parent_close", parent_close; "parquet", parquet] ~f:(fun (name, test) ->
+      "parent_close", parent_close; "parquet", parquet; "mid_chunk_cancel", mid_chunk_cancel] ~f:(fun (name, test) ->
         Stdlib.print_endline name; ok (test db)); Ok ());
   check "no native resources" (Duckdb_ffi.live_resources () = 0);
   check "no fallback reclamation" (Duckdb_ffi.fallback_reclaims () = 0);

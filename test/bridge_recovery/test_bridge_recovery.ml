@@ -8,8 +8,15 @@ let ok = function Ok value -> value | Error _ -> failwith "expected Ok"
 let rows connection =
   D.with_prepared connection "SELECT i FROM recovery_rows ORDER BY i" ~f:(fun prepared ->
     Result.bind (D.execute_prepared prepared) ~f:(fun result ->
-      D.fold_rows result D.Row.(Column (D.Codec.Values.int64, Empty))
-        ~init:[] ~f:(fun (value, ()) values -> Ok (D.Continue (value :: values)))))
+      D.fold_chunks result ~init:[] ~f:(fun chunk values ->
+        let values = ref values and failure = ref None in
+        for row = 0 to D.chunk_length chunk - 1 do
+          if Option.is_none !failure then
+            (match D.column chunk ~column:0 ~row D.Codec.Values.int64 with
+             | Ok value -> values := value :: !values
+             | Error e -> failure := Some e)
+        done;
+        match !failure with None -> Ok (D.Continue !values) | Some e -> Error e)))
 let still_admitted request owner =
   check "ordinary rollback leaves the same request Pending"
     (match B.settlement request with Pending -> true | Settled -> false);

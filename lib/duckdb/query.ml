@@ -193,6 +193,7 @@ let chunk_length = Borrowed_chunk.length
 let column = Borrowed_chunk.column
 (* The loop keeps explicit matches: each borrowed chunk is stack-allocated and
    must not be captured by a heap closure. *)
+let result_checkpoint r = checkpoint r.prepared.connection
 let fold_internal r validate ~init ~f =
   let c = r.prepared.connection and native = r.prepared.native in
   let finish acc = Result.map (checkpoint c) ~f:(fun () -> acc) in
@@ -223,22 +224,6 @@ let fold_internal r validate ~init ~f =
 let fold_chunks r ~init ~f = fold_internal r (fun _ -> Ok ()) ~init ~f
 let fold_validated r ~validate ~init ~f =
   fold_internal r (fun native -> validate (F.prepared_column_types native)) ~init ~f
-let fold_rows r decoder ~init ~f =
-  fold_internal r (fun native -> Borrowed_chunk.validate_schema native decoder) ~init
-    ~f:(fun (chunk @ local) acc ->
-      let rec loop row acc =
-        match checkpoint r.prepared.connection with
-        | Error e -> Error e
-        | Ok () when row = chunk_length chunk -> Ok (Continue acc)
-        | Ok () ->
-          match Borrowed_chunk.decode chunk row decoder with
-          | Error e -> Error e
-          | Ok owned ->
-            match f owned acc with
-            | Error e -> Error e
-            | Ok (Stop acc) -> Ok (Stop acc)
-            | Ok (Continue acc) -> loop (row + 1) acc in
-      loop 0 acc [@nontail])
 let select_schema p = without_result p (fun () ->
   if F.prepared_kind p.native <> F.Statement_kind.select || not (Array.is_empty p.bound) then
     Error Unsupported_statement

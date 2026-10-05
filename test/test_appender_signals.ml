@@ -12,7 +12,9 @@ let rec is_break = function
   | Rollback_exception (e,_) | Cleanup_exception (_,e) -> is_break e
   | Exn.Finally (a,b) -> is_break a || is_break b
   | _ -> false
-let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p -> fold_rows (ok (execute_prepared p)) Row.(Column (Codec.Values.int64,Empty)) ~init:0L ~f:(fun (n,()) _ -> Ok (Stop n))))
+let count c = ok (with_prepared c "SELECT count(*) FROM a" ~f:(fun p ->
+  fold_chunks (ok (execute_prepared p)) ~init:0L ~f:(fun chunk _ ->
+    match column chunk ~column:0 ~row:0 Codec.Values.int64 with Ok n -> Ok (Stop n) | Error e -> Error e)))
 let () =
   let mode = Stdlib.Sys.argv.(1) in
   let leave = String.is_suffix mode ~suffix:"-leave" in

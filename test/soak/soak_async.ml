@@ -58,9 +58,9 @@ let callback_cancel () = with_pool (fun pool ->
     Stdlib.Atomic.set release true;
     completion request >>= fun result ->
     require "callback cancellation settles" (cancelled result);
-    let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
-    completion (ok (A.query pool "SELECT count(*)::BIGINT FROM stage5_callback" rows)) >>= fun count ->
-    require "callback cancellation suppresses commit" (match count with Ok [0L, ()] -> true | _ -> false);
+    let rows = Duckdb.Fields.[int64] in
+    completion (ok (A.query pool "SELECT count(*)::BIGINT FROM stage5_callback" rows ~row:Fn.id)) >>= fun count ->
+    require "callback cancellation suppresses commit" (match count with Ok [0L] -> true | _ -> false);
     completion (ok (A.execute pool "SELECT 1")) >>| fun next -> require "callback cancellation retires before reuse" (Result.is_ok next)))
 
 let terminal_race () = with_pool (fun pool ->
@@ -124,12 +124,12 @@ let shared_shutdown () = with_pool (fun pool ->
   first >>| fun result -> require "shared shutdown outcome" (Result.is_ok result))
 
 let typed_then_shutdown () = with_pool (fun pool ->
-  let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
-  completion (ok (A.query pool "SELECT 42::BIGINT" rows)) >>= fun result ->
-  require "typed result is owned" (match result with Ok [42L, ()] -> true | _ -> false);
+  let rows = Duckdb.Fields.[int64] in
+  completion (ok (A.query pool "SELECT 42::BIGINT" rows ~row:Fn.id)) >>= fun result ->
+  require "typed result is owned" (match result with Ok [42L] -> true | _ -> false);
   shutdown pool >>= fun stopped ->
   require "typed shutdown settles" (Result.is_ok stopped);
-  require "typed post-shutdown rejection" (match A.query pool "SELECT 1::BIGINT" rows with Error A.Pool_shutdown -> true | _ -> false);
+  require "typed post-shutdown rejection" (match A.query pool "SELECT 1::BIGINT" rows ~row:Fn.id with Error A.Pool_shutdown -> true | _ -> false);
   Deferred.unit)
 
 let run_episode scenario =

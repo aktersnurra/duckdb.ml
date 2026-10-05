@@ -53,8 +53,8 @@ let run () =
           let batches = [ [ [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 40L) ]
                             ; [ Duckdb.Cell (Duckdb.Scalar.Int64, Some 2L) ] ] ] in
           require "ingest owned rows" (E.ingest pool ~schema:None ~table:"example" ~batches ~flush:true);
-          let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty)) in
-          (match E.query pool "SELECT i FROM example ORDER BY i" rows with
+          let rows = Duckdb.Fields.[int64] in
+          (match E.query pool "SELECT i FROM example ORDER BY i" rows ~row:Fn.id with
            | Ok values when List.length values = 2 -> ()
            | Ok _ -> failwith "typed query returned an unexpected row count"
            | Error error -> failwith ("typed query: " ^ error_name error));
@@ -65,7 +65,7 @@ let run () =
             ~f:(fun () ->
               require "export local Parquet" (E.parquet_export pool ~query:"SELECT i FROM example ORDER BY i" ~destination:path);
               (* This worker fold is synchronous; it returns owned rows only. *)
-              let values = require "fold local Parquet rows" (E.parquet_fold_rows pool [path] rows ~init:[]
+              let values = require "fold local Parquet rows" (E.parquet_fold_rows pool [path] rows ~row:Fn.id ~init:[]
                 ~f:(fun row rows -> Ok (Duckdb.Continue (row :: rows)))) in
               if List.length values <> 2 then failwith "typed Parquet fold returned an unexpected row count");
           Stdlib.Printf.printf "duckdb-eio: typed ingestion, query, local Parquet export/read, and shutdown settled\n%!")))

@@ -1,6 +1,5 @@
 module Scalar = Scalar
 module Codec = Codec
-module Row = Row
 include Resource
 include Query
 include Appender

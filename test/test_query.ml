@@ -13,9 +13,24 @@ let children result = error (function Live_children -> true | _ -> false) result
 let index result = error (function Data_error (S.Index _) -> true | _ -> false) result
 let schema result = error (function Data_error (S.Type_mismatch _) -> true | _ -> false) result
 let non_null typ = Codec.Values.of_scalar typ
-let decode typ = Row.Column (non_null typ, Row.Empty)
-let rows r decoder = fold_rows r decoder ~init:[] ~f:(fun x xs -> Ok (Continue (x :: xs)))
-let query c sql decoder = with_prepared c sql ~f:(fun p -> rows (ok (execute_prepared p)) decoder)
+let decode typ = non_null typ
+(* Reads column 0 of an executed result through the borrowed-chunk lease. *)
+let rows r codec =
+  fold_chunks r ~init:[] ~f:(fun chunk acc ->
+    let acc = ref acc and failure = ref None in
+    for row = 0 to chunk_length chunk - 1 do
+      if Option.is_none !failure then
+        (match column chunk ~column:0 ~row codec with
+         | Ok x -> acc := x :: !acc
+         | Error e -> failure := Some e)
+    done;
+    match !failure with None -> Ok (Continue !acc) | Some e -> Error e)
+(* A typed request validates the schema at prepare, even for an empty result. *)
+let query c sql codec =
+  match Request.Connection.collect c (Request.many ~oneshot:true Fields.[] Fields.[codec] ~row:Fn.id sql) Args.[] with
+  | Ok values -> Ok values
+  | Error { Request.cause = Request.Core e; _ } -> Error e
+  | Error _ -> failwith "unexpected typed request failure"
 let config = ok (Config.create Memory)
 let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f))
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
@@ -33,13 +48,13 @@ let roundtrip c typ equal values =
         children (reset p); children (close_prepared p); children (execute_prepared p);
         busy (execute c "select 1"); busy (with_transaction c ~f:(fun _ -> Ok ()));
         let copied = ok (rows r (decode typ)) in
-        assert (List.equal (fun (a, ()) (b, ()) -> equal a b) copied [value, ()]);
+        assert (List.equal equal copied [value]);
         ok (close_result r); ok (close_result r);
         closed (rows r (decode typ))
       done);
     ok (bind p 1 Codec.Values.(nullable (of_scalar typ)) None);
-    let nullable = ok (rows (ok (execute_prepared p)) (Row.Column (Codec.Values.(nullable (of_scalar typ)), Row.Empty))) in
-    assert (List.for_all nullable ~f:(fun (x, ()) -> Option.is_none x));
+    let nullable = ok (rows (ok (execute_prepared p)) Codec.Values.(nullable (of_scalar typ))) in
+    assert (List.for_all nullable ~f:Option.is_none);
     error (function Data_error (S.Null { column = 0; row = 0 }) -> true | _ -> false)
       (rows (ok (execute_prepared p)) (decode typ));
     ok (reset p);
@@ -172,7 +187,7 @@ let () =
   connected (fun c ->
     let check sql typ equal expected =
       let values = ok (query c sql (decode typ)) in
-      assert (List.equal (fun (a, ()) (b, ()) -> equal a b) values [expected, ()]) in
+      assert (List.equal equal values [expected]) in
     ok (with_prepared c "SELECT ?::TIMESTAMP_S" ~f:(fun p ->
       schema (bind p 1 (non_null S.Timestamp_us) 1000000L); Ok ()));
     schema (query c "SELECT TIMESTAMP_S '1970-01-01 00:00:01'" (decode S.Timestamp_us));
@@ -198,9 +213,9 @@ let () =
 let () =
   connected (fun c ->
     (* DuckDB 1.5.5 materializes bare NULL as INTEGER, not logical SQLNULL. *)
-    let decoder = Row.Column (Codec.Values.(nullable int32), Row.Empty) in
+    let decoder = Codec.Values.(nullable int32) in
     let copied = ok (query c "SELECT NULL" decoder) in
-    assert (List.for_all copied ~f:(fun (value, ()) -> Option.is_none value));
+    assert (List.for_all copied ~f:Option.is_none);
     assert (List.is_empty (ok (query c "SELECT NULL WHERE false" decoder)));
     schema (query c "SELECT NULL WHERE false" (decode S.Int64));
     error (function Data_error (S.Null _) -> true | _ -> false) (query c "SELECT NULL" (decode S.Int32));
@@ -256,7 +271,7 @@ let () =
       ok (bind p 1 codec 5L);
       error (function Data_error (S.Encode_rejected { index = 1; _ }) -> true | _ -> false) (bind p 1 codec 7L);
       let r = ok (execute_prepared p) in
-      assert (List.equal (fun (a, ()) (b, ()) -> Int64.equal a b) (ok (rows r (decode S.Int64))) [5L, ()]);
+      assert (List.equal Int64.equal (ok (rows r (decode S.Int64))) [5L]);
       ok (close_result r); Ok ()));
     ok (with_prepared c "SELECT * FROM (VALUES (1::BIGINT),(2),(3))" ~f:(fun p ->
       let r = ok (execute_prepared p) in

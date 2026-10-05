@@ -6,8 +6,8 @@ exception Requested
 exception Callback_failure
 let check name condition = if not condition then failwith name
 let unwrap = function Ok value -> value | Error _ -> failwith "unexpected Parquet error"
-let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
-let equal_rows = List.equal (fun (x, ()) (y, ()) -> Int64.equal x y)
+let rows = Duckdb.Fields.[int64]
+let equal_rows = List.equal Int64.equal
 let pool sw = unwrap (E.create ~sw (unwrap (E.limits ~connections:1 ~queue_capacity:1))
   (unwrap (Duckdb.Config.create Duckdb.Config.Memory)))
 let pause clock = Eio.Time.sleep clock 0.001
@@ -25,7 +25,7 @@ let fixtures f =
       f sw p root; unwrap (E.shutdown p)))
 let file root name = Stdlib.Filename.concat root (name ^ ".parquet")
 let temporaries root = Stdlib.Sys.readdir root |> Array.to_list |> List.filter ~f:(String.is_prefix ~prefix:".duckdb-parquet-")
-let read p paths = E.parquet_fold_rows p paths rows ~init:[] ~f:(fun row acc -> Ok (Duckdb.Continue (row :: acc))) |> Result.map ~f:List.rev
+let read p paths = E.parquet_fold_rows p paths rows ~row:Fn.id ~init:[] ~f:(fun row acc -> Ok (Duckdb.Continue (row :: acc))) |> Result.map ~f:List.rev
 let export p destination query = unwrap (E.parquet_export p ~query ~destination)
 let whole name f =
   let operations = P.operations () and retired = H.counter 10 in
@@ -44,23 +44,23 @@ let read_semantics () = fixtures (fun _ p root ->
   export p wrong "SELECT 'wrong'::VARCHAR AS i";
   let out = Stdlib.open_out_bin corrupt in Stdlib.output_string out "not parquet"; Stdlib.close_out out;
   check "ordered multi-file multi-chunk owned rows" (match whole "parquet_read" (fun () -> read p [first; second]) with
-    | Ok values -> equal_rows values (List.init 6000 ~f:(fun i -> Int64.of_int i, ())) | _ -> false);
+    | Ok values -> equal_rows values (List.init 6000 ~f:(fun i -> Int64.of_int i)) | _ -> false);
   check "empty file owned result" (match read p [empty] with Ok [] -> true | _ -> false);
   check "empty path list rejected" (match read p [] with Error (E.Core (Duckdb.Invalid_configuration _)) -> true | _ -> false);
   check "corrupt file native error" (match read p [corrupt] with Error (E.Core (Duckdb.Native_error _)) -> true | _ -> false);
   let calls = ref 0 in
-  check "later schema mismatch retains error after first callbacks" (match E.parquet_fold_rows p [first; wrong] rows ~init:()
+  check "later schema mismatch retains error after first callbacks" (match E.parquet_fold_rows p [first; wrong] rows ~row:Fn.id ~init:()
     ~f:(fun _ () -> Int.incr calls; Ok (Duckdb.Continue ())) with Error (E.Core (Duckdb.Data_error _)) -> !calls = 3000 | _ -> false);
   let before = P.callbacks () in
-  check "Parquet Stop suppresses later invalid file" (match E.parquet_fold_rows p [first; corrupt] rows ~init:0L
-    ~f:(fun (value, ()) _ -> check "Parquet callback TLS rejects reentry" (match E.execute p "SELECT 1" with Error E.Reentrant_call -> true | _ -> false); Ok (Duckdb.Stop value)) with Ok 0L -> true | _ -> false);
+  check "Parquet Stop suppresses later invalid file" (match E.parquet_fold_rows p [first; corrupt] rows ~row:Fn.id ~init:0L
+    ~f:(fun value _ -> check "Parquet callback TLS rejects reentry" (match E.execute p "SELECT 1" with Error E.Reentrant_call -> true | _ -> false); Ok (Duckdb.Stop value)) with Ok 0L -> true | _ -> false);
   tls "Stop" before 1;
   let before = P.callbacks () in
-  check "Parquet callback error constituent" (match E.parquet_fold_rows p [first] rows ~init:()
+  check "Parquet callback error constituent" (match E.parquet_fold_rows p [first] rows ~row:Fn.id ~init:()
     ~f:(fun _ () -> Error (Duckdb.Native_error "parquet callback")) with Error (E.Core (Duckdb.Native_error s)) -> String.equal s "parquet callback" | _ -> false);
   tls "error" before 1;
   let before = P.callbacks () and retired = H.counter 10 in
-  let raised = try ignore (E.parquet_fold_rows p [first] rows ~init:() ~f:parquet_callback_failure_frame); false with
+  let raised = try ignore (E.parquet_fold_rows p [first] rows ~row:Fn.id ~init:() ~f:parquet_callback_failure_frame); false with
     | Callback_failure ->
       let trace = Stdlib.Printexc.get_raw_backtrace () |> Stdlib.Printexc.raw_backtrace_to_string in
       check "named Parquet callback frame delivered" (String.is_substring trace ~substring:"parquet_callback_failure_frame");
@@ -98,7 +98,7 @@ let between_files clock = fixtures (fun sw p root ->
   H.select 1 first second "";
   let callbacks = Stdlib.Atomic.make 0 in
   let result = whole "between_files" (fun () -> held clock sw "between_files"
-    (fun () -> E.parquet_fold_rows p [first; second] rows ~init:() ~f:(fun _ () -> ignore (Stdlib.Atomic.fetch_and_add callbacks 1); Ok (Duckdb.Continue ())))
+    (fun () -> E.parquet_fold_rows p [first; second] rows ~row:Fn.id ~init:() ~f:(fun _ () -> ignore (Stdlib.Atomic.fetch_and_add callbacks 1); Ok (Duckdb.Continue ())))
     (fun cc request ->
       Stdlib.Printf.printf "HELD_BETWEEN ack=%d callbacks=%d result=%d prepared=%d chunks=%d second_prepare=%d second_execute=%d\n%!" (H.counter 0) (Stdlib.Atomic.get callbacks) (H.counter 3) (H.counter 4) (H.counter 5) (H.counter 1) (H.counter 2);
       check "first file callbacks and actual children retired before cancellation"
@@ -109,7 +109,7 @@ let between_files clock = fixtures (fun sw p root ->
   check "second file native work and callbacks suppressed" (H.counter 1 = 0 && H.counter 2 = 0 && Stdlib.Atomic.get callbacks = 1);
   Stdlib.Printf.printf "BETWEEN ack=%d first_result=%d first_prepare=%d chunks=%d second_prepare=%d second_execute=%d callbacks=%d\n%!"
     (H.counter 0) (H.counter 3) (H.counter 4) (H.counter 5) (H.counter 1) (H.counter 2) (Stdlib.Atomic.get callbacks);
-  check "multi-file success control" (equal_rows (unwrap (read p [first; second])) [1L, (); 2L, ()]))
+  check "multi-file success control" (equal_rows (unwrap (read p [first; second])) [1L; 2L]))
 let published_final_side_effect_mutation _destination = ()
 let export_boundaries clock = fixtures (fun sw p root ->
   let first = file root "first" and second = file root "second" in
@@ -135,7 +135,7 @@ let export_boundaries clock = fixtures (fun sw p root ->
          permitted despite cancellation, and is verified rather than denied. *)
       if not cancellation || kind = 5 || kind = 6 || kind = 7 then (
         check "published final from cancelled request survives" (Stdlib.Sys.file_exists destination);
-        check "published final correct content" (equal_rows (unwrap (read p [destination])) [7L, ()]));
+        check "published final correct content" (equal_rows (unwrap (read p [destination])) [7L]));
       Stdlib.Printf.printf "EXPORT %s cancel=%b ack=%d copy=%d published=%d unlinks=%d final=%b\n%!" name cancellation
         (H.counter 0) (H.counter 6) (H.counter 7) (H.counter 8) (Stdlib.Sys.file_exists destination))))
 let export_errors () = fixtures (fun _ p root ->
@@ -144,7 +144,7 @@ let export_errors () = fixtures (fun _ p root ->
   H.select 0 "" "" destination;
   check "existing destination rejected" (match E.parquet_export p ~query:"SELECT 9::BIGINT AS i" ~destination with Error (E.Core Duckdb.Destination_exists) -> true | _ -> false);
   check "failed publication cleaned owned temp" (H.counter 8 = 1 && List.is_empty (temporaries root));
-  check "unrelated existing final not deleted" (equal_rows (unwrap (read p [destination])) [8L, ()]);
+  check "unrelated existing final not deleted" (equal_rows (unwrap (read p [destination])) [8L]);
   let bad = file root "bad_copy" in
   check "COPY native failure retained" (match E.parquet_export p ~query:"SELECT error('parquet native failure')::BIGINT AS i" ~destination:bad with
     | Error (E.Core (Duckdb.Native_error message)) -> String.is_substring message ~substring:"parquet native failure" | _ -> false);
@@ -156,7 +156,7 @@ let export_errors () = fixtures (fun _ p root ->
       String.is_substring message ~substring:"parquet native failure" && String.is_substring cleanup ~substring:"Permission denied") in
   check "native and file cleanup error constituents retained" raised;
   check "failed unlink owned temporary observable" (List.length (temporaries root) = 1);
-  check "file error never deletes unrelated final" (equal_rows (unwrap (read p [destination])) [8L, ()]))
+  check "file error never deletes unrelated final" (equal_rows (unwrap (read p [destination])) [8L]))
 let read_boundaries clock = fixtures (fun sw p root ->
   let first = file root "first" and second = file root "second" in
   export p first "SELECT i::BIGINT FROM range(3000) t(i)";
@@ -164,7 +164,7 @@ let read_boundaries clock = fixtures (fun sw p root ->
     List.iter [false; true] ~f:(fun cancellation ->
       H.select kind first second "";
       let callbacks = Stdlib.Atomic.make 0 in
-      let result = whole name (fun () -> held clock sw name (fun () -> E.parquet_fold_rows p [first] rows ~init:0
+      let result = whole name (fun () -> held clock sw name (fun () -> E.parquet_fold_rows p [first] rows ~row:Fn.id ~init:0
         ~f:(fun _ count -> ignore (Stdlib.Atomic.fetch_and_add callbacks 1); Ok (Duckdb.Continue (count + 1))))
         (fun cc request -> if cancellation then cancel clock name cc request)) in
       if cancellation then cancelled name result else check "read held success all rows" (match result with `Returned (Ok 3000) -> true | _ -> false);

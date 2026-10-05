@@ -44,7 +44,6 @@ val chunk_length : chunk @ local -> int
     validates the exact engine type; returned strings/blobs/scalars are owned.
     [Decode_rejected.row] and [Null.row] are chunk-relative. *)
 val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, error) result
-val fold_rows : query_result -> 'row Row.t -> init:'a -> f:('row -> 'a -> ('a step, error) result) -> ('a, error) result
 
 (* Private, engine-prepared SELECT metadata; no execution or result lease. *)
 val select_schema : prepared -> (int array, error) result
@@ -57,6 +56,9 @@ val parameter_types : prepared -> int array
 
 (* Engine result column types known at preparation (INVALID when unresolved). *)
 val column_types : prepared -> (int array, error) result
+
+(* Cancellation checkpoint on the result's connection, for per-row loops. *)
+val result_checkpoint : query_result -> (unit, error) result
 
 (* [fold_chunks] after [validate] accepts the result's column types. *)
 val fold_validated : query_result -> validate:(int array -> (unit, error) result) -> init:'a ->

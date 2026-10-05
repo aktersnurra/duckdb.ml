@@ -7,7 +7,7 @@ type zero_or_one = [ `Zero | `One ]
 type many = [ `Zero | `One | `Many ]
 
 type 'params params = Params : ('params, _, _) Fields.t -> 'params params
-type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows
+type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows | No_rows : unit rows
 type ('params, 'row, 'multiplicity) t =
   { id : int; sql : string; oneshot : bool; params : 'params params; rows : 'row rows }
 (* A declared table; its SELECT and INSERT are built once so that they share

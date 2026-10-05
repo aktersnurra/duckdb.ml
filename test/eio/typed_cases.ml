@@ -6,11 +6,9 @@ exception Requested
 exception Callback_failure
 let check name condition = if not condition then failwith name
 let unwrap = function Ok value -> value | Error _ -> failwith "unexpected typed adapter error"
-let rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int64, Empty))
-let wide_rows = Duckdb.Row.(Column (Duckdb.Codec.Values.int8,
-  Column (Duckdb.Codec.Values.(nullable string),
-    Column (Duckdb.Codec.Values.int64, Empty))))
-let equal_rows = List.equal (fun (x, ()) (y, ()) -> Int64.equal x y)
+let rows = Duckdb.Fields.[int64]
+let wide_rows = Duckdb.Fields.[int8; nullable string; int64]
+let equal_rows = List.equal Int64.equal
 let pause clock = Eio.Time.sleep clock 0.001
 let until clock name condition =
   let deadline = Eio.Time.now clock +. 5. in
@@ -41,25 +39,27 @@ let typed_values_and_failures () =
   Eio.Switch.run (fun sw ->
     let p = pool sw in
     check "typed widths and NULL are owned" (match E.query p
-      "SELECT 127::TINYINT, NULL::VARCHAR, 9223372036854775807::BIGINT" wide_rows with
-      | Ok [127s, (None, (value, ()))] -> Int64.equal value Int64.max_value | _ -> false);
-    check "ordered multi-chunk query" (match whole "query" (fun () -> E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows) with
-      | Ok values -> equal_rows values (List.init 3000 ~f:(fun i -> Int64.of_int i, ())) | Error _ -> false);
-    check "empty typed result" (match E.query p "SELECT i::BIGINT FROM range(0) t(i)" rows with Ok [] -> true | _ -> false);
-    check "mismatched decoder returns an error" (match E.query p "SELECT 'wrong'::VARCHAR" rows with Error (E.Core (Duckdb.Data_error _)) -> true | _ -> false);
+      "SELECT 127::TINYINT, NULL::VARCHAR, 9223372036854775807::BIGINT" wide_rows ~row:(fun a b c -> a, b, c) with
+      | Ok [127s, None, value] -> Int64.equal value Int64.max_value | _ -> false);
+    check "ordered multi-chunk query" (match whole "query" (fun () -> E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id) with
+      | Ok values -> equal_rows values (List.init 3000 ~f:(fun i -> Int64.of_int i)) | Error _ -> false);
+    check "empty typed result" (match E.query p "SELECT i::BIGINT FROM range(0) t(i)" rows ~row:Fn.id with Ok [] -> true | _ -> false);
+    check "unbound parameter keeps its core error" (match E.query p "SELECT ?::BIGINT" rows ~row:Fn.id with
+      | Error (E.Core (Duckdb.Data_error (Duckdb.Scalar.Unbound_parameter 1))) -> true | _ -> false);
+    check "mismatched decoder returns an error" (match E.query p "SELECT 'wrong'::VARCHAR" rows ~row:Fn.id with Error (E.Core (Duckdb.Data_error _)) -> true | _ -> false);
     let before = P.callbacks () in
-    check "fold Stop retains owned accumulator" (match whole "fold" (fun () -> E.fold_rows p "SELECT i::BIGINT FROM range(4) t(i)" rows ~init:0L
-      ~f:(fun (value, ()) total ->
+    check "fold Stop retains owned accumulator" (match whole "fold" (fun () -> E.fold_rows p "SELECT i::BIGINT FROM range(4) t(i)" rows ~row:Fn.id ~init:0L
+      ~f:(fun value total ->
         check "fold callback reentry rejected before effects" (match E.execute p "SELECT 1" with Error E.Reentrant_call -> true | _ -> false);
         Ok (if Int64.equal value 2L then Duckdb.Stop Int64.(total + value) else Duckdb.Continue Int64.(total + value)))) with Ok 3L -> true | _ -> false);
     callback_tls "Stop" before 3;
     let before = P.callbacks () in
-    check "fold callback error retained" (match E.fold_rows p "SELECT 1::BIGINT" rows ~init:()
+    check "fold callback error retained" (match E.fold_rows p "SELECT 1::BIGINT" rows ~row:Fn.id ~init:()
       ~f:(fun _ () -> Error (Duckdb.Native_error "typed callback error")) with
       | Error (E.Core (Duckdb.Native_error message)) -> String.equal message "typed callback error" | _ -> false);
     callback_tls "error" before 1;
     let before = P.callbacks () and disconnects = H.execute_entries 1 in
-    let raised = try ignore (E.fold_rows p "SELECT 1::BIGINT" rows ~init:() ~f:fold_callback_failure_frame); false with
+    let raised = try ignore (E.fold_rows p "SELECT 1::BIGINT" rows ~row:Fn.id ~init:() ~f:fold_callback_failure_frame); false with
       | Callback_failure ->
         let trace = Stdlib.Printexc.get_raw_backtrace () |> Stdlib.Printexc.raw_backtrace_to_string in
         check "named fold callback frame delivered at caller" (String.is_substring trace ~substring:"fold_callback_failure_frame");
@@ -69,7 +69,7 @@ let typed_values_and_failures () =
     check "subsequent request after callback cleanup" (Result.is_ok (E.execute p "SELECT 1"));
     unwrap (E.shutdown p);
     check "typed post-shutdown admission rejected"
-      (match E.query p "SELECT 1::BIGINT" rows with Error E.Pool_shutdown -> true | _ -> false))
+      (match E.query p "SELECT 1::BIGINT" rows ~row:Fn.id with Error E.Pool_shutdown -> true | _ -> false))
 let ingest_semantics () =
   H.reset ();
   Eio.Switch.run (fun sw ->
@@ -80,17 +80,17 @@ let ingest_semantics () =
     check "later batch failure rolls back earlier batches"
       (Result.is_error (E.ingest p ~schema:None ~table:"typed_ingest" ~batches:(good @ [[[]]]) ~flush:false));
     check "failed implicit appender cleanup destroys child" (H.execute_entries 11 = destroys + 1);
-    check "rollback leaves no rows" (match E.query p "SELECT i FROM typed_ingest" rows with Ok [] -> true | _ -> false);
+    check "rollback leaves no rows" (match E.query p "SELECT i FROM typed_ingest" rows ~row:Fn.id with Ok [] -> true | _ -> false);
     let flushes = H.appender_flushes () and explicit = P.flushes () in
     unwrap (whole "ingest" (fun () -> E.ingest p ~schema:None ~table:"typed_ingest" ~batches:good ~flush:true));
     check "explicit flush reaches native appender flush" (H.appender_flushes () > 0);
     check "explicit flush plus close flush" (H.appender_flushes () = flushes + 2);
     if P.enabled then check "explicit adapter flush before close" (P.flushes () = explicit + 1);
-    check "explicit flush commits row" (match E.query p "SELECT i FROM typed_ingest" rows with Ok [1L, ()] -> true | _ -> false);
+    check "explicit flush commits row" (match E.query p "SELECT i FROM typed_ingest" rows ~row:Fn.id with Ok [1L] -> true | _ -> false);
     let flushes = H.appender_flushes () and destroys = H.execute_entries 11 in
     unwrap (E.ingest p ~schema:None ~table:"typed_ingest" ~batches:[List.init 3000 ~f:(fun i -> [cell (Int64.of_int i)])] ~flush:false);
     check "implicit close flush and destruction" (H.appender_flushes () = flushes + 1 && H.execute_entries 11 = destroys + 1);
-    check "implicit flush committed all rows" (match E.query p "SELECT count(*)::BIGINT FROM typed_ingest" rows with Ok [3001L, ()] -> true | _ -> false);
+    check "implicit flush committed all rows" (match E.query p "SELECT count(*)::BIGINT FROM typed_ingest" rows ~row:Fn.id with Ok [3001L] -> true | _ -> false);
     let duplicates = List.init 220000 ~f:(fun _ -> [cell 0L]) in
     unwrap (E.execute p "CREATE TABLE typed_auto(i BIGINT PRIMARY KEY)");
     H.reset ();
@@ -98,7 +98,7 @@ let ingest_semantics () =
     Stdlib.Printf.printf "AUTO_CONTROL end_rows=%d errors=%d commits=%d\n%!" (H.appender_end_rows ()) (H.counter 1) (H.counter 2);
     check "automatic flush actual first end-row error at 204800" (H.appender_end_rows () = 204800 && H.counter 1 = 1);
     check "automatic flush no COMMIT" (H.counter 2 = 0);
-    check "automatic flush control did not commit duplicates" (match E.query p "SELECT i FROM typed_auto" rows with Ok [] -> true | _ -> false);
+    check "automatic flush control did not commit duplicates" (match E.query p "SELECT i FROM typed_auto" rows ~row:Fn.id with Ok [] -> true | _ -> false);
     unwrap (E.shutdown p))
 (* Gates are always released inside the switch body, before exception unwinding
    can join its producer. Selection follows appender/result identity and runtime
@@ -146,12 +146,12 @@ let native_cancellation clock =
         name kind (H.counter 0) (H.appender_end_rows ()) (H.appender_flushes ()) (H.counter 2) (H.counter 3)
         (P.operations () - ops) (H.execute_entries 1 - disconnects) (Stdlib.Atomic.get callbacks);
       check (name ^ " reusable capacity after retirement") (Result.is_ok (E.execute p "SELECT 1"));
-      if Option.is_some expect_rows then check (name ^ " no committed rows") (match E.query p "SELECT i FROM typed_cancel" rows with Ok [] -> true | _ -> false) in
+      if Option.is_some expect_rows then check (name ^ " no committed rows") (match E.query p "SELECT i FROM typed_cancel" rows ~row:Fn.id with Ok [] -> true | _ -> false) in
     List.iter [1, "execute"; 2, "fetch"; 6, "result_destroy"] ~f:(fun (kind, boundary) ->
       run ("query_" ^ boundary) kind 0
-        (fun _ -> E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows) None;
+        (fun _ -> E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id) None;
       run ("fold_" ^ boundary) kind 0
-        (fun calls -> E.fold_rows p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~init:()
+        (fun calls -> E.fold_rows p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id ~init:()
           ~f:(fun _ () -> ignore (Stdlib.Atomic.fetch_and_add calls 1); Ok (Duckdb.Continue ()))) None);
     List.iter [3, "end_row"; 4, "flush"; 5, "appender_destroy"] ~f:(fun (kind, boundary) ->
       run ("ingest_" ^ boundary) kind 1
@@ -173,14 +173,14 @@ let native_success clock =
         name kind (H.counter 0) (H.appender_end_rows ()) (H.appender_flushes ()) (H.counter 2) in
     List.iter [1; 2; 6] ~f:(fun kind ->
       run ("query_success_" ^ Int.to_string kind) kind (fun () ->
-        Result.map (E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows) ~f:(fun result ->
-          check "held query successful ordered control" (equal_rows result (List.init 3000 ~f:(fun i -> Int64.of_int i, ())))));
+        Result.map (E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id) ~f:(fun result ->
+          check "held query successful ordered control" (equal_rows result (List.init 3000 ~f:(fun i -> Int64.of_int i)))));
       run ("fold_success_" ^ Int.to_string kind) kind (fun () ->
-        Result.map (E.fold_rows p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~init:0
+        Result.map (E.fold_rows p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id ~init:0
           ~f:(fun _ count -> Ok (Duckdb.Continue (count + 1)))) ~f:(fun count -> check "held fold successful control" (count = 3000))));
     List.iter [3; 4; 5] ~f:(fun kind ->
       run ("ingest_success_" ^ Int.to_string kind) kind (fun () -> E.ingest p ~schema:None ~table:"typed_success" ~batches:[[[cell 1L]]] ~flush:true));
-    check "held ingestion controls committed exact rows" (match E.query p "SELECT count(*)::BIGINT FROM typed_success" rows with Ok [3L, ()] -> true | _ -> false);
+    check "held ingestion controls committed exact rows" (match E.query p "SELECT count(*)::BIGINT FROM typed_success" rows ~row:Fn.id with Ok [3L] -> true | _ -> false);
     unwrap (E.shutdown p))
 let metadata_race clock =
   Eio.Switch.run (fun sw ->
@@ -195,7 +195,7 @@ let metadata_race clock =
     check "metadata invalidates ingestion" (match result with `Returned (Error _) -> true | _ -> false);
     check "metadata race suppresses ingestion COMMIT" (H.counter 2 = 0);
     Stdlib.Printf.printf "METADATA ack=%d end_rows=%d ingestion_commits=%d\n%!" (H.counter 0) (H.appender_end_rows ()) (H.counter 2);
-    check "metadata race rolled back" (match E.query p "SELECT i FROM typed_metadata" rows with Ok [] -> true | _ -> false);
+    check "metadata race rolled back" (match E.query p "SELECT i FROM typed_metadata" rows ~row:Fn.id with Ok [] -> true | _ -> false);
     unwrap (E.shutdown p))
 let selectors env =
   let clock = Eio.Stdenv.clock env in

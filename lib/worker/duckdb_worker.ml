@@ -20,12 +20,12 @@ module type S = sig
   val close_database : database -> (unit, D.error) result
   val execute : slot -> D.Bridge.request -> string -> (unit, D.error) result
   val transaction : slot -> D.Bridge.request -> f:(D.transaction -> ('a, D.error) result) -> ('a, D.error) result
-  val query : slot -> D.Bridge.request -> string -> 'row D.Row.t -> ('row list, D.error) result
-  val fold_rows : slot -> D.Bridge.request -> string -> 'row D.Row.t -> init:'a ->
+  val query : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> ('row list, D.error) result
+  val fold_rows : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.error) result) -> ('a, D.error) result
   val ingest : slot -> D.Bridge.request -> schema:string option -> table:string ->
     batches:D.cell list list list -> flush:bool -> (unit, D.error) result
-  val parquet_fold_rows : slot -> D.Bridge.request -> string list -> 'row D.Row.t -> init:'a ->
+  val parquet_fold_rows : slot -> D.Bridge.request -> string list -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.error) result) -> ('a, D.error) result
   val parquet_export : slot -> D.Bridge.request -> query:string -> destination:string -> (unit, D.error) result
 
@@ -72,20 +72,28 @@ module Make (Probe : Probe) = struct
 
   (* Every slot operation is one bridged request; [work] sees only the facade. *)
   let bridged (Slot c) request work = D.Bridge.run request c ~f:work
-  let fold_query c sql row ~init ~f =
-    D.with_prepared c sql ~f:(fun prepared ->
-      let* result = D.execute_prepared prepared in
-      D.fold_rows result row ~init ~f)
+  let raw sql fields ~row = D.Request.many ~oneshot:true D.Fields.[] fields ~row sql
+  (* Temporary: Task 9 merges the two error types. Decode failures keep their core shape. *)
+  let core_error (e : D.Request.request_error) = match e.cause with
+    | D.Request.Core error -> error
+    | D.Request.Decode_rejected { column; row; reason } -> D.Data_error (D.Scalar.Decode_rejected { column; row; reason })
+    | D.Request.Parameter_count { expected = 0; _ } -> D.Data_error (D.Scalar.Unbound_parameter 1)
+    (* Unreachable for parameterless [many] requests: Row_count, Unknown_column,
+       Missing_column, Encode_rejected and Rollback_failed cannot arise. *)
+    | _ -> D.Native_error ("unexpected request failure in " ^ D.Request.query_of_context e.context)
+  let callback_error context e = { D.Request.context; cause = D.Request.Core e }
 
   let execute slot request sql = bridged slot request (fun c -> D.execute c sql)
   let transaction slot request ~f =
     bridged slot request (fun c -> D.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))
-  let query slot request sql row =
+  let query slot request sql fields ~row =
     bridged slot request (fun c ->
-      fold_query c sql row ~init:[] ~f:(fun value values -> Ok (D.Continue (value :: values)))
-      |> Result.map ~f:List.rev)
-  let fold_rows slot request sql row ~init ~f =
-    bridged slot request (fun c -> fold_query c sql row ~init ~f:(in_callback f))
+      Result.map_error (D.Request.Connection.collect c (raw sql fields ~row) D.Args.[]) ~f:core_error)
+  let fold_rows slot request sql fields ~row ~init ~f =
+    bridged slot request (fun c ->
+      Result.map_error ~f:core_error
+        (D.Request.Connection.fold c (raw sql fields ~row) D.Args.[] ~init
+           ~f:(fun v acc -> Result.map_error (in_callback f v acc) ~f:(callback_error (D.Request.Query sql)))))
   let ingest slot request ~schema ~table ~batches ~flush =
     let append appender = List.fold_result batches ~init:() ~f:(fun () batch -> D.append_rows appender batch) in
     bridged slot request (fun c ->
@@ -93,10 +101,12 @@ module Make (Probe : Probe) = struct
         D.with_appender_transaction transaction ?schema table ~f:(fun appender ->
           let* () = append appender in
           if flush then (Probe.explicit_flush (); D.flush_appender appender) else Ok ())))
-  let parquet_fold_rows slot request names row ~init ~f =
+  let parquet_fold_rows slot request names fields ~row ~init ~f =
     bridged slot request (fun c ->
       let* paths = Result.all (List.map names ~f:D.Parquet.path) in
-      D.Parquet.fold_rows c paths row ~init ~f:(in_callback f))
+      Result.map_error ~f:core_error
+        (D.Parquet.fold c paths fields ~row ~init
+           ~f:(fun v acc -> Result.map_error (in_callback f v acc) ~f:(callback_error (D.Request.Query "read_parquet")))))
   let parquet_export slot request ~query ~destination =
     bridged slot request (fun c ->
       let* path = D.Parquet.path destination in
