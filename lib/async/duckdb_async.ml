@@ -388,11 +388,12 @@ module Request = struct
   type 'a submitted = (('a, Duckdb.Request.request_error) result request, error) result
   type nonrec error = Adapter of failure | Request of Duckdb.Request.request_error
   let typed pool work = admit pool (Typed work)
-  let submit_exec pool r args = typed pool (fun slot bridge -> W.request_exec slot bridge r args)
-  let submit_find pool r args = typed pool (fun slot bridge -> W.request_find slot bridge r args)
-  let submit_find_opt pool r args = typed pool (fun slot bridge -> W.request_find_opt slot bridge r args)
-  let submit_collect pool r args = typed pool (fun slot bridge -> W.request_collect slot bridge r args)
-  let submit_fold pool r args ~init ~f = typed pool (fun slot bridge -> W.request_fold slot bridge r args ~init ~f)
+  let submit_run pool shape r args = typed pool (fun slot bridge -> W.request_run slot bridge shape r args)
+  let submit_exec pool r args = submit_run pool Duckdb.Request.Exec r args
+  let submit_find pool r args = submit_run pool Duckdb.Request.Find r args
+  let submit_find_opt pool r args = submit_run pool Duckdb.Request.Find_opt r args
+  let submit_collect pool r args = submit_run pool Duckdb.Request.Collect r args
+  let submit_fold pool r args ~init ~f = submit_run pool (Duckdb.Request.Fold { init; f }) r args
   let submit_transaction pool ~f = typed pool (fun slot bridge -> W.request_transaction slot bridge ~f)
   let submit_ingest pool table batches ~flush =
     typed pool (fun slot bridge -> W.table_ingest slot bridge table batches ~flush)

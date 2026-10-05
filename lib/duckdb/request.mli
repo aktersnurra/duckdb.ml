@@ -70,6 +70,18 @@ module type CONNECTION = sig
     (unit, error) result future
 end
 
+(* What a run returns: [Exec] discards rows, [Find]/[Find_opt] admit one/at most one, [Collect] and [Fold] all. *)
+type ('row, 'out) shape =
+  | Exec : (unit, unit) shape
+  | Find : ('row, 'row) shape
+  | Find_opt : ('row, 'row option) shape
+  | Collect : ('row, 'row list) shape
+  | Fold : { init : 'a; f : 'row -> 'a -> ('a Query.step, request_error) result } -> ('row, 'a) shape
+
+(* The one execution entry point per shape, used by the adapters; prefer the named operations of [Connection], which
+   carry the row-count guards ([run] accepts any multiplicity with [Find], [Find_opt], [Collect] and [Fold]). *)
+val run : connection -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t -> ('out, request_error) result
+
 (* Runs a parameterless request on a connection, as [Connection.fold]. *)
 val fold_on : connection -> (unit, 'row, _) t -> init:'a -> f:('row -> 'a -> ('a Query.step, request_error) result) ->
   ('a, request_error) result

@@ -29,17 +29,8 @@ module type S = sig
 
   (** Typed requests (each one bridged request). Bridge failures are reported
       as [Core] request errors; row callbacks run inside the callback marker. *)
-  val request_exec : slot -> D.Bridge.request -> ('p, unit, [< `Zero ]) D.Request.t -> 'p D.Args.t ->
-    (unit, D.Request.request_error) result
-  val request_find : slot -> D.Bridge.request -> ('p, 'row, [< `One ]) D.Request.t -> 'p D.Args.t ->
-    ('row, D.Request.request_error) result
-  val request_find_opt : slot -> D.Bridge.request -> ('p, 'row, [< `Zero | `One ]) D.Request.t -> 'p D.Args.t ->
-    ('row option, D.Request.request_error) result
-  val request_collect : slot -> D.Bridge.request -> ('p, 'row, [< `Zero | `One | `Many ]) D.Request.t ->
-    'p D.Args.t -> ('row list, D.Request.request_error) result
-  val request_fold : slot -> D.Bridge.request -> ('p, 'row, [< `Zero | `One | `Many ]) D.Request.t ->
-    'p D.Args.t -> init:'a -> f:('row -> 'a -> ('a D.step, D.Request.request_error) result) ->
-    ('a, D.Request.request_error) result
+  val request_run : slot -> D.Bridge.request -> ('row, 'out) D.Request.shape -> ('p, 'row, _) D.Request.t ->
+    'p D.Args.t -> ('out, D.Request.request_error) result
   val request_transaction : slot -> D.Bridge.request ->
     f:(D.transaction -> ('a, D.Request.request_error) result) -> ('a, D.Request.request_error) result
   val table_ingest : slot -> D.Bridge.request -> ('c, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
@@ -109,14 +100,14 @@ module Make (Probe : Probe) = struct
     | Ok result -> result
     | Error error -> Error { R.context; cause = R.Core error }
   let in_query r = R.Query (R.query r)
-  let request_exec slot request r args = typed slot request ~context:(in_query r) (fun c -> R.Connection.exec c r args)
-  let request_find slot request r args = typed slot request ~context:(in_query r) (fun c -> R.Connection.find c r args)
-  let request_find_opt slot request r args =
-    typed slot request ~context:(in_query r) (fun c -> R.Connection.find_opt c r args)
-  let request_collect slot request r args =
-    typed slot request ~context:(in_query r) (fun c -> R.Connection.collect c r args)
-  let request_fold slot request r args ~init ~f =
-    typed slot request ~context:(in_query r) (fun c -> R.Connection.fold c r args ~init ~f:(in_callback f))
+  let marked : type row out. (row, out) R.shape -> (row, out) R.shape = function
+    | R.Fold { init; f } -> R.Fold { init; f = in_callback f }
+    | R.Exec -> R.Exec
+    | R.Find -> R.Find
+    | R.Find_opt -> R.Find_opt
+    | R.Collect -> R.Collect
+  let request_run slot request shape r args =
+    typed slot request ~context:(in_query r) (fun c -> R.run c (marked shape) r args)
   let request_transaction slot request ~f =
     typed slot request ~context:R.Transaction (fun c ->
       R.Connection.with_transaction c ~f:(fun tx -> with_callback (fun () -> f tx)))

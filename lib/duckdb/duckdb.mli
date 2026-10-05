@@ -264,6 +264,19 @@ module Request : sig
   (** A request error followed by an exceptional rollback; both are retained. *)
   exception Cleanup_exception of request_error * exn
 
+  (** What a run returns: [Exec] discards rows, [Find] and [Find_opt] admit one and at most one, [Collect] and [Fold]
+      any number. *)
+  type ('row, 'out) shape =
+    | Exec : (unit, unit) shape
+    | Find : ('row, 'row) shape
+    | Find_opt : ('row, 'row option) shape
+    | Collect : ('row, 'row list) shape
+    | Fold : { init : 'a; f : 'row -> 'a -> ('a step, request_error) result } -> ('row, 'a) shape
+
+  (** One execution entry point per shape, used by the adapters. Prefer the named operations, which carry the
+      row-count guards: [run] accepts any multiplicity with every shape but [Exec]. *)
+  val run : connection -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t -> ('out, request_error) result
+
   (** Operations over one synchronous owner, or one adapter pool. A request is
       validated against engine metadata when first prepared on a connection. *)
   module type QUERY = sig

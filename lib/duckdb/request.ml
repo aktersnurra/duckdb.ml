@@ -230,6 +230,25 @@ let run_find c within r args =
 let run_fold c within r args ~init ~f =
   run c within r args ~consume:(fun context result -> fold_result context r.rows result ~init ~f)
 
+type ('row, 'out) shape =
+  | Exec : (unit, unit) shape
+  | Find : ('row, 'row) shape
+  | Find_opt : ('row, 'row option) shape
+  | Collect : ('row, 'row list) shape
+  | Fold : { init : 'a; f : 'row -> 'a -> ('a Query.step, request_error) result } -> ('row, 'a) shape
+
+(* One execution path; the shape decides how many rows are admitted. *)
+let run_shape : type p row out. connection -> transaction option -> (row, out) shape -> (p, row, _) t -> p Args.t ->
+  (out, request_error) Result.t = fun c within shape r args ->
+  match shape with
+  | Exec -> run_exec c within r args
+  | Find -> run_find c within r args
+  | Find_opt -> at_most_one c within r args ~expected:`Zero_or_one
+  | Collect -> collect_rows c within r args
+  | Fold { init; f } -> run_fold c within r args ~init ~f
+
+let run c shape r args = run_shape c None shape r args
+
 let fold_on c r ~init ~f = run_fold c None r Args.[] ~init ~f
 
 (* Declared tables. *)
@@ -322,11 +341,11 @@ module Connection = struct
   type owner = connection
   type error = request_error
   type 'a future = 'a
-  let exec c r args = run_exec c None r args
-  let find c r args = run_find c None r args
-  let find_opt c r args = at_most_one c None r args ~expected:`Zero_or_one
-  let collect c r args = collect_rows c None r args
-  let fold c r args ~init ~f = run_fold c None r args ~init ~f
+  let exec c r args = run c Exec r args
+  let find c r args = run c Find r args
+  let find_opt c r args = run c Find_opt r args
+  let collect c r args = run c Collect r args
+  let fold c r args ~init ~f = run c (Fold { init; f }) r args
   let with_transaction c ~f =
     with_transaction_lifted ~lift:(fun error -> { context = Transaction; cause = Core error })
       ~outcome:transaction_outcome c ~f
@@ -339,9 +358,10 @@ module Transaction = struct
   type owner = transaction
   type error = request_error
   type 'a future = 'a
-  let exec tx r args = run_exec (transaction_connection tx) (Some tx) r args
-  let find tx r args = run_find (transaction_connection tx) (Some tx) r args
-  let find_opt tx r args = at_most_one (transaction_connection tx) (Some tx) r args ~expected:`Zero_or_one
-  let collect tx r args = collect_rows (transaction_connection tx) (Some tx) r args
-  let fold tx r args ~init ~f = run_fold (transaction_connection tx) (Some tx) r args ~init ~f
+  let run_tx tx shape r args = run_shape (transaction_connection tx) (Some tx) shape r args
+  let exec tx r args = run_tx tx Exec r args
+  let find tx r args = run_tx tx Find r args
+  let find_opt tx r args = run_tx tx Find_opt r args
+  let collect tx r args = run_tx tx Collect r args
+  let fold tx r args ~init ~f = run_tx tx (Fold { init; f }) r args
 end

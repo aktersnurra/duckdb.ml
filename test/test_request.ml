@@ -206,3 +206,13 @@ let () =
     | [ () ] -> ()
     | _ -> failwith "exec collected as rows must yield one unit");
   Stdlib.print_endline "request: zero-column decoders are column-checked=ok"
+
+(* One run per shape agrees with the named operations. *)
+let () =
+  seeded (fun c ->
+    assert (Option.equal String.equal (ok (R.run c R.Find by_id D.Args.[1L])) (ok (C.find c by_id D.Args.[1L])));
+    assert (Option.is_none (ok (R.run c R.Find_opt maybe D.Args.[9L])));
+    assert (List.length (ok (R.run c R.Collect rows D.Args.[0L])) = 2);
+    assert (ok (R.run c (R.Fold { init = 0; f = (fun _ n -> Ok (D.Continue (n + 1))) }) rows D.Args.[0L]) = 2);
+    ok (R.run c R.Exec insert D.Args.[3L; None; None]));
+  Stdlib.print_endline "request: shape run agrees with named operations=ok"
