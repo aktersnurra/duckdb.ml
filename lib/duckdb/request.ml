@@ -6,12 +6,10 @@ type zero = [ `Zero ]
 type one = [ `One ]
 type zero_or_one = [ `Zero | `One ]
 type many = [ `Zero | `One | `Many ]
-type multiplicity = Exactly_zero | Exactly_one | At_most_one | Any_count
 type 'params params = Params : ('params, _, _) Fields.t -> 'params params
 type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows
 type ('params, 'row, 'multiplicity) t =
-  { id : int; sql : string; oneshot : bool; multiplicity : multiplicity;
-    params : 'params params; rows : 'row rows }
+  { id : int; sql : string; oneshot : bool; params : 'params params; rows : 'row rows }
 (* A declared table; its SELECT and INSERT are built once so that they share
    statement-cache entries. *)
 type ('columns, 'row) table =
@@ -21,12 +19,12 @@ type ('columns, 'row) table =
 
 (* Cache identity: two requests never share a statement, even with equal SQL. *)
 let next_id = Stdlib.Atomic.make 0
-let make ?(oneshot = false) multiplicity params rows sql =
-  { id = Stdlib.Atomic.fetch_and_add next_id 1; sql; oneshot; multiplicity; params = Params params; rows }
-let exec ?oneshot params sql = make ?oneshot Exactly_zero params (Rows (Fields.[], ())) sql
-let one ?oneshot params fields ~row sql = make ?oneshot Exactly_one params (Rows (fields, row)) sql
-let zero_or_one ?oneshot params fields ~row sql = make ?oneshot At_most_one params (Rows (fields, row)) sql
-let many ?oneshot params fields ~row sql = make ?oneshot Any_count params (Rows (fields, row)) sql
+let make ?(oneshot = false) params rows sql =
+  { id = Stdlib.Atomic.fetch_and_add next_id 1; sql; oneshot; params = Params params; rows }
+let exec ?oneshot params sql = make ?oneshot params (Rows (Fields.[], ())) sql
+let one ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
+let zero_or_one ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
+let many ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
 let query r = r.sql
 
 type context = Query of string | Table of { schema : string; name : string } | Transaction

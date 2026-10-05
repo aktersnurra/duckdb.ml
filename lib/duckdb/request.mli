@@ -6,14 +6,10 @@ type one = [ `One ]
 type zero_or_one = [ `Zero | `One ]
 type many = [ `Zero | `One | `Many ]
 
-(* Runtime multiplicity: the phantom bounds which operations accept a request;
-   this tag tells execution how many rows to admit. *)
-type multiplicity = Exactly_zero | Exactly_one | At_most_one | Any_count
 type 'params params = Params : ('params, _, _) Fields.t -> 'params params
 type 'row rows = Rows : (_, 'fn, 'row) Fields.t * 'fn -> 'row rows
 type ('params, 'row, 'multiplicity) t =
-  { id : int; sql : string; oneshot : bool; multiplicity : multiplicity;
-    params : 'params params; rows : 'row rows }
+  { id : int; sql : string; oneshot : bool; params : 'params params; rows : 'row rows }
 (* A declared table; its SELECT and INSERT are built once so that they share
    statement-cache entries. *)
 type ('columns, 'row) table =
