@@ -66,7 +66,7 @@ let encode : type a. a S.t -> a option -> F.append_cell = fun typ value ->
   | Some value ->
     match S.repr typ with
     | S.Integer { encode; _ } -> id, false, encode value, 0., ""
-    | S.Floating -> id, false, 0L, value, ""
+    | S.Floating { encode; _ } -> id, false, 0L, encode value, ""
     | S.Bytes -> id, false, 0L, 0., value
 let validate_cell a row column (Cell (field, value)) =
   let apply : type b. b S.t -> b option -> (F.append_cell, error) result = fun typ value ->
@@ -74,9 +74,7 @@ let validate_cell a row column (Cell (field, value)) =
     if actual <> S.native_id typ then
       Error (Data_error (S.Type_mismatch { index = column; expected = S.name typ; actual }))
     else if Option.is_none value && not a.nullable.(column) then Error (Data_error (S.Null { column; row }))
-    else
-      let+ () = data (S.validate_option typ value) in
-      encode typ value in
+    else Ok (encode typ value) in
   match field with S.Required typ -> apply typ (Some value) | S.Nullable typ -> apply typ value
 let validate_row a row cells =
   let expected = Array.length a.types and actual = List.length cells in

@@ -12,11 +12,11 @@ type ('a, 'nullability) t =
 
 module Values : sig
   val bool : (bool, non_null) t
-  val int8 : (int, non_null) t
-  val int16 : (int, non_null) t
+  val int8 : (int8, non_null) t
+  val int16 : (int16, non_null) t
   val int32 : (int32, non_null) t
   val int64 : (int64, non_null) t
-  val float32 : (float, non_null) t
+  val float32 : (float32, non_null) t
   val float64 : (float, non_null) t
   val string : (string, non_null) t
   val blob : (string, non_null) t

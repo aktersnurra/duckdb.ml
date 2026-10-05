@@ -1,14 +1,13 @@
 open! Base
 type _ t =
-  | Bool : bool t | Int8 : int t | Int16 : int t | Int32 : int32 t | Int64 : int64 t
-  | Float32 : float t | Float64 : float t | String : string t | Blob : string t
+  | Bool : bool t | Int8 : int8 t | Int16 : int16 t | Int32 : int32 t | Int64 : int64 t
+  | Float32 : float32 t | Float64 : float t | String : string t | Blob : string t
   | Date : int32 t | Timestamp_s : int64 t | Timestamp_ms : int64 t
   | Timestamp_us : int64 t | Timestamp_ns : int64 t | Timestamp_tz : int64 t
 
 type _ field = Required : 'a t -> 'a field | Nullable : 'a t -> 'a option field
 
 type error =
-  | Range of { expected : string; value : string }
   | Type_mismatch of { index : int; expected : string; actual : int }
   | Null of { column : int; row : int }
   | Index of { index : int; length : int }
@@ -41,29 +40,23 @@ let all =
 
 type _ repr =
   | Integer : { encode : 'a -> int64; decode : int64 -> 'a } -> 'a repr
-  | Floating : float repr
+  | Floating : { encode : 'a -> float; decode : float -> 'a } -> 'a repr
   | Bytes : string repr
 
-let small_int = Integer { encode = Int64.of_int; decode = Int64.to_int_exn }
+module I8 = Stdlib_stable.Int8
+module I16 = Stdlib_stable.Int16
+module F32 = Stdlib_stable.Float32
+let int8 = Integer { encode = (fun x -> Int64.of_int (I8.to_int x)); decode = (fun n -> I8.of_int (Int64.to_int_trunc n)) }
+let int16 = Integer { encode = (fun x -> Int64.of_int (I16.to_int x)); decode = (fun n -> I16.of_int (Int64.to_int_trunc n)) }
 let int32 = Integer { encode = Stdlib.Int64.of_int32; decode = Stdlib.Int64.to_int32 }
 let int64 = Integer { encode = Fn.id; decode = Fn.id }
 let repr : type a. a t -> a repr = function
   | Bool -> Integer { encode = (fun b -> if b then 1L else 0L); decode = (fun n -> not (Int64.equal n 0L)) }
-  | Int8 -> small_int | Int16 -> small_int
+  | Int8 -> int8 | Int16 -> int16
   | Int32 -> int32 | Date -> int32
   | Int64 -> int64 | Timestamp_s -> int64 | Timestamp_ms -> int64
   | Timestamp_us -> int64 | Timestamp_ns -> int64 | Timestamp_tz -> int64
-  | Float32 -> Floating | Float64 -> Floating
+  | Float32 -> Floating { encode = F32.to_float; decode = F32.of_float }
+  | Float64 -> Floating { encode = Fn.id; decode = Fn.id }
   | String -> Bytes | Blob -> Bytes
-let round_float32 x = Stdlib.Int32.float_of_bits (Stdlib.Int32.bits_of_float x)
-let validate : type a. a t -> a -> (unit, error) result = fun typ value ->
-  let range value = Error (Range { expected = name typ; value }) in
-  match typ with
-  | Int8 -> if value < -128 || value > 127 then range (Int.to_string value) else Ok ()
-  | Int16 -> if value < -32768 || value > 32767 then range (Int.to_string value) else Ok ()
-  | Float32 ->
-    if Float.is_nan value || Float.equal (round_float32 value) value then Ok ()
-    else range (Float.to_string value)
-  | _ -> Ok ()
-let validate_option typ = function None -> Ok () | Some value -> validate typ value
 let witness : type a. a field -> packed = function Required typ -> Packed typ | Nullable typ -> Packed typ

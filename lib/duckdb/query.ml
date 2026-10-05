@@ -83,7 +83,7 @@ let bind_value : type a. prepared -> int -> a S.t -> a -> unit = fun p index typ
   let id = S.native_id typ in
   match S.repr typ with
   | S.Integer { encode; _ } -> F.bind_int64 p.native index id (encode value)
-  | S.Floating -> F.bind_float p.native index id value
+  | S.Floating { encode; _ } -> F.bind_float p.native index id (encode value)
   | S.Bytes -> F.bind_string p.native index id value
 (* Unresolved parameters accept whichever witness the caller supplies. *)
 let accepts actual typ = actual = F.Type_id.invalid || actual = F.Type_id.any || actual = S.native_id typ
@@ -97,7 +97,6 @@ let bind : type a. prepared -> int -> a S.field -> a -> (unit, error) result = f
         let* () =
           if accepts actual typ then Ok ()
           else Error (Data_error (S.Type_mismatch { index; expected = S.name typ; actual })) in
-        let* () = data (S.validate_option typ value) in
         p.bound.(index - 1) <- false;
         Exn.protect ~finally:(fun () -> F.clear_prepared_input p.native)
           ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->

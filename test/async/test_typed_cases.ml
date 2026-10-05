@@ -52,7 +52,7 @@ let wide_and_multichunk () =
   Monitor.protect ~finally:(fun () -> close pool) (fun () ->
     complete (ok (A.query pool "SELECT 127::TINYINT, NULL::VARCHAR, 9223372036854775807::BIGINT" wide_rows)) >>= fun result ->
     let result = ok result in
-    require "NULL and width owned roundtrip" (match result with [127, (None, (value, ()))] -> Int64.equal value Int64.max_value | _ -> false);
+    require "NULL and width owned roundtrip" (match result with [127s, (None, (value, ()))] -> Int64.equal value Int64.max_value | _ -> false);
     let admissions = dispatch_count () in
     complete (ok (A.query pool "SELECT i::BIGINT FROM range(3000) t(i)" rows)) >>| fun result ->
     require "multi-chunk ordered owned query" (List.equal (fun (value, ()) (expected, ()) -> Int64.equal value expected) (ok result) (List.init 3000 ~f:(fun i -> Int64.of_int i, ())));

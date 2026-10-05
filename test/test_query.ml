@@ -48,12 +48,13 @@ let roundtrip c typ equal values =
 let () =
   connected (fun c ->
     roundtrip c S.Bool Bool.equal [false; true];
-    roundtrip c S.Int8 Int.equal [-128; -1; 0; 127];
-    roundtrip c S.Int16 Int.equal [-32768; 32767];
+    roundtrip c S.Int8 Stdlib_stable.Int8.equal [-128s; -1s; 0s; 127s];
+    roundtrip c S.Int16 Stdlib_stable.Int16.equal [-32768S; 32767S];
     roundtrip c S.Int32 Int32.equal [Int32.min_value; Int32.max_value];
     roundtrip c S.Int64 Int64.equal [Int64.min_value; Int64.max_value];
     let float_equal a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b) in
-    roundtrip c S.Float32 float_equal [0.; -0.; S.round_float32 0.1; Stdlib.Float.ldexp 1. (-149); Float.infinity; Float.neg_infinity; Float.nan];
+    roundtrip c S.Float32 (fun a b -> float_equal (Stdlib_stable.Float32.to_float a) (Stdlib_stable.Float32.to_float b))
+      [0.s; -0.s; 0.1s; Stdlib_stable.Float32.of_float (Stdlib.Float.ldexp 1. (-149)); Stdlib_stable.Float32.infinity; Stdlib_stable.Float32.neg_infinity; Stdlib_stable.Float32.nan];
     roundtrip c S.Float64 float_equal [0.1; Float.max_finite_value; Float.min_positive_subnormal_value; Float.nan; -0.];
     roundtrip c S.String String.equal [""; "a\000b"; String.make 10000 'x'; "λ"];
     roundtrip c S.Blob String.equal [""; "\000\255abc\000"; String.make 10000 '\255'];
@@ -75,12 +76,10 @@ let () =
         Ok ()))
     done;
     let p = ok (prepare c "SELECT ?::TINYINT, ?::FLOAT") in
-    error (function Data_error (S.Range _) -> true | _ -> false) (bind p 1 (required S.Int8) 128);
-    error (function Data_error (S.Range _) -> true | _ -> false) (bind p 2 (required S.Float32) 0.1);
     schema (bind p 1 (required S.Int64) 1L);
     ok (close_prepared p); ok (close_prepared p); closed (reset p);
     ok (with_prepared c "SELECT ?" ~f:(fun p ->
-      ok (bind p 1 (required S.Int8) 2);
+      ok (bind p 1 (required S.Int8) 2s);
       assert (List.length (ok (rows (ok (execute_prepared p)) (decode S.Int8))) = 1);
       ok (reset p); ok (bind p 1 (required S.String) "changed type");
       assert (List.length (ok (rows (ok (execute_prepared p)) (decode S.String))) = 1); Ok ()));

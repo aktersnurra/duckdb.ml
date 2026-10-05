@@ -489,7 +489,6 @@ let close_database db =
   close_once gate ~destroy:(fun () -> destroy_database db) ~refuse:(fun () ->
     all_ok [ require (idle gate) Busy; require (fun () -> List.is_empty db.children) Live_children ])
 let reject_nul sql = if String.contains sql '\000' then Error Embedded_nul else Ok ()
-let data result = Result.map_error result ~f:(fun error -> Data_error error)
 let execute c sql =
   let* () = reject_nul sql in
   with_admission c None (fun () -> raw_execute c sql)

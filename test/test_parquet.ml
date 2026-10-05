@@ -4,6 +4,7 @@ let rec message = function Native_error s -> s | Rollback_failed (a,b) -> messag
 let ok = function Ok x -> x | Error e -> failwith (message e)
 let error = function Error e -> e | Ok _ -> failwith "expected error"
 let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b)
+let floats32 a b = floats (Stdlib_stable.Float32.to_float a) (Stdlib_stable.Float32.to_float b)
 let write path text = let ch = Stdlib.open_out_bin path in Exn.protect ~finally:(fun () -> Stdlib.close_out ch) ~f:(fun () -> Stdlib.output_string ch text)
 let read path = let ch = Stdlib.open_in_bin path in Exn.protect ~finally:(fun () -> Stdlib.close_in ch) ~f:(fun () -> Stdlib.really_input_string ch (Stdlib.in_channel_length ch))
 let scalar : type a. connection -> string -> a Scalar.t -> a list -> (a -> a -> bool) -> unit = fun c dir typ values equal ->
@@ -30,10 +31,10 @@ let () =
     ~f:(fun () ->
       ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
         scalar c dir Bool [true;false] Bool.equal;
-        scalar c dir Int8 [-128;127] Int.equal; scalar c dir Int16 [-32768;32767] Int.equal;
+        scalar c dir Int8 [-128s;127s] Stdlib_stable.Int8.equal; scalar c dir Int16 [-32768S;32767S] Stdlib_stable.Int16.equal;
         scalar c dir Int32 [Int32.min_value;Int32.max_value] Int32.equal;
         scalar c dir Int64 [Int64.min_value;9007199254740993L;Int64.max_value] Int64.equal;
-        scalar c dir Float32 [0.;-0.;Scalar.round_float32 0.1;Float.infinity;Float.neg_infinity;Float.nan] floats;
+        scalar c dir Float32 [0.s; -0.s; 0.1s; Stdlib_stable.Float32.infinity; Stdlib_stable.Float32.neg_infinity; Stdlib_stable.Float32.nan] floats32;
         scalar c dir Float64 [0.;-0.;0.1;Float.infinity;Float.neg_infinity;Float.nan] floats;
         scalar c dir String ["";"\000quote' text";String.make 100000 's'] String.equal;
         scalar c dir Blob ["";"\000\255\128";String.make 100000 '\255'] String.equal;

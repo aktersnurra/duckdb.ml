@@ -10,7 +10,7 @@ let check_type (native @ local) index typ =
 let read : type a. t @ local -> int -> int -> a S.t -> a = fun (chunk @ local) column row typ ->
   match S.repr typ with
   | S.Integer { decode; _ } -> decode (F.box_int64 (F.chunk_int64 chunk.native column row))
-  | S.Floating -> F.chunk_float chunk.native column row
+  | S.Floating { decode; _ } -> decode (F.chunk_float chunk.native column row)
   | S.Bytes -> F.chunk_string chunk.native column row
 let column : type a. t @ local -> column:int -> row:int -> a S.field -> (a, Resource.error) result =
   fun (chunk @ local) ~column ~row field ->

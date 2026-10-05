@@ -176,3 +176,21 @@ let () =
     ok (C.exec c insert D.Args.[6L; None; None]);
     assert (Int64.equal (count c "t") 4L));
   Stdlib.print_endline "request: transaction lending, rollback on request error, in-transaction schema change=ok"
+
+(* Exact small numerics: boundary values roundtrip without validation. *)
+let () =
+  connected (fun c ->
+    ok (C.exec c (R.exec D.Fields.[] "CREATE TABLE n(a TINYINT, b SMALLINT, f FLOAT)") D.Args.[]);
+    let insert = R.exec D.Fields.[int8; int16; float32] "INSERT INTO n VALUES (?, ?, ?)" in
+    ok (C.exec c insert D.Args.[-128s; 32767S; 0.1s]);
+    ok (C.exec c insert D.Args.[127s; -32768S; -0.s]);
+    let rows = R.many D.Fields.[] D.Fields.[int8; int16; float32] ~row:(fun a b f -> (a, b, f))
+      "SELECT a, b, f FROM n ORDER BY a" in
+    match ok (C.collect c rows D.Args.[]) with
+    | [ (a1, b1, f1); (a2, b2, f2) ] ->
+      assert (Stdlib_stable.Int8.to_int a1 = -128 && Stdlib_stable.Int16.to_int b1 = 32767);
+      assert (Int64.equal (Stdlib.Int64.bits_of_float (Stdlib_stable.Float32.to_float f1)) (Stdlib.Int64.bits_of_float (Stdlib_stable.Float32.to_float 0.1s)));
+      assert (Stdlib_stable.Int8.to_int a2 = 127 && Stdlib_stable.Int16.to_int b2 = -32768);
+      assert (Int64.equal (Stdlib.Int64.bits_of_float (Stdlib_stable.Float32.to_float f2)) Int64.min_value)
+    | _ -> failwith "small numerics: unexpected rows");
+  Stdlib.print_endline "request: int8/int16/float32 boundaries roundtrip exactly=ok"

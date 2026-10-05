@@ -20,6 +20,7 @@ let scalar : type a. connection -> a Scalar.t -> a list -> (a -> a -> bool) -> u
   let actual = rows c "SELECT x FROM scalars ORDER BY rowid" Row.(Column (Nullable typ,Empty)) |> List.map ~f:fst in
   assert (List.equal (Option.equal equal) actual expected)
 let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b)
+let floats32 a b = floats (Stdlib_stable.Float32.to_float a) (Stdlib_stable.Float32.to_float b)
 type _ Stdlib.Effect.t += Pause : unit Stdlib.Effect.t
 let metadata_boundaries c =
   (* The pinned engine's metadata chunks contain up to 2048 rows. A generated
@@ -77,10 +78,10 @@ let () =
   ok (with_database (ok (Config.create Memory)) ~f:(fun db -> with_connection db ~f:(fun c ->
     metadata_boundaries c;
     scalar c Bool [false;true] Bool.equal;
-    scalar c Int8 [-128;127] Int.equal; scalar c Int16 [-32768;32767] Int.equal;
+    scalar c Int8 [-128s;127s] Stdlib_stable.Int8.equal; scalar c Int16 [-32768S;32767S] Stdlib_stable.Int16.equal;
     scalar c Int32 [Int32.min_value;Int32.max_value] Int32.equal;
     scalar c Int64 [Int64.min_value;9007199254740993L;Int64.max_value] Int64.equal;
-    scalar c Float32 [0.;-0.;Scalar.round_float32 0.1;Float.infinity;Float.neg_infinity;Float.nan] floats;
+    scalar c Float32 [0.s; -0.s; 0.1s; Stdlib_stable.Float32.infinity; Stdlib_stable.Float32.neg_infinity; Stdlib_stable.Float32.nan] floats32;
     scalar c Float64 [0.;-0.;0.1;Float.infinity;Float.neg_infinity;Float.nan] floats;
     scalar c String ["";"quote'\000text";String.make 100000 'z'] String.equal;
     scalar c Blob ["";"\000\255\128binary";String.make 100000 '\255'] String.equal;
@@ -107,10 +108,6 @@ let () =
       ignore (error result); assert (Int64.equal (count c "a") 0L)) in
     invalid [[];[Cell (Required Int64,1L);Cell (Required Int64,2L)];
       [Cell (Required Float64,1.)];[Cell (Nullable Int64,None)]];
-    ok (execute c "CREATE TABLE narrow(x TINYINT)");
-    ignore (error (with_appender c "narrow" ~f:(fun a -> append_rows a [[Cell (Required Int8,128)]])));
-    ok (execute c "CREATE TABLE fp(x FLOAT)");
-    ignore (error (with_appender c "fp" ~f:(fun a -> append_rows a [[Cell (Required Float32,0.1)]])));
     ignore (error (with_appender c "a" ~f:(fun a ->
       ok (append_rows a [[Cell (Required Int64,1L)];[Cell (Required Int64,1L)]]);
       let first = error (flush_appender a) in

@@ -2,4 +2,4 @@
  (flags (:standard -extension-universe beta))
  (private_modules resource query borrowed_chunk scalar row appender parquet
   codec fields columns args request table)
- (libraries base threads duckdb-ffi))
+ (libraries base threads stdlib_stable duckdb-ffi))

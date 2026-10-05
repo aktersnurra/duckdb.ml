@@ -42,7 +42,7 @@ let typed_values_and_failures () =
     let p = pool sw in
     check "typed widths and NULL are owned" (match E.query p
       "SELECT 127::TINYINT, NULL::VARCHAR, 9223372036854775807::BIGINT" wide_rows with
-      | Ok [127, (None, (value, ()))] -> Int64.equal value Int64.max_value | _ -> false);
+      | Ok [127s, (None, (value, ()))] -> Int64.equal value Int64.max_value | _ -> false);
     check "ordered multi-chunk query" (match whole "query" (fun () -> E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows) with
       | Ok values -> equal_rows values (List.init 3000 ~f:(fun i -> Int64.of_int i, ())) | Error _ -> false);
     check "empty typed result" (match E.query p "SELECT i::BIGINT FROM range(0) t(i)" rows with Ok [] -> true | _ -> false);

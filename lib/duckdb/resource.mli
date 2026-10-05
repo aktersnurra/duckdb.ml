@@ -160,6 +160,3 @@ val cache_remove : connection -> key:int -> unit
 (* A cached child runs one operation as a child of [transaction]. *)
 val lend_child : child -> transaction option -> (unit -> 'a) -> 'a
 val child_transaction : child -> transaction option
-
-(* Lifts a scalar validation failure into [Data_error]. *)
-val data : ('a, Scalar.error) result -> ('a, error) result

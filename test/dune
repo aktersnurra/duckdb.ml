@@ -46,7 +46,7 @@
  (deps check_interfaces.sh ../lib/duckdb/duckdb.mli (glob_files compile/*))
  (action (run bash %{dep:check_interfaces.sh} %{ocamlc})))
 (test (name test_scalar) (modules test_scalar) (libraries base duckdb))
-(test (name test_query) (modules test_query) (libraries base threads duckdb duckdb-ffi)
+(test (name test_query) (modules test_query) (libraries base threads stdlib_stable duckdb duckdb-ffi)
  (flags (:standard -alert -do_not_spawn_domains)))
 (rule (alias runtest)
  (deps check_query_modes.sh ../lib/duckdb/duckdb.mli (glob_files query_compile/*))
@@ -109,10 +109,10 @@
 (test
  (name test_appender)
  (modules test_appender)
- (libraries duckdb duckdb-ffi base threads)
+ (libraries duckdb duckdb-ffi stdlib_stable base threads)
  (flags (:standard -extension-universe beta)))
 
-(test (name test_parquet) (modules test_parquet) (libraries duckdb duckdb-ffi base))
+(test (name test_parquet) (modules test_parquet) (libraries stdlib_stable duckdb duckdb-ffi base))
 
 (test (name test_appender_concurrency) (modules test_appender_concurrency)
  (libraries duckdb duckdb-ffi base threads)
@@ -214,7 +214,7 @@
   (run timeout 120 ./%{exe:test_adapter_bridge_eio.exe}))))
 (alias (name runtest) (deps (alias adapter-bridge-responsiveness)))
 (tests (names test_schema_epoch test_request) (modules test_schema_epoch test_request)
- (libraries base threads duckdb duckdb-ffi) (modes exe)
+ (libraries base threads stdlib_stable duckdb duckdb-ffi) (modes exe)
  (foreign_stubs (language c) (names epoch_hooks)
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra)))
