@@ -83,6 +83,21 @@ Probes run before the plan (P1–P3), all done:
   returning or capturing the session itself is rejected ("is \"local\" to the
   parent region").
 
+- **P6 (done, found in Task 11).** Binding operators cannot take a local
+  continuation: `let ( let* ) x (f @ local) = …` is rejected at use sites
+  ("expected to have type ('a, 'b) result -> ('d -> 'e) -> 'f"). After a
+  plain `let*`, a local handle cannot be used. Sequencing over local handles
+  uses `ppx_let`'s `let%bindl_fun` with Base's `Result.Let_syntax` (the ppx
+  stack-allocates the continuation; verified), explicit `match`, or
+  `Result.bind … [@nontail]`. The library itself stays ppx-free.
+- **P7 (done, found in Task 11).** A local closure cannot be an argument in
+  a tail call ("because it is an argument in a tail call"); such calls need
+  `[@nontail]` or a `match`.
+- **P8 (found in the Task 11 review).** The runtime effect barrier
+  (`Effects_not_allowed`) stays load-bearing: a handler installed outside a
+  scope can capture a continuation holding a local handle; modes don't
+  prevent it.
+
 ## 1. Handles and modes
 
 ### One session type, indexed by kind
