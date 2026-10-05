@@ -9,7 +9,8 @@ module Q = A.Request
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let request_ok = function
   | Ok x -> x
-  | Error (Q.Request e) -> failwith ("unexpected request error in " ^ R.query_of_context e.context)
+  | Error (Q.Request { context; _ }) ->
+    failwith ("unexpected request error in " ^ match context with D.Error.Query sql -> sql | _ -> "non-query context")
   | Error (Q.Adapter _) -> failwith "unexpected adapter failure"
 let require name condition = if not condition then failwith name
 let notes = D.Table.(declare "notes" Columns.[ "value", int64; "note", nullable string ] ~row:(fun v n -> (v, n)))
@@ -43,7 +44,7 @@ let main () =
   require "fold" (n = 2);
   Q.find pool one_note D.Args.[42L] >>= fun absent ->
   require "Row_count is a request error" (match absent with
-    | Error (Q.Request { cause = R.Row_count { actual = `Zero; _ }; _ }) -> true | _ -> false);
+    | Error (Q.Request { cause = D.Error.Row_count { actual = `Zero; _ }; _ }) -> true | _ -> false);
   Q.with_transaction pool ~f:(fun tx ->
     Result.bind (R.Transaction.exec tx insert D.Args.[3L; Some "c"]) ~f:(fun () ->
       R.Transaction.find tx one_note D.Args.[99L])) >>= fun rolled ->

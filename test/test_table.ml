@@ -4,18 +4,17 @@ module R = D.Request
 module C = R.Connection
 module T = D.Table
 let ( let* ) x f = Result.bind x ~f
-let core_ok = function Ok x -> x | Error (D.Native_error s) -> failwith s | Error _ -> failwith "unexpected core error"
-let rec describe (e : R.request_error) = match e.cause with
-  | R.Core (D.Native_error s) -> "Core Native_error: " ^ s
-  | R.Core (D.Data_error _) -> "Core Data_error"
-  | R.Core _ -> "Core"
-  | R.Parameter_count _ -> "Parameter_count" | R.Row_count _ -> "Row_count"
-  | R.Unknown_column { name } -> "Unknown_column " ^ name | R.Missing_column { name } -> "Missing_column " ^ name
-  | R.Encode_rejected _ -> "Encode_rejected" | R.Decode_rejected _ -> "Decode_rejected"
-  | R.Rollback_failed { primary; _ } -> "Rollback_failed: " ^ describe primary
+let core_ok = function Ok x -> x | Error { D.Error.cause = Native s; _ } -> failwith s | Error _ -> failwith "unexpected core error"
+let rec describe (e : D.Error.t) = match e.cause with
+  | Native s -> "Native: " ^ s
+  | Parameter_count _ -> "Parameter_count" | Row_count _ -> "Row_count"
+  | Unknown_column { name } -> "Unknown_column " ^ name | Missing_column { name } -> "Missing_column " ^ name
+  | Encode_rejected _ -> "Encode_rejected" | Decode_rejected _ -> "Decode_rejected"
+  | Rollback_failed { primary; _ } -> "Rollback_failed: " ^ describe primary
+  | _ -> "other cause"
 let ok = function Ok x -> x | Error e -> failwith ("unexpected request error: " ^ describe e)
 let failed name predicate = function
-  | Error (e : R.request_error) when predicate e -> e
+  | Error (e : D.Error.t) when predicate e -> e
   | Error e -> failwith (name ^ ": unexpected " ^ describe e)
   | Ok _ -> failwith (name ^ ": unexpected success")
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
@@ -50,7 +49,7 @@ let () =
     assert (List.equal equal_note (read c) [ { value = 1L; note = Some "one" } ]);
     let typo = T.(declare "notes" Columns.[ "valu", int64 ] ~row:Fn.id) in
     ignore (failed "unknown column" (fun e -> match e.cause with
-      | R.Unknown_column { name = "valu" } -> true | _ -> false)
+      | D.Error.Unknown_column { name = "valu" } -> true | _ -> false)
       (T.with_appender c typo ~f:(fun a -> T.append a [D.Args.[2L]])));
     assert (Int64.equal (count c "notes") 1L));
   Stdlib.print_endline "table: reordered catalog columns by name, Unknown_column before append=ok"
@@ -62,7 +61,7 @@ let () =
     ddl c "CREATE TABLE events(id BIGINT DEFAULT nextval('ids'), kind VARCHAR NOT NULL, extra VARCHAR)";
     let kinds = T.(declare "events" Columns.[ "kind", string ] ~row:Fn.id) in
     ignore (failed "missing column" (fun e -> match e.cause with
-      | R.Missing_column { name = "extra" } -> true | _ -> false)
+      | D.Error.Missing_column { name = "extra" } -> true | _ -> false)
       (T.with_appender c kinds ~f:(fun a -> T.append a [D.Args.["x"]])));
     ddl c "ALTER TABLE events ALTER extra SET DEFAULT 'none'";
     ok (T.with_appender c kinds ~f:(fun a -> T.append a [D.Args.["login"]; D.Args.["logout"]]));
@@ -77,14 +76,14 @@ let () =
   connected (fun c ->
     ddl c "CREATE TABLE notes(value INTEGER NOT NULL, note VARCHAR)";
     ignore (failed "type mismatch" (fun e -> match e.cause with
-      | R.Core (D.Data_error (D.Scalar.Type_mismatch _)) -> true | _ -> false)
+      | D.Error.Type_mismatch _ -> true | _ -> false)
       (T.with_appender c notes ~f:(fun a -> T.append a [D.Args.[1L; None]])));
     ddl c "DROP TABLE notes";
     ddl c "CREATE TABLE notes(value BIGINT NOT NULL, note VARCHAR)";
     let nullable_value = T.(declare "notes" Columns.[ "value", nullable int64; "note", nullable string ]
       ~row:(fun v n -> (v, n))) in
     ignore (failed "not null" (fun e -> match e.cause with
-      | R.Core (D.Data_error (D.Scalar.Null _)) -> true | _ -> false)
+      | D.Error.Null _ -> true | _ -> false)
       (T.with_appender c nullable_value ~f:(fun a -> T.append a [D.Args.[None; None]])));
     assert (Int64.equal (count c "notes") 0L));
   Stdlib.print_endline "table: catalog type mismatch at open, NOT NULL per row=ok"
@@ -99,13 +98,13 @@ let () =
     ddl c "CREATE TABLE notes(value BIGINT NOT NULL, note VARCHAR DEFAULT NULL)";
     ok (T.with_appender c checked ~f:(fun a ->
       ignore (failed "encode" (fun e -> match e.cause with
-        | R.Encode_rejected { index = 1; _ } -> true | _ -> false) (T.append a [D.Args.[5L]; D.Args.[-1L]]));
+        | D.Error.Encode_rejected { index = 1; _ } -> true | _ -> false) (T.append a [D.Args.[5L]; D.Args.[-1L]]));
       T.append a [D.Args.[6L]]));
     assert (Int64.equal (count c "notes") 1L);
-    ignore (failed "callback error" (fun e -> match e.cause with R.Row_count _ -> true | _ -> false)
+    ignore (failed "callback error" (fun e -> match e.cause with D.Error.Row_count _ -> true | _ -> false)
       (T.with_appender c notes ~f:(fun a ->
         let* () = T.append a [D.Args.[7L; None]] in
-        Error { R.context = R.Query "callback"; cause = R.Row_count { expected = `One; actual = `Zero } })));
+        Error { D.Error.context = Query "callback"; cause = Row_count { expected = `One; actual = `Zero } })));
     assert (Int64.equal (count c "notes") 1L);
     ok (C.with_transaction c ~f:(fun tx -> T.with_appender_transaction tx notes ~f:(fun a -> T.append a [D.Args.[8L; None]])));
     assert (Int64.equal (count c "notes") 2L));
@@ -140,10 +139,10 @@ let () =
         ~init:0 ~f:(fun _ n -> Int.incr calls; Ok (if n = 1 then D.Stop n else D.Continue (n + 1)))) in
       assert (stopped = 1 && !calls = 2);
       ignore (failed "empty path list" (fun e -> match e.cause with
-        | R.Core (D.Invalid_configuration _) -> true | _ -> false)
+        | D.Error.Invalid_configuration _ -> true | _ -> false)
         (D.Parquet.fold c [] D.Fields.[int64] ~row:Fn.id ~init:() ~f:(fun _ () -> Ok (D.Continue ()))));
       ignore (failed "wrong file shape" (fun e -> match e.cause with
-        | R.Core (D.Data_error (D.Scalar.Column_count _)) -> true | _ -> false)
+        | D.Error.Column_count _ -> true | _ -> false)
         (D.Parquet.fold c [path] D.Fields.[int64] ~row:Fn.id ~init:() ~f:(fun _ () -> Ok (D.Continue ()))))));
   Stdlib.print_endline "table: Parquet fold/fold_table across files, Stop, empty list, file shape=ok"
 

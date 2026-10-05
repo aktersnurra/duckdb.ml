@@ -11,7 +11,7 @@ external selected_gate : bool -> unit = "delivery_selected_gate"
 external selected_entered : unit -> bool = "delivery_selected_entered"
 let check name condition = if not condition then failwith name
 let ok = function Ok x -> x | Error _ -> failwith "Query expected Ok"
-let cancelled = function Error D.Cancelled -> () | _ -> failwith "Query expected Cancelled"
+let cancelled = function Error { D.Error.cause = Cancelled; _ } -> () | _ -> failwith "Query expected Cancelled"
 let reset () = reset_hooks (); query_mode ()
 let release () = for i = 1 to 32 do gate i false done; selected_gate false
 let wait id = E.await ~label:("Query native boundary " ^ Int.to_string id) (fun () -> entered id > 0)
@@ -115,11 +115,11 @@ let running owner =
       wait 5; ok (B.cancel request); wait_count 4 1;
       let before = count 4 in gate 5 false;
       (match join () with
-       | Error (D.Native_error message) -> check "Query actual interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
+       | Error { cause = Native message; _ } -> check "Query actual interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
        | _ -> failwith "Query native diagnostic flattened");
       check "Query repeat delivery survives execute reset" (count 4 > before && count 3 = 1);
       check "Query actually interrupted owner discarded" (count 5 = 1);
-      check "Query discarded owner closed" (match D.execute owner "SELECT 1" with Error D.Closed -> true | _ -> false);
+      check "Query discarded owner closed" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false);
       one_controller ()))
 let fetch_case ?(empty = false) point owner =
   reset ();
@@ -174,7 +174,7 @@ let cleanup_join ~schema ~result owner =
       E.await ~label:"Query worker join or destructor" (fun () -> count 11 > 0 || entered destructor > 0);
       check "Query direct cleanup joins before destructor" (count 11 = 1 && entered destructor = 0);
       check "Query no detach or owner close while selected" (count 13 = 0 && count 5 = 0);
-      check "Query owner cannot reuse while selected" (match D.execute owner "SELECT 1" with Error D.Busy -> true | _ -> false);
+      check "Query owner cannot reuse while selected" (match D.execute owner "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
       selected_gate false; wait destructor;
       check "Query destructor follows retirement and join" (count 12 = 1 && count 14 = count 17);
       gate destructor false; cancelled (join ()); one_controller ()))
@@ -229,7 +229,7 @@ let prepare_error owner =
       wait 4; ok (B.cancel request); E.await ~label:"Query error selection" selected_entered;
       gate 4 false; wait_count 11 1; selected_gate false;
       (match join () with
-       | Error (D.Native_error message) -> check "Query prepare native error retained" (String.is_substring message ~substring:"missing_query_column")
+       | Error { cause = Native message; _ } -> check "Query prepare native error retained" (String.is_substring message ~substring:"missing_query_column")
        | _ -> failwith "Query prepare error flattened by cancellation");
       one_controller ()))
 exception Query_callback_failure

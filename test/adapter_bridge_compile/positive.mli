@@ -1,1 +1,1 @@
-val use : Duckdb.connection -> (string, Duckdb.error) result
+val use : Duckdb.connection -> (string, Duckdb.Error.t) result

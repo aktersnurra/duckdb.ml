@@ -1,18 +1,16 @@
 (** Synchronous resources. No scheduler is started. Handles may move between
     system threads, but are not portable/domain-safe. Busy operations fail fast.
     Scoped callbacks cannot send effects to an outer handler. *)
-type error = Invalid_configuration of string | Embedded_nul | Closed
-  | Busy | Cancelled | Live_children | Native_error of string | Unsupported_statement
-  | Data_error of Scalar.error
-  | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
-  | Effects_not_allowed | Rollback_failed of error * error
 
-(** Raised when a callback exception is followed by a failed rollback. *)
-exception Rollback_exception of exn * error
+(* Private operations fail with a bare cause; the facade attaches context. *)
+type error = Failure.cause
 
-(** A result error and exceptional cleanup are retained together. Ordinary
-    primary and cleanup exceptions are paired as [Base.Exn.Finally]. *)
-exception Cleanup_exception of error * exn
+(* How a scope's body reports errors, and so how a core cause, a failed
+   rollback and a cleanup exception are given context. [Cause ctx]: the body
+   returns bare causes, and pairings are reported in [ctx] (rollbacks in
+   [Transaction]). [Flat ctx]: the body returns flat errors, passed through
+   unchanged; core causes of the scope itself are lifted into [ctx]. *)
+type 'e lifting = Cause : Failure.context -> error lifting | Flat : Failure.context -> Failure.t lifting
 
 (** Result binding operators shared by the private modules. *)
 module Syntax : sig
@@ -53,12 +51,13 @@ module Bridge : sig
   val create : unit -> request
   val cancel : request -> (unit, error) result
   val settlement : request -> settlement
+  (* Bridge failures are in the [Connection] context; callback errors pass through. *)
   val run : request -> connection ->
-    f:(connection -> ('a, error) result) -> ('a, error) result
+    f:(connection -> ('a, Failure.t) result) -> ('a, Failure.t) result
 end
 val open_database : Config.t -> (database, error) result
 
-(** Repeated close succeeds; live children reject parent close. *)
+(** Repeated close succeeds; live children reject parent close (Busy). *)
 val close_database : database -> (unit, error) result
 val connect : database -> (connection, error) result
 val close_connection : connection -> (unit, error) result
@@ -74,8 +73,8 @@ val execute_transaction : transaction -> string -> (unit, error) result
 (** Scoped cleanup revokes escaped aliases and drains operations/leases before
     destruction. There is no termination deadline. Acquisition/OOM and arbitrary
     repeated asynchronous interruption do not have a deterministic guarantee. *)
-val with_database : Config.t -> f:(database -> ('a, error) result) -> ('a, error) result
-val with_connection : database -> f:(connection -> ('a, error) result) -> ('a, error) result
+val with_database : Config.t -> f:(database -> ('a, Failure.t) result) -> ('a, Failure.t) result
+val with_connection : database -> f:(connection -> ('a, Failure.t) result) -> ('a, Failure.t) result
 
 (** Exclusive for the complete callback and commit/rollback. Reentrant/nested use
     of the original connection returns Busy. The token is revoked on exit.
@@ -83,7 +82,7 @@ val with_connection : database -> f:(connection -> ('a, error) result) -> ('a, e
     Interruption does not establish that writes did not commit. DuckDB's
     transaction semantics apply: external effects such as COPY output files
     are not rolled back. Failed/exceptional rollback discards the connection. *)
-val with_transaction : connection -> f:(transaction -> ('a, error) result) -> ('a, error) result
+val with_transaction : lifting:'e lifting -> connection -> f:(transaction -> ('a, 'e) result) -> ('a, 'e) result
 
 
 (* Private child admission seam. Query and Appender turn this into public owners. *)
@@ -98,7 +97,13 @@ val unregister_child : child -> unit
 val reserve_result : child -> unit
 val release_result : child -> unit
 val native_connection : connection -> Duckdb_ffi.connection
-val scope : (unit -> ('a, error) result) -> (unit -> unit) -> ('a, error) result
+
+(* Embeds a core cause in the body's error type. *)
+val lift : 'e lifting -> error -> 'e
+
+(* Runs [work] effect-free, then [cleanup] on every exit. A cleanup exception
+   is paired with the result error it would otherwise hide. *)
+val scope : lifting:'e lifting -> (unit -> ('a, 'e) result) -> (unit -> unit) -> ('a, 'e) result
 val force_close_child : child -> unit
 
 (* Called only inside an admitted child operation. Reuses the token's transaction,
@@ -138,13 +143,6 @@ val reject_nul : string -> (unit, error) result
 (* [close] releases native resources; [finish] then releases the shell even
    when [close] was interrupted. *)
 val release_native : close:('a -> unit) -> finish:('a -> unit) -> 'a -> unit
-
-(* Transaction scope over any error type: [lift] embeds connection errors and
-   [outcome] pairs a primary error with a rollback failure. [with_transaction]
-   is the core instance. *)
-type 'e outcome = { rollback_failed : 'e -> error -> 'e; cleanup_failed : 'e -> exn -> exn }
-val with_transaction_lifted : lift:(error -> 'e) -> outcome:'e outcome -> connection ->
-  f:(transaction -> ('a, 'e) result) -> ('a, 'e) result
 
 (* Per-connection statement cache, most recently used first, bounded by the
    database's [statement_cache] (0 on request facades). Entries are children

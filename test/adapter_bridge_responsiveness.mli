@@ -17,10 +17,10 @@ val executions : unit -> int
 val joins : unit -> int
 val finish_calls : unit -> int
 val locked_engine_calls : unit -> int
-val work : seam -> Duckdb.Bridge.request -> (unit, Duckdb.error) result
-val suppressed_work : Duckdb.Bridge.request -> (unit, Duckdb.error) result
-val reused_work : Duckdb.Bridge.request -> Duckdb.Bridge.request -> (unit, Duckdb.error) result
-val check_outcome : seam -> (unit, Duckdb.error) result -> unit
+val work : seam -> Duckdb.Bridge.request -> (unit, Duckdb.Error.t) result
+val suppressed_work : Duckdb.Bridge.request -> (unit, Duckdb.Error.t) result
+val reused_work : Duckdb.Bridge.request -> Duckdb.Bridge.request -> (unit, Duckdb.Error.t) result
+val check_outcome : seam -> (unit, Duckdb.Error.t) result -> unit
 val check_settled : Duckdb.Bridge.request -> unit
 val check_inventory : unit -> unit
 

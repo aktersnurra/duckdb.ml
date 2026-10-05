@@ -34,7 +34,7 @@ let initialize_open_failure () =
   require "open failure fixture absent" (not (Stdlib.Sys.file_exists path));
   let config = ok (Duckdb.Config.create ~access:Read_only (File path)) in
   A.create (limits 1 0) config >>| fun result ->
-  require "native open error preserved" (match result with Error (A.Expected (A.Core (Duckdb.Native_error _))) -> true | _ -> false);
+  require "native open error preserved" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Native _; _ })) -> true | _ -> false);
   require "failed open never connects" (opens () = 1 && connects () = 0)
 let shutdown_idle () =
   reset (-1);
@@ -168,7 +168,7 @@ let callback_effect_denied () =
   Monitor.protect ~finally:(fun () -> close p) (fun () ->
     let r = ok (A.transaction p ~f:(fun _ -> Stdlib.Effect.perform Callback_pause; Ok ())) in
     complete r >>| fun result ->
-    require "core outward effect barrier preserved" (match result with Error (A.Expected (A.Core Duckdb.Effects_not_allowed)) -> true | _ -> false))
+    require "core outward effect barrier preserved" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Effects_not_allowed; _ })) -> true | _ -> false))
 let cases = cases @ ["callback_effect_denied", callback_effect_denied] @ Test_native_cases.cases @ Test_failure_cases.cases @ Test_typed_cases.cases
 let run () =
   Stdlib.Printexc.record_backtrace true;

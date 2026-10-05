@@ -46,18 +46,19 @@ let read_semantics () = fixtures (fun _ p root ->
   check "ordered multi-file multi-chunk owned rows" (match whole "parquet_read" (fun () -> read p [first; second]) with
     | Ok values -> equal_rows values (List.init 6000 ~f:(fun i -> Int64.of_int i)) | _ -> false);
   check "empty file owned result" (match read p [empty] with Ok [] -> true | _ -> false);
-  check "empty path list rejected" (match read p [] with Error (E.Core (Duckdb.Invalid_configuration _)) -> true | _ -> false);
-  check "corrupt file native error" (match read p [corrupt] with Error (E.Core (Duckdb.Native_error _)) -> true | _ -> false);
+  check "empty path list rejected" (match read p [] with Error (E.Core { cause = Duckdb.Error.Invalid_configuration _; _ }) -> true | _ -> false);
+  check "corrupt file native error" (match read p [corrupt] with Error (E.Core { cause = Duckdb.Error.Native _; _ }) -> true | _ -> false);
   let calls = ref 0 in
   check "later schema mismatch retains error after first callbacks" (match E.parquet_fold_rows p [first; wrong] rows ~row:Fn.id ~init:()
-    ~f:(fun _ () -> Int.incr calls; Ok (Duckdb.Continue ())) with Error (E.Core (Duckdb.Data_error _)) -> !calls = 3000 | _ -> false);
+    ~f:(fun _ () -> Int.incr calls; Ok (Duckdb.Continue ())) with Error (E.Core { cause = Duckdb.Error.Type_mismatch _; _ }) -> !calls = 3000 | _ -> false);
   let before = P.callbacks () in
   check "Parquet Stop suppresses later invalid file" (match E.parquet_fold_rows p [first; corrupt] rows ~row:Fn.id ~init:0L
     ~f:(fun value _ -> check "Parquet callback TLS rejects reentry" (match E.execute p "SELECT 1" with Error E.Reentrant_call -> true | _ -> false); Ok (Duckdb.Stop value)) with Ok 0L -> true | _ -> false);
   tls "Stop" before 1;
   let before = P.callbacks () in
   check "Parquet callback error constituent" (match E.parquet_fold_rows p [first] rows ~row:Fn.id ~init:()
-    ~f:(fun _ () -> Error (Duckdb.Native_error "parquet callback")) with Error (E.Core (Duckdb.Native_error s)) -> String.equal s "parquet callback" | _ -> false);
+    ~f:(fun _ () -> Error { Duckdb.Error.context = Query "callback"; cause = Native "parquet callback" }) with
+      Error (E.Core { cause = Duckdb.Error.Native s; _ }) -> String.equal s "parquet callback" | _ -> false);
   tls "error" before 1;
   let before = P.callbacks () and retired = H.counter 10 in
   let raised = try ignore (E.parquet_fold_rows p [first] rows ~row:Fn.id ~init:() ~f:parquet_callback_failure_frame); false with
@@ -142,17 +143,17 @@ let export_errors () = fixtures (fun _ p root ->
   let destination = file root "existing" in
   export p destination "SELECT 8::BIGINT AS i";
   H.select 0 "" "" destination;
-  check "existing destination rejected" (match E.parquet_export p ~query:"SELECT 9::BIGINT AS i" ~destination with Error (E.Core Duckdb.Destination_exists) -> true | _ -> false);
+  check "existing destination rejected" (match E.parquet_export p ~query:"SELECT 9::BIGINT AS i" ~destination with Error (E.Core { cause = Duckdb.Error.Destination_exists; _ }) -> true | _ -> false);
   check "failed publication cleaned owned temp" (H.counter 8 = 1 && List.is_empty (temporaries root));
   check "unrelated existing final not deleted" (equal_rows (unwrap (read p [destination])) [8L]);
   let bad = file root "bad_copy" in
   check "COPY native failure retained" (match E.parquet_export p ~query:"SELECT error('parquet native failure')::BIGINT AS i" ~destination:bad with
-    | Error (E.Core (Duckdb.Native_error message)) -> String.is_substring message ~substring:"parquet native failure" | _ -> false);
+    | Error (E.Core { cause = Duckdb.Error.Native message; _ }) -> String.is_substring message ~substring:"parquet native failure" | _ -> false);
   check "COPY failure cleans temp" (List.is_empty (temporaries root) && not (Stdlib.Sys.file_exists bad));
   H.fail_unlink true;
   let raised = Exn.protect ~finally:(fun () -> H.fail_unlink false) ~f:(fun () ->
     try ignore (E.parquet_export p ~query:"SELECT error('parquet native failure')::BIGINT AS i" ~destination:bad); false with
-    | Duckdb.Cleanup_exception (Duckdb.Native_error message, Stdlib.Sys_error cleanup) ->
+    | Duckdb.Cleanup_exception ({ cause = Native message; _ }, Stdlib.Sys_error cleanup) ->
       String.is_substring message ~substring:"parquet native failure" && String.is_substring cleanup ~substring:"Permission denied") in
   check "native and file cleanup error constituents retained" raised;
   check "failed unlink owned temporary observable" (List.length (temporaries root) = 1);

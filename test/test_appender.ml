@@ -1,14 +1,12 @@
 open! Base
 open Duckdb
-let rec message = function
-  | Native_error s -> s
-  | Rollback_failed (a,b) -> message a ^ "; rollback: " ^ message b
-  | Data_error (Scalar.Type_mismatch {index;expected;actual}) -> Stdlib.Printf.sprintf "column %d expected %s actual %d" index expected actual
+let rec message (e : Error.t) = match e.cause with
+  | Native s -> s
+  | Rollback_failed { primary; rollback } -> message primary ^ "; rollback: " ^ message rollback
+  | Type_mismatch {index;expected;actual} -> Stdlib.Printf.sprintf "column %d expected %s actual %s" index expected actual
   | _ -> "structured error"
 let ok = function Ok x -> x | Error e -> failwith (message e)
 let error = function Error e -> e | Ok _ -> failwith "expected error"
-let core r = Result.map_error r ~f:(fun (e : Request.request_error) ->
-  match e.cause with Request.Core e -> e | _ -> Native_error "unexpected typed failure")
 let rows c sql fields ~row =
   match Request.Connection.collect c (Request.many ~oneshot:true Fields.[] fields ~row sql) Args.[] with
   | Ok values -> values
@@ -19,9 +17,9 @@ let scalar : type a. connection -> a Scalar.t -> a list -> (a -> a -> bool) -> u
   ok (execute c ("CREATE OR REPLACE TABLE scalars(x " ^ Scalar.name typ ^ ")"));
   let expected = None :: List.map values ~f:Option.some in
   let table = Table.(declare "scalars" Columns.[ "x", nullable (of_scalar typ) ] ~row:Fn.id) in
-  ok (core (Table.with_appender c table ~f:(fun a ->
-    ok (core (Table.append a []));
-    Table.append a (List.map expected ~f:(fun x -> Args.[x])))));
+  ok (Table.with_appender c table ~f:(fun a ->
+    ok (Table.append a []);
+    Table.append a (List.map expected ~f:(fun x -> Args.[x]))));
   let actual = rows c "SELECT x FROM scalars ORDER BY rowid" Fields.[nullable (of_scalar typ)] ~row:Fn.id in
   assert (List.equal (Option.equal equal) actual expected)
 let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b)
@@ -40,7 +38,7 @@ let metadata_boundaries c =
   let declared table = Table.(declare table Columns.[ "c0", nullable int64 ] ~row:Fn.id) in
   (* Warm the connection's statement cache (catalog query) before the baseline. *)
   ok (execute c "CREATE TABLE metadata_warmup(c0 BIGINT)");
-  ok (core (Table.with_appender c (declared "metadata_warmup") ~f:(fun _ -> Ok ())));
+  ok (Table.with_appender c (declared "metadata_warmup") ~f:(fun _ -> Ok ()));
   let baseline = Duckdb_ffi.live_resources () in
   let clean () =
     assert (Duckdb_ffi.live_resources () = baseline);
@@ -48,24 +46,24 @@ let metadata_boundaries c =
   List.iter [2;2048] ~f:(fun physical ->
     let table = "metadata_plain_" ^ Int.to_string physical in
     create table physical ~generated:false;
-    ok (core (Table.with_appender c (declared table) ~f:(fun a -> Table.append a [Args.[Some 42L]])));
+    ok (Table.with_appender c (declared table) ~f:(fun a -> Table.append a [Args.[Some 42L]]));
     assert (Int64.equal (count c table) 1L);
     assert (match rows c ("SELECT c0,c1 FROM " ^ table)
       Fields.[int64; nullable int64] ~row:(fun a b -> a, b) with
       | [42L, None] -> true | _ -> false);
     let first = ref None in
-    let result = core (Table.with_appender c (declared table) ~f:(fun a ->
-      ok (core (Table.append a [Args.[Some 42L]]));
-      let e = error (core (Table.append a [Args.[None]])) in
-      assert (match e with Data_error (Scalar.Null {column=0;row=0}) -> true | _ -> false);
-      assert (phys_equal e (error (core (Table.flush a))));
-      first := Some e; Ok ())) in
+    let result = Table.with_appender c (declared table) ~f:(fun a ->
+      ok (Table.append a [Args.[Some 42L]]);
+      let e = error (Table.append a [Args.[None]]) in
+      assert (match e.cause with Null {column=0;row=0} -> true | _ -> false);
+      assert (phys_equal e.cause (error (Table.flush a)).cause);
+      first := Some e; Ok ()) in
     (* The scope's close reports the first error. *)
-    assert (phys_equal (error result) (Option.value_exn !first));
+    assert (phys_equal (error result).cause (Option.value_exn !first).cause);
     assert (Int64.equal (count c table) 1L); clean ());
   ok (execute c "CREATE TABLE metadata_marker(x BIGINT)");
-  let opens tx name table = error (core (Table.with_appender_transaction tx table ~f:(fun _ ->
-    failwith ("metadata schema accepted before exhaustion: " ^ name)))) in
+  let opens tx name table = error (Table.with_appender_transaction tx table ~f:(fun _ ->
+    failwith ("metadata schema accepted before exhaustion: " ^ name))) in
   List.iter ["metadata_generated_boundary",2048,true;
              "metadata_generated_small",2,true;
              "metadata_oversized",2049,false;
@@ -79,12 +77,12 @@ let metadata_boundaries c =
       let e = if generated
         then opens tx table Table.(declare table Columns.[ "c0", nullable int64; "g", nullable int64 ] ~row:(fun _ _ -> ()))
         else opens tx table (declared table) in
-      assert (match e with Native_error s -> String.equal s
+      assert (match e.cause with Native s -> String.equal s
         "Generated-column or very wide tables are not supported by appender" | _ -> false);
       first := Some e;
       (* Ignoring failed creation must still poison settlement and undo prior SQL. *)
       Ok ()) in
-    assert (phys_equal (error result) (Option.value_exn !first));
+    assert (phys_equal (error result).cause (Option.value_exn !first).cause);
     assert (Int64.equal (count c "metadata_marker") 0L);
     assert (Int64.equal (count c table) 0L); clean ());
   Stdlib.print_endline "appender metadata: single/exact-chunk acceptance, generated/oversized rejection, poisoning and cleanup passed"
@@ -106,59 +104,59 @@ let () =
     let t = Table.(declare "a" Columns.[ "x", int64 ] ~row:Fn.id) in
     (* Nullable, so NULL reaches the engine's NOT NULL metadata. *)
     let nullable_t = Table.(declare "a" Columns.[ "x", nullable int64 ] ~row:Fn.id) in
-    ok (core (Table.with_appender c t ~f:(fun a ->
+    ok (Table.with_appender c t ~f:(fun a ->
       assert (Result.is_error (close_connection c));
       assert (Result.is_error (execute c "ALTER TABLE a ALTER x TYPE DOUBLE"));
-      Table.append a [Args.[9007199254740993L]])));
+      Table.append a [Args.[9007199254740993L]]));
     assert (Int64.equal (count c "a") 1L);
     ok (execute c "DELETE FROM a");
     (* Wrong arity/witness rows are static errors (request_compile append_arity,
        append_type); a NULL in a NOT NULL column is checked per batch. *)
-    let result = core (Table.with_appender c nullable_t ~f:(fun a ->
-      ok (core (Table.append a [Args.[Some 42L]]));
-      let first = error (core (Table.append a [Args.[Some 43L]; Args.[None]])) in
-      assert (match first with Data_error (Scalar.Null {column=0;row=1}) -> true | _ -> false);
-      let second = error (core (Table.flush a)) in
-      assert (phys_equal first second); Ok ())) in
+    let result = Table.with_appender c nullable_t ~f:(fun a ->
+      ok (Table.append a [Args.[Some 42L]]);
+      let first = error (Table.append a [Args.[Some 43L]; Args.[None]]) in
+      assert (match first.cause with Null {column=0;row=1} -> true | _ -> false);
+      let second = error (Table.flush a) in
+      assert (phys_equal first.cause second.cause); Ok ()) in
     ignore (error result); assert (Int64.equal (count c "a") 0L);
     (* A declared codec that disagrees with the catalog type fails at open. *)
-    assert (match core (Table.with_appender c Table.(declare "a" Columns.[ "x", float64 ] ~row:Fn.id)
-      ~f:(fun _ -> failwith "mismatched declaration accepted")) with
-      | Error (Data_error (Scalar.Type_mismatch _)) -> true | _ -> false);
-    ignore (error (core (Table.with_appender c t ~f:(fun a ->
-      ok (core (Table.append a [Args.[1L]; Args.[1L]]));
-      let first = error (core (Table.flush a)) in
+    assert (match Table.with_appender c Table.(declare "a" Columns.[ "x", float64 ] ~row:Fn.id)
+      ~f:(fun _ -> failwith "mismatched declaration accepted") with
+      | Error { cause = Type_mismatch _; _ } -> true | _ -> false);
+    ignore (error (Table.with_appender c t ~f:(fun a ->
+      ok (Table.append a [Args.[1L]; Args.[1L]]);
+      let first = error (Table.flush a) in
       assert (String.is_substring (message first) ~substring:"PRIMARY KEY or UNIQUE");
-      Ok ()))));
+      Ok ())));
     assert (Int64.equal (count c "a") 0L);
     (* An entire large batch is admitted once, and automatic flush errors are
        reported by append, not deferred until explicit flush/close. *)
     let large = List.init 220000 ~f:(fun i -> Args.[Int64.of_int i]) in
-    ok (core (Table.with_appender c t ~f:(fun a -> Table.append a large)));
+    ok (Table.with_appender c t ~f:(fun a -> Table.append a large));
     assert (Int64.equal (count c "a") 220000L); ok (execute c "DELETE FROM a");
-    ignore (error (core (Table.with_appender c t ~f:(fun a ->
+    ignore (error (Table.with_appender c t ~f:(fun a ->
       let duplicate = List.init 220000 ~f:(fun _ -> Args.[1L]) in
-      ignore (error (Table.append a duplicate)); Ok ()))));
+      ignore (error (Table.append a duplicate)); Ok ())));
     assert (Int64.equal (count c "a") 0L);
-    let primary = { Request.context = Request.Transaction; cause = Request.Core (Native_error "callback primary") } in
+    let primary = { Error.context = Transaction; cause = Native "callback primary" } in
     assert (phys_equal (error (Table.with_appender c t ~f:(fun a ->
-      ok (core (Table.append a [Args.[1L]])); ok (core (Table.flush a)); Error primary))) primary);
+      ok (Table.append a [Args.[1L]]); ok (Table.flush a); Error primary))) primary);
     assert (Int64.equal (count c "a") 0L);
-    (try ignore (Table.with_appender c t ~f:(fun a -> ok (core (Table.append a [Args.[1L]])); raise Stdlib.Exit)); assert false with Stdlib.Exit -> ());
+    (try ignore (Table.with_appender c t ~f:(fun a -> ok (Table.append a [Args.[1L]]); raise Stdlib.Exit)); assert false with Stdlib.Exit -> ());
     assert (Int64.equal (count c "a") 0L);
     ok (with_transaction c ~f:(fun tx ->
-      ok (core (Table.with_appender_transaction tx t ~f:(fun a ->
-        assert (match execute_transaction tx "SELECT 1" with Error Busy -> true | _ -> false);
-        Table.append a [Args.[3L]])));
+      ok (Table.with_appender_transaction tx t ~f:(fun a ->
+        assert (match execute_transaction tx "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
+        Table.append a [Args.[3L]]));
       execute_transaction tx "INSERT INTO a VALUES (4)"));
     assert (Int64.equal (count c "a") 2L);
     ignore (error (with_transaction c ~f:(fun tx ->
-      ok (core (Table.with_appender_transaction tx t ~f:(fun a -> Table.append a [Args.[5L]]))); Error (Native_error "callback primary"))));
+      ok (Table.with_appender_transaction tx t ~f:(fun a -> Table.append a [Args.[5L]])); Error { context = Transaction; cause = Native "callback primary" })));
     assert (Int64.equal (count c "a") 2L);
     ok (execute c "CREATE SCHEMA \"s' quoted\";" );
     ok (execute c "CREATE TABLE \"s' quoted\".\"t\"\"; DROP TABLE a;--\"(x BIGINT)");
-    ok (core (Table.with_appender c Table.(declare ~schema:"s' quoted" "t\"; DROP TABLE a;--" Columns.[ "x", int64 ] ~row:Fn.id)
-      ~f:(fun a -> Table.append a [Args.[7L]])));
+    ok (Table.with_appender c Table.(declare ~schema:"s' quoted" "t\"; DROP TABLE a;--" Columns.[ "x", int64 ] ~row:Fn.id)
+      ~f:(fun a -> Table.append a [Args.[7L]]));
     let bigints name = Table.(declare name Columns.[ "x", int64 ] ~row:Fn.id) in
     ignore (error (Table.with_appender c (bigints "missing") ~f:(fun _ -> Ok ())));
     ignore (error (Table.with_appender c (bigints "bad\000name") ~f:(fun _ -> Ok ())));
@@ -169,7 +167,7 @@ let () =
     List.iter [false;true] ~f:(fun use_effect ->
       ignore (error (with_transaction c ~f:(fun tx ->
         (try ignore (Table.with_appender_transaction tx t ~f:(fun a ->
-          ok (core (Table.append a [Args.[99L]]));
+          ok (Table.append a [Args.[99L]]);
           if use_effect then (try Stdlib.Effect.perform Pause with _ -> ())
           else raise Stdlib.Exit;
           Ok ())) with Stdlib.Exit -> ());

@@ -2,16 +2,17 @@ open! Base
 open Duckdb
 module S = Scalar
 let ok = function
-  | Ok x -> x | Error (Native_error s) -> failwith s
-  | Error (Data_error (S.Type_mismatch { index; expected; actual })) ->
-    failwith (Stdlib.Printf.sprintf "column/parameter %d expected %s actual type %d" index expected actual)
+  | Ok x -> x | Error { Error.cause = Native s; _ } -> failwith s
+  | Error { cause = Type_mismatch { index; expected; actual }; _ } ->
+    failwith (Stdlib.Printf.sprintf "column/parameter %d expected %s actual type %s" index expected actual)
   | Error _ -> failwith "unexpected query error"
-let error expected = function Error e when expected e -> () | _ -> failwith "expected specific error"
+let error (expected : Error.cause -> bool) = function
+  | Error { Error.cause; _ } when expected cause -> () | _ -> failwith "expected specific error"
 let busy result = error (function Busy -> true | _ -> false) result
 let closed result = error (function Closed -> true | _ -> false) result
-let children result = error (function Live_children -> true | _ -> false) result
-let index result = error (function Data_error (S.Index _) -> true | _ -> false) result
-let schema result = error (function Data_error (S.Type_mismatch _) -> true | _ -> false) result
+let children result = error (function Busy -> true | _ -> false) result
+let index result = error (function Index _ -> true | _ -> false) result
+let schema result = error (function Type_mismatch _ -> true | _ -> false) result
 let non_null typ = Codec.Values.of_scalar typ
 let decode typ = non_null typ
 (* Reads column 0 of an executed result through the borrowed-chunk lease. *)
@@ -27,17 +28,14 @@ let rows r codec =
     match !failure with None -> Ok (Continue !acc) | Some e -> Error e)
 (* A typed request validates the schema at prepare, even for an empty result. *)
 let query c sql codec =
-  match Request.Connection.collect c (Request.many ~oneshot:true Fields.[] Fields.[codec] ~row:Fn.id sql) Args.[] with
-  | Ok values -> Ok values
-  | Error { Request.cause = Request.Core e; _ } -> Error e
-  | Error _ -> failwith "unexpected typed request failure"
+  Request.Connection.collect c (Request.many ~oneshot:true Fields.[] Fields.[codec] ~row:Fn.id sql) Args.[]
 let config = ok (Config.create Memory)
 let connected f = ok (with_database config ~f:(fun db -> with_connection db ~f))
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let roundtrip c typ equal values =
   ok (with_prepared c ("SELECT ?::" ^ S.name typ) ~f:(fun p ->
     assert (ok (parameter_count p) = 1);
-    error (function Data_error (S.Unbound_parameter 1) -> true | _ -> false) (execute_prepared p);
+    error (function Unbound_parameter 1 -> true | _ -> false) (execute_prepared p);
     index (bind p (-1) (non_null typ) (List.hd_exn values));
     index (bind p 0 (non_null typ) (List.hd_exn values));
     index (bind p 2 (non_null typ) (List.hd_exn values));
@@ -55,10 +53,10 @@ let roundtrip c typ equal values =
     ok (bind p 1 Codec.Values.(nullable (of_scalar typ)) None);
     let nullable = ok (rows (ok (execute_prepared p)) Codec.Values.(nullable (of_scalar typ))) in
     assert (List.for_all nullable ~f:Option.is_none);
-    error (function Data_error (S.Null { column = 0; row = 0 }) -> true | _ -> false)
+    error (function Null { column = 0; row = 0 } -> true | _ -> false)
       (rows (ok (execute_prepared p)) (decode typ));
     ok (reset p);
-    error (function Data_error (S.Unbound_parameter 1) -> true | _ -> false) (execute_prepared p);
+    error (function Unbound_parameter 1 -> true | _ -> false) (execute_prepared p);
     Ok ()))
 let () =
   connected (fun c ->
@@ -85,9 +83,9 @@ let () =
       ~f:(fun sql -> error (function Unsupported_statement -> true | _ -> false) (prepare c sql));
     error (function Embedded_nul -> true | _ -> false) (prepare c "SELECT 1\000;");
     for _ = 1 to 30 do
-      error (function Native_error _ -> true | _ -> false) (prepare c "not valid SQL");
+      error (function Native _ -> true | _ -> false) (prepare c "not valid SQL");
       ok (with_prepared c "SELECT error('execution fails')" ~f:(fun p ->
-        for _ = 1 to 3 do error (function Native_error _ -> true | _ -> false) (execute_prepared p) done;
+        for _ = 1 to 3 do error (function Native _ -> true | _ -> false) (execute_prepared p) done;
         Ok ()))
     done;
     let p = ok (prepare c "SELECT ?::TINYINT, ?::FLOAT") in
@@ -102,7 +100,7 @@ let () =
     schema (query c "SELECT 1::INTEGER WHERE false" (decode S.Int64));
     List.iter ["1::UBIGINT"; "1::HUGEINT"; "1::DECIMAL(10,2)"; "[1,2]"; "TIME '12:00:00'"] ~f:(fun expr ->
       schema (query c ("SELECT " ^ expr ^ " WHERE false") (decode S.Int64)));
-    error (function Data_error (S.Column_count { expected = 1; actual = 2 }) -> true | _ -> false)
+    error (function Column_count { expected = 1; actual = 2 } -> true | _ -> false)
       (query c "SELECT 1,2" (decode S.Int32));
     Ok ());
   clean (); Stdlib.print_endline "query: policy/failures/range/schema/empty/unsupported=ok"
@@ -146,7 +144,7 @@ let () =
       fold_chunks (ok (execute_prepared p)) ~init:0 ~f) in
     assert (ok (run (fun _ _ -> Ok (Stop 7))) = 7);
     error (function Invalid_configuration "callback" -> true | _ -> false)
-      (run (fun _ _ -> Error (Invalid_configuration "callback")));
+      (run (fun _ _ -> Error { context = Database; cause = Invalid_configuration "callback" }));
     (match run (fun _ _ -> raise Callback_failure) with
      | exception Callback_failure -> () | _ -> assert false);
     (match run (fun _ _ -> raise Stdlib.Sys.Break) with
@@ -218,7 +216,7 @@ let () =
     assert (List.for_all copied ~f:Option.is_none);
     assert (List.is_empty (ok (query c "SELECT NULL WHERE false" decoder)));
     schema (query c "SELECT NULL WHERE false" (decode S.Int64));
-    error (function Data_error (S.Null _) -> true | _ -> false) (query c "SELECT NULL" (decode S.Int32));
+    error (function Null _ -> true | _ -> false) (query c "SELECT NULL" (decode S.Int32));
     Ok ());
   clean (); Stdlib.print_endline "query: bare NULL retains engine-inferred INTEGER schema=ok"
 let () =
@@ -269,13 +267,13 @@ let () =
     let codec = no_seven true in
     ok (with_prepared c "SELECT ?::BIGINT" ~f:(fun p ->
       ok (bind p 1 codec 5L);
-      error (function Data_error (S.Encode_rejected { index = 1; _ }) -> true | _ -> false) (bind p 1 codec 7L);
+      error (function Encode_rejected { index = 1; _ } -> true | _ -> false) (bind p 1 codec 7L);
       let r = ok (execute_prepared p) in
       assert (List.equal Int64.equal (ok (rows r (decode S.Int64))) [5L]);
       ok (close_result r); Ok ()));
     ok (with_prepared c "SELECT * FROM (VALUES (1::BIGINT),(2),(3))" ~f:(fun p ->
       let r = ok (execute_prepared p) in
-      error (function Data_error (S.Decode_rejected { column = 0; row = 2; _ }) -> true | _ -> false)
+      error (function Decode_rejected { column = 0; row = 2; _ } -> true | _ -> false)
         (fold_chunks r ~init:() ~f:(fun chunk () ->
           let outcome = ref (Ok (Continue ())) in
           for row = 0 to chunk_length chunk - 1 do

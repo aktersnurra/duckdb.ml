@@ -127,7 +127,7 @@ let transaction () =
             let text = ok (Duckdb.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
             Ok (Duckdb.Continue (text :: rows)))))))) in
   (match Duckdb.execute_transaction (Option.value_exn !escaped) "SELECT 1" with
-   | Error Duckdb.Closed -> () | _ -> failwith "escaped token usable");
+   | Error { cause = Closed; _ } -> () | _ -> failwith "escaped token usable");
   rows
 
 let effects () =
@@ -145,7 +145,7 @@ let effects () =
           delivered := true;
           Some (fun continuation -> Stdlib.Effect.Deep.discontinue continuation (Failure "outer effect delivery")) } in
       assert (not !delivered);
-      (match outcome with Error Duckdb.Effects_not_allowed -> () | _ -> assert false);
+      (match outcome with Error { cause = Effects_not_allowed; _ } -> () | _ -> assert false);
       assert (!cleanup && not !reached_after_yield);
       Duckdb.execute c "SELECT CASE WHEN count(*)=0 THEN 1 ELSE error('not rolled back') END FROM t")))
 
@@ -170,8 +170,8 @@ let run () =
            assert (Stdlib.Printexc.raw_backtrace_length backtrace > 0)
          | _ -> assert false);
         assert (Bool.equal (Stdlib.Atomic.get executed) (not fail_dispatch))));
-    let ordinary = submit ~fail_dispatch:false (fun () -> Error Duckdb.Embedded_nul) ~cleanup:Fn.id in
-    (match ordinary.primary with S.Returned (Error Duckdb.Embedded_nul) -> () | _ -> assert false);
+    let ordinary = submit ~fail_dispatch:false (fun () -> Error Duckdb.Error.Embedded_nul) ~cleanup:Fn.id in
+    (match ordinary.primary with S.Returned (Error Duckdb.Error.Embedded_nul) -> () | _ -> assert false);
     assert (List.equal String.equal (Eio_unix.run_in_systhread transaction) ["owned"]);
     effects ());
   assert (Duckdb_ffi.live_resources () = 0);

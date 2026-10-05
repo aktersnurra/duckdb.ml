@@ -2,7 +2,7 @@ open! Base
 module W = Worker_owner
 
 type phase = Operation | Connect | Close_connection | Close_database
-type cause = Core_failure of Duckdb.error | Raised_failure of exn * Stdlib.Printexc.raw_backtrace
+type cause = Core_failure of Duckdb.Error.t | Raised_failure of exn * Stdlib.Printexc.raw_backtrace
 type failure = { phase : phase; cause : cause }
 type error =
   | Invalid_connections of int
@@ -10,7 +10,7 @@ type error =
   | Queue_full
   | Pool_shutdown
   | Reentrant_call
-  | Core of Duckdb.error
+  | Core of Duckdb.Error.t
   | Lifecycle_errors of failure list
 exception Lifecycle_failure of failure list
 exception Cancelled_with_failures of exn * Stdlib.Printexc.raw_backtrace * failure list
@@ -62,7 +62,7 @@ let offload phase f =
 let errors = function Ok _ -> [] | Error failures -> failures
 let propagate_cancellation cancellation bt failures =
   let ordinary = List.for_all failures ~f:(function
-    | { phase = Operation; cause = Core_failure (Duckdb.Cancelled | Duckdb.Native_error _) } -> true
+    | { phase = Operation; cause = Core_failure { cause = Duckdb.Error.(Cancelled | Native _); _ } } -> true
     | _ -> false) in
   if ordinary then Exn.raise_with_original_backtrace cancellation bt
   else Exn.raise_with_original_backtrace (Cancelled_with_failures (cancellation, bt, failures)) bt
@@ -82,7 +82,7 @@ let cancel request =
   | Admitted | Settled -> ()
   | Waiting cc -> Eio.Cancel.cancel cc Remove_waiter
   | Running ->
-    match Duckdb.Bridge.cancel request.bridge with Ok () | Error Duckdb.Closed -> () | Error _ -> ()
+    match Duckdb.Bridge.cancel request.bridge with Ok () | Error { cause = Duckdb.Error.Closed; _ } -> () | Error _ -> ()
 let is_accepting t = locked t (fun () -> Poly.equal t.lifecycle Accepting)
 let start_shutdown t failures =
   let start = locked t (fun () ->
@@ -176,7 +176,7 @@ let create ~sw limits config =
               start_shutdown pool [];
               deliver (Error (failures @ errors (Eio.Promise.await pool.shutdown_done)))))
 
-let submit : type a. t -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, Duckdb.error) result) -> (a, error) result =
+let submit : type a. t -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, Duckdb.Error.t) result) -> (a, error) result =
  fun t ~reuse run ->
   if W.is_in_callback () then Error Reentrant_call
   else (
@@ -296,7 +296,7 @@ let shutdown t =
       propagate_cancellation cancellation bt (errors result))
 
 module Request = struct
-  type nonrec error = Adapter of error | Request of Duckdb.Request.request_error
+  type nonrec error = Adapter of error | Request of Duckdb.Error.t
   (* A typed request's own outcome is the worker payload; cancellation and
      lifecycle failures keep the adapter's rules. Retires its connection. *)
   let typed pool work =

@@ -1,34 +1,31 @@
 open! Base
 open Duckdb
-let rec message = function Native_error s -> s | Rollback_failed (a,b) -> message a ^ "; " ^ message b | _ -> "structured error"
+let rec message (e : Error.t) = match e.cause with
+  | Native s -> s | Rollback_failed { primary; rollback } -> message primary ^ "; " ^ message rollback | _ -> "structured error"
 let ok = function Ok x -> x | Error e -> failwith (message e)
 let error = function Error e -> e | Ok _ -> failwith "expected error"
 let floats a b = (Float.is_nan a && Float.is_nan b) || Int64.equal (Stdlib.Int64.bits_of_float a) (Stdlib.Int64.bits_of_float b)
 let floats32 a b = floats (Stdlib_stable.Float32.to_float a) (Stdlib_stable.Float32.to_float b)
 let write path text = let ch = Stdlib.open_out_bin path in Exn.protect ~finally:(fun () -> Stdlib.close_out ch) ~f:(fun () -> Stdlib.output_string ch text)
 let read path = let ch = Stdlib.open_in_bin path in Exn.protect ~finally:(fun () -> Stdlib.close_in ch) ~f:(fun () -> Stdlib.really_input_string ch (Stdlib.in_channel_length ch))
-let fold_core c paths fields ~row ~init ~f =
-  Result.map_error (Parquet.fold c paths fields ~row ~init ~f) ~f:(fun (e : Request.request_error) ->
-    match e.cause with Request.Core e -> e | _ -> Native_error "unexpected typed failure")
 let scalar : type a. connection -> string -> a Scalar.t -> a list -> (a -> a -> bool) -> unit = fun c dir typ values equal ->
   let file = Stdlib.Filename.concat dir (Scalar.name typ ^ " quote' ; --.parquet") in
   let p = ok (Parquet.path file) in
   ok (execute c ("CREATE OR REPLACE TABLE scalars(x " ^ Scalar.name typ ^ ")"));
   let expected = None :: List.map values ~f:Option.some in
   let table = Table.(declare "scalars" Columns.[ "x", nullable (of_scalar typ) ] ~row:Fn.id) in
-  ok (Result.map_error (Table.with_appender c table ~f:(fun a -> Table.append a (List.map expected ~f:(fun x -> Args.[x]))))
-    ~f:(fun (e : Request.request_error) -> match e.cause with Request.Core e -> e | _ -> Native_error "unexpected typed failure"));
+  ok (Table.with_appender c table ~f:(fun a -> Table.append a (List.map expected ~f:(fun x -> Args.[x]))));
   ok (Parquet.export c ~query:"SELECT x FROM scalars ORDER BY rowid" p);
-  let decode paths = ok (fold_core c paths Fields.[nullable (of_scalar typ)] ~row:Fn.id ~init:[]
+  let decode paths = ok (Parquet.fold c paths Fields.[nullable (of_scalar typ)] ~row:Fn.id ~init:[]
     ~f:(fun x xs -> Ok (Continue (x::xs)))) |> List.rev in
   assert (List.equal (Option.equal equal) (decode [p]) expected);
   assert (List.equal (Option.equal equal) (decode [p;p]) (expected @ expected));
   let original = read file in
-  assert (match Parquet.export c ~query:"SELECT 0" p with Error Destination_exists -> true | _ -> false);
+  assert (match Parquet.export c ~query:"SELECT 0" p with Error { cause = Destination_exists; _ } -> true | _ -> false);
   assert (String.equal original (read file));
-  assert (match fold_core c [p] Fields.[] ~row:() ~init:() ~f:(fun () () -> Ok (Continue ())) with
-    | Error (Data_error (Scalar.Column_count { expected = 0; actual = 1 })) -> true | _ -> false);
-  ignore (error (fold_core c [p] Fields.[int64; int64] ~row:(fun _ _ -> ()) ~init:() ~f:(fun () () -> Ok (Continue ()))));
+  assert (match Parquet.fold c [p] Fields.[] ~row:() ~init:() ~f:(fun () () -> Ok (Continue ())) with
+    | Error { cause = Column_count { expected = 0; actual = 1 }; _ } -> true | _ -> false);
+  ignore (error (Parquet.fold c [p] Fields.[int64; int64] ~row:(fun _ _ -> ()) ~init:() ~f:(fun () () -> Ok (Continue ()))));
   Stdlib.Sys.remove file
 let () =
   let dir = Stdlib.Filename.temp_file "duckdb-parquet-tests-" "" in
@@ -60,7 +57,7 @@ let () =
             Stdlib.Sys.chdir unusual_cwd;
             ignore (error (Parquet.path "relative.parquet")));
         let decoder = Fields.[int64] in
-        let consume paths = fold_core c paths decoder ~row:Fn.id ~init:0 ~f:(fun _ n -> Ok (Continue (n+1))) in
+        let consume paths = Parquet.fold c paths decoder ~row:Fn.id ~init:0 ~f:(fun _ n -> Ok (Continue (n+1))) in
         ignore (error (consume [])); ignore (error (consume [p]));
         write file ""; ignore (error (consume [p])); write file "PAR1corrupt"; ignore (error (consume [p])); Stdlib.Sys.remove file;
         List.iter ["SELECT 1; SELECT 2";"SELECT ?";"CREATE TABLE should_not_exist(x INT)";
@@ -68,28 +65,28 @@ let () =
           ignore (error (Parquet.export c ~query p)); assert (not (Stdlib.Sys.file_exists file)));
         List.iter ["SELECT '1970-01-01'::TIMESTAMP_S";"SELECT '1970-01-01'::TIMESTAMP_MS";
           "SELECT 1::HUGEINT";"SELECT [1,2]"] ~f:(fun query ->
-          assert (match Parquet.export c ~query p with Error (Unsupported_parquet_type _) -> true | _ -> false);
+          assert (match Parquet.export c ~query p with Error { cause = Unsupported_parquet_type _; _ } -> true | _ -> false);
           assert (not (Stdlib.Sys.file_exists file)));
         (* Writer failure after schema preparation: TRY is deliberately absent. *)
         ignore (error (Parquet.export c ~query:"SELECT CAST('not an integer' AS BIGINT)" p));
         assert (not (Stdlib.Sys.file_exists file)); assert (Array.length (Stdlib.Sys.readdir dir) = 0);
         ok (Parquet.export c ~query:"SELECT 1::BIGINT AS \"quote' ; --\" WHERE false" p);
         assert (ok (consume [p;p]) = 0);
-        ignore (error (fold_core c [p] Fields.[float64] ~row:Fn.id ~init:() ~f:(fun _ () -> Ok (Continue ()))));
+        ignore (error (Parquet.fold c [p] Fields.[float64] ~row:Fn.id ~init:() ~f:(fun _ () -> Ok (Continue ()))));
         Stdlib.Sys.remove file;
         ok (Parquet.export c ~query:"SELECT i AS x FROM range(5000) t(i) -- safe trailing comment" p);
         assert (ok (consume [p;p]) = 10000);
-        assert (ok (fold_core c [p;p] decoder ~row:Fn.id ~init:0 ~f:(fun _ n -> Ok (Stop (n+1)))) = 1);
+        assert (ok (Parquet.fold c [p;p] decoder ~row:Fn.id ~init:0 ~f:(fun _ n -> Ok (Stop (n+1)))) = 1);
         let other = Stdlib.Filename.concat dir "other.parquet" in
         let p2 = ok (Parquet.path other) in
         ok (Parquet.export c ~query:"SELECT 9007199254740992::DOUBLE" p2);
         let seen = ref 0 in
-        ignore (error (fold_core c [p;p2] decoder ~row:Fn.id ~init:() ~f:(fun _ () -> Int.incr seen; Ok (Continue ()))));
+        ignore (error (Parquet.fold c [p;p2] decoder ~row:Fn.id ~init:() ~f:(fun _ () -> Int.incr seen; Ok (Continue ()))));
         assert (!seen = 5000);
         Stdlib.Sys.remove file; Stdlib.Sys.remove other;
         (* No-replace link also refuses dangling symlinks. *)
         Unix.symlink "nonexistent" file;
-        assert (match Parquet.export c ~query:"SELECT 1" p with Error Destination_exists -> true | _ -> false);
+        assert (match Parquet.export c ~query:"SELECT 1" p with Error { cause = Destination_exists; _ } -> true | _ -> false);
         assert (String.equal (Unix.readlink file) "nonexistent"); Stdlib.Sys.remove file;
         assert (Array.length (Stdlib.Sys.readdir dir) = 0); Ok ()))));
   assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0);

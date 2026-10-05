@@ -12,10 +12,10 @@ external execute_entered : unit -> int = "adapter_bridge_execute_entered"
 external fail_rollback : bool -> unit = "adapter_bridge_fail_rollback"
 external request_failure : int -> unit = "adapter_bridge_request_failure"
 let ok = function Ok x -> x | Error _ -> failwith "expected Ok"
-let expect error = function Error actual when Poly.equal error actual -> () | _ -> failwith "unexpected result"
+let expect (error : D.Error.cause) = function
+  | Error { D.Error.cause; _ } when Poly.equal error cause -> () | _ -> failwith "unexpected result"
+let failed cause = Error { D.Error.context = Connection; cause }
 let check label condition = if not condition then failwith label
-let core r = Result.map_error r ~f:(fun (e : D.Request.request_error) ->
-  match e.cause with D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
 let bigints name = D.Table.(declare name Columns.[ "i", int64 ] ~row:Fn.id)
 let memory f = ok (D.with_database (ok (D.Config.create D.Config.Memory)) ~f)
 let connection db f = D.with_connection db ~f
@@ -35,37 +35,37 @@ let callback_failure () = raise Callback_failure
 let aliases db = connection db (fun owner ->
   let request = B.create () in
   let facade = ok (B.run request owner ~f:(fun facade ->
-    expect D.Busy (D.execute owner "SELECT 1");
-    expect D.Busy (D.close_connection facade);
-    expect D.Busy (B.run request owner ~f:(fun _ -> Ok ()));
-    expect D.Busy (B.run (B.create ()) facade ~f:(fun _ -> Ok ()));
+    expect D.Error.Busy (D.execute owner "SELECT 1");
+    expect D.Error.Busy (D.close_connection facade);
+    expect D.Error.Busy (B.run request owner ~f:(fun _ -> Ok ()));
+    expect D.Error.Busy (B.run (B.create ()) facade ~f:(fun _ -> Ok ()));
     ok (D.execute facade "SELECT 42"); Ok facade)) in
-  expect D.Closed (D.execute facade "SELECT 1");
-  expect D.Closed (D.close_connection facade);
-  expect D.Closed (B.cancel request);
-  expect D.Closed (B.run request owner ~f:(fun _ -> Ok ()));
+  expect D.Error.Closed (D.execute facade "SELECT 1");
+  expect D.Error.Closed (D.close_connection facade);
+  expect D.Error.Closed (B.cancel request);
+  expect D.Error.Closed (B.run request owner ~f:(fun _ -> Ok ()));
   check "settled" (Poly.equal (B.settlement request) B.Settled);
   List.iter [false; true] ~f:(fun exceptional ->
     let request = B.create () and escaped = ref None in
     let outcome = E.capture (fun () -> B.run request owner ~f:(fun facade ->
       escaped := Some facade;
-      if exceptional then callback_failure () else Error D.Embedded_nul)) in
+      if exceptional then callback_failure () else failed D.Error.Embedded_nul)) in
     (match outcome with
-     | E.Returned result when not exceptional -> expect D.Embedded_nul result
+     | E.Returned result when not exceptional -> expect D.Error.Embedded_nul result
      | E.Raised failure when exceptional ->
        check "exception identity" (phys_equal failure.exception_ Callback_failure);
        check "callback backtrace" (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string failure.backtrace) ~substring:"callback_failure")
      | _ -> failwith "callback outcome");
-    expect D.Closed (D.execute (Option.value_exn !escaped) "SELECT 1");
-    expect D.Closed (B.cancel request));
+    expect D.Error.Closed (D.execute (Option.value_exn !escaped) "SELECT 1");
+    expect D.Error.Closed (B.cancel request));
   let request = B.create () in
   let p, r, tx = ok (B.run request owner ~f:(fun facade ->
     let tx = ok (D.with_transaction facade ~f:(fun tx -> Ok tx)) in
     let p = ok (D.prepare facade "SELECT 1::BIGINT") in
     let r = ok (D.execute_prepared p) in Ok (p, r, tx))) in
-  expect D.Closed (D.parameter_count p);
-  expect D.Closed (D.fold_chunks r ~init:() ~f:(fun _ () -> Ok (D.Stop ())));
-  expect D.Closed (D.execute_transaction tx "SELECT 1");
+  expect D.Error.Closed (D.parameter_count p);
+  expect D.Error.Closed (D.fold_chunks r ~init:() ~f:(fun _ () -> Ok (D.Stop ())));
+  expect D.Error.Closed (D.execute_transaction tx "SELECT 1");
   check "owned return" (String.equal (ok (B.run (B.create ()) owner ~f:(fun _ -> Ok "owned"))) "owned");
   D.execute owner "SELECT 1")
 let pre_entry db = connection db (fun owner ->
@@ -73,26 +73,26 @@ let pre_entry db = connection db (fun owner ->
   reset_counts ();
   ok (B.cancel request); ok (B.cancel request);
   check "fresh pending" (Poly.equal (B.settlement request) B.Pending);
-  expect D.Cancelled (B.run request owner ~f:(fun _ -> failwith "cancelled callback ran"));
+  expect D.Error.Cancelled (B.run request owner ~f:(fun _ -> failwith "cancelled callback ran"));
   check "pre-entry SQL count" (count 0 = 0 && count 1 = 0 && count 2 = 0);
   D.execute owner "SELECT 1")
 let live_children db = connection db (fun owner ->
   let p = ok (D.prepare owner "SELECT 1") in
   let request = B.create () in
-  expect D.Live_children (B.run request owner ~f:(fun _ -> Ok ()));
-  expect D.Closed (B.cancel request);
+  expect D.Error.Busy (B.run request owner ~f:(fun _ -> Ok ()));
+  expect D.Error.Closed (B.cancel request);
   let r = ok (D.execute_prepared p) in
-  expect D.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
+  expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
   ok (D.close_result r); ok (D.close_prepared p);
   ok (D.execute owner "CREATE TABLE live_appender (i BIGINT)");
   let live = bigints "live_appender" in
   ok (D.with_transaction owner ~f:(fun tx ->
-    core (D.Table.with_appender_transaction tx live ~f:(fun _ ->
-      expect D.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
-      Ok ()))));
+    D.Table.with_appender_transaction tx live ~f:(fun _ ->
+      expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
+      Ok ())));
   let a = ok (B.run (B.create ()) owner ~f:(fun facade ->
-    core (D.Table.with_appender facade live ~f:(fun a -> Ok a)))) in
-  expect D.Closed (core (D.Table.flush a)); Ok ())
+    D.Table.with_appender facade live ~f:(fun a -> Ok a))) in
+  expect D.Error.Closed (D.Table.flush a); Ok ())
 let concurrent db = connection db (fun owner ->
   let entered = A.make false and release = A.make false in
   let request = B.create () in
@@ -102,10 +102,10 @@ let concurrent db = connection db (fun owner ->
     Exn.protect ~finally:(fun () -> A.set release true) ~f:(fun () ->
       E.await ~label:"callback entered" (fun () -> A.get entered);
       E.with_worker (fun () ->
-        expect D.Busy (B.run request owner ~f:(fun _ -> Ok ()));
-        expect D.Busy (D.execute owner "SELECT 1");
-        expect D.Busy (D.close_connection owner);
-        expect D.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ())))
+        expect D.Error.Busy (B.run request owner ~f:(fun _ -> Ok ()));
+        expect D.Error.Busy (D.execute owner "SELECT 1");
+        expect D.Error.Busy (D.close_connection owner);
+        expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ())))
         ~f:(fun second -> second ());
       A.set release true; ok (join ())));
   D.execute owner "SELECT 1")
@@ -128,7 +128,7 @@ let transactions db = connection db (fun owner -> connection db (fun observer ->
         if variant = 2 then (try callback_failure () with Callback_failure -> ());
         Ok ()));
       Ok ()) in
-    expect D.Cancelled result;
+    expect D.Error.Cancelled result;
     check "pre-COMMIT latch: committed rows/count" (count 2 = 0 && count 3 = 1);
     check "observer rollback" (Poly.equal (ok (rows observer "SELECT count(*) FROM cancelled_rows")) [0L]));
   (* Dropped snapshot result and cancelled appender both roll back, not flush. *)
@@ -136,10 +136,10 @@ let transactions db = connection db (fun owner -> connection db (fun observer ->
   ok (D.execute owner "CREATE TABLE discarded_buffer (i BIGINT CHECK (nextval('appender_flush_probe') > 0))");
   let discarded = bigints "discarded_buffer" in
   let request = B.create () in
-  expect D.Cancelled (B.run request owner ~f:(fun facade ->
-    core (D.Table.with_appender facade discarded ~f:(fun a ->
+  expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+    D.Table.with_appender facade discarded ~f:(fun a ->
       ok (D.Table.append a [D.Args.[9L]]);
-      ok (B.cancel request); ignore (D.Table.flush a); Ok ()))));
+      ok (B.cancel request); ignore (D.Table.flush a); Ok ())));
   check "appender discarded" (Poly.equal (ok (rows observer "SELECT count(*) FROM discarded_buffer")) [0L]);
   (* Sequences are not rolled back: this distinguishes discard from a flush
      followed by rollback, without an unsafe appender/test FFI entry point. *)
@@ -147,14 +147,14 @@ let transactions db = connection db (fun owner -> connection db (fun observer ->
   ok (D.Table.with_appender owner discarded ~f:(fun a -> D.Table.append a [D.Args.[10L]]));
   check "ordinary appender flush control" (match ok (rows observer "SELECT nextval('appender_flush_probe')") with [n] -> Int64.(n > 2L) | _ -> false);
   let request = B.create () in
-  expect D.Cancelled (B.run request owner ~f:(fun facade ->
+  expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
     D.with_prepared facade "SELECT 1::BIGINT" ~f:(fun p ->
       ok (B.cancel request); ignore (D.execute_prepared p); Ok ())));
   Ok ()))
 let traversal db = connection db (fun owner ->
   List.iter [false; true] ~f:(fun stop ->
     let request = B.create () and visits = ref 0 in
-    expect D.Cancelled (B.run request owner ~f:(fun facade ->
+    expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
       D.with_prepared facade "SELECT i::BIGINT FROM range(5000) t(i)" ~f:(fun p ->
         Result.bind (D.execute_prepared p) ~f:(fun r ->
           D.fold_chunks r ~init:() ~f:(fun _ () ->
@@ -177,7 +177,7 @@ let snapshots db = connection db (fun owner -> connection db (fun observer ->
         if cancelled then ok (B.cancel request);
         execute_gate 0;
         let result = join () in
-        if cancelled then expect D.Cancelled result else ok result));
+        if cancelled then expect D.Error.Cancelled result else ok result));
     check "snapshot settlement counts" (if cancelled then count 2 = 0 && count 3 = 1 else count 2 = 1 && count 3 = 0));
   check "snapshot observer rollback" (Poly.equal (ok (rows observer "SELECT count(*) FROM snapshot_rows")) [1L]);
   Ok ()))
@@ -187,8 +187,8 @@ let diagnostics db =
   List.iter [false; true] ~f:(fun cancelled ->
     ok (connection db (fun owner ->
       let request = B.create () in
-      expect D.Embedded_nul (B.run request owner ~f:(fun _ ->
-        if cancelled then ok (B.cancel request); Error D.Embedded_nul));
+      expect D.Error.Embedded_nul (B.run request owner ~f:(fun _ ->
+        if cancelled then ok (B.cancel request); failed D.Error.Embedded_nul));
       let exceptional_request = B.create () in
       let outcome = E.capture (fun () -> B.run exceptional_request owner ~f:(fun _ ->
         if cancelled then ok (B.cancel exceptional_request);
@@ -202,11 +202,11 @@ let diagnostics db =
     reset_counts (); fail_rollback true;
     let result = Exn.protect ~finally:(fun () -> fail_rollback false) ~f:(fun () ->
       B.run request owner ~f:(fun facade -> D.with_transaction facade ~f:(fun _ ->
-        ok (B.cancel request); Error D.Embedded_nul))) in
-    (match result with Error (D.Rollback_failed (D.Embedded_nul, D.Native_error _)) -> ()
+        ok (B.cancel request); failed D.Error.Embedded_nul))) in
+    (match result with Error { cause = Rollback_failed { primary = { cause = Embedded_nul; _ }; rollback = { cause = Native _; _ } }; _ } -> ()
      | _ -> failwith "result rollback composite lost");
     check "transaction discard detached/disposed" (count 6 = 1 && count 7 = 1 && count 4 = 1);
-    expect D.Closed (D.execute owner "SELECT 1"); Ok ())
+    expect D.Error.Closed (D.execute owner "SELECT 1"); Ok ())
 type _ Stdlib.Effect.t += Escape : unit Stdlib.Effect.t
 let effects_and_rollback db = connection db (fun owner ->
   let delivered = ref 0 in
@@ -217,17 +217,17 @@ let effects_and_rollback db = connection db (fun owner ->
         | Escape -> Some (fun (k : (a, _) Stdlib.Effect.Deep.continuation) ->
           Int.incr delivered; Stdlib.Effect.Deep.continue k ())
         | _ -> None } in
-  expect D.Effects_not_allowed result; check "outer effect denied" (!delivered = 0);
+  expect D.Error.Effects_not_allowed result; check "outer effect denied" (!delivered = 0);
   let request = B.create () in
   fail_rollback true;
   let outcome = Exn.protect ~finally:(fun () -> fail_rollback false) ~f:(fun () ->
     E.capture (fun () -> B.run request owner ~f:(fun facade ->
       D.with_transaction facade ~f:(fun _ -> callback_failure ())))) in
   (match outcome with
-   | E.Raised { exception_ = D.Rollback_exception (Callback_failure, D.Native_error _); backtrace } ->
+   | E.Raised { exception_ = D.Cleanup_exception ({ cause = Native _; _ }, Callback_failure); backtrace } ->
      check "composite callback backtrace" (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string backtrace) ~substring:"callback_failure")
    | _ -> failwith "rollback composite");
-  expect D.Closed (D.execute owner "SELECT 1"); Ok ())
+  expect D.Error.Closed (D.execute owner "SELECT 1"); Ok ())
 let parent_close db =
   let entered = A.make false and release = A.make false and published = A.make false in
   let request = B.create () and owner = ref None in
@@ -244,16 +244,16 @@ let parent_close db =
       Exn.protect ~finally:(fun () -> A.set release true; A.set published true; A.set entered true; disconnect_gate false) ~f:(fun () ->
         E.await ~label:"parent admitted before revocation probe" (fun () -> A.get entered);
         E.await ~label:"parent scope revoked" (fun () ->
-          A.get published && match D.execute (Option.value_exn !owner) "SELECT 1" with Error D.Closed -> true | _ -> false);
+          A.get published && match D.execute (Option.value_exn !owner) "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false);
         check "request still pending" (Poly.equal (B.settlement request) B.Pending);
         check "no early disconnect" (count 4 = 0);
         A.set release true;
-        expect D.Closed (request_join ());
+        expect D.Error.Closed (request_join ());
         E.await ~label:"native disconnect entered" disconnect_entered;
         check "settlement before disconnect" (Poly.equal (B.settlement request) B.Settled);
         check "parent revoke native detach/dispose" (count 6 = 1 && count 7 = 1);
         disconnect_gate false; ok (close_join ()))));
-  expect D.Closed (D.execute (Option.value_exn !owner) "SELECT 1"); Ok ()
+  expect D.Error.Closed (D.execute (Option.value_exn !owner) "SELECT 1"); Ok ()
 let parquet db = connection db (fun owner ->
   let name = Stdlib.Filename.temp_file "bridge-b1-" ".parquet" in
   Stdlib.Sys.remove name;
@@ -263,10 +263,8 @@ let parquet db = connection db (fun owner ->
     let missing = ok (D.Parquet.path (name ^ ".missing")) in
     let request = B.create () in
     reset_counts ();
-    expect D.Cancelled (B.run request owner ~f:(fun facade ->
-      Result.map_error ~f:(fun (e : D.Request.request_error) -> match e.cause with
-        | D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
-        (D.Parquet.fold facade [path; missing] D.Fields.[int64] ~row:Fn.id
+    expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+      (D.Parquet.fold facade [path; missing] D.Fields.[int64] ~row:Fn.id
           ~init:() ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ())))));
     check "next parquet suppressed" (count 0 = 1); Ok ()))
 exception Native_create_failure
@@ -285,7 +283,7 @@ let native_admission_failures db = connection db (fun owner ->
      | 1, E.Raised { exception_ = Native_create_failure; backtrace } ->
        check "create failure backtrace retained"
          (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string backtrace) ~substring:"run_create_failure")
-     | 2, E.Returned (Error D.Busy) -> ()
+     | 2, E.Returned (Error { D.Error.cause = Busy; _ }) -> ()
      | _ -> failwith "native acquisition failure outcome");
     check "failed binding settles admitted lease" (Poly.equal (B.settlement request) B.Settled);
     check "failed binding deterministic cleanup"
@@ -297,9 +295,9 @@ let native_admission_failures db = connection db (fun owner ->
   let before = Duckdb_ffi.live_resources () in
   let request = B.create () in
   ok (B.cancel request);
-  expect D.Cancelled (B.run request owner ~f:(fun _ -> failwith "pre-cancelled admission"));
+  expect D.Error.Cancelled (B.run request owner ~f:(fun _ -> failwith "pre-cancelled admission"));
   let p = ok (D.prepare owner "SELECT 1") in
-  expect D.Live_children (B.run (B.create ()) owner ~f:(fun _ -> failwith "child admission"));
+  expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> failwith "child admission"));
   ok (D.close_prepared p);
   check "failed ML admission allocates no native request"
     (count 5 = 0 && count 7 = 0 && Duckdb_ffi.live_resources () = before);
@@ -315,15 +313,15 @@ let native_lifecycle db = connection db (fun owner ->
       ok (D.execute facade "SELECT 1");
       match outcome with
       | 0 -> Ok ()
-      | 1 -> Error D.Embedded_nul
+      | 1 -> failed D.Error.Embedded_nul
       | 2 -> callback_failure ()
       | 3 -> ok (B.cancel request);
         check "native cancel published before acknowledgement" (count 8 = 1);
         Ok ()
       | _ -> D.execute facade "SELECT missing_resource_lifecycle_column")) in
     (match outcome, result with
-     | 0, E.Returned (Ok ()) | 1, E.Returned (Error D.Embedded_nul)
-     | 3, E.Returned (Error D.Cancelled) | 4, E.Returned (Error (D.Native_error _)) -> ()
+     | 0, E.Returned (Ok ()) | 1, E.Returned (Error { D.Error.cause = Embedded_nul; _ })
+     | 3, E.Returned (Error { cause = Cancelled; _ }) | 4, E.Returned (Error { cause = Native _; _ }) -> ()
      | 2, E.Raised failure ->
        check "native lifecycle exception identity" (phys_equal failure.exception_ Callback_failure)
      | _, E.Raised failure -> Stdlib.Printexc.raise_with_backtrace failure.exception_ failure.backtrace
@@ -360,16 +358,14 @@ let native_snapshot_discard db = connection db (fun owner ->
       E.await ~label:"snapshot discard result produced" (fun () -> execute_entered () = 2);
       ok (B.cancel request); execute_gate 0;
       (match join () with
-       | Error (D.Rollback_failed (D.Cancelled, D.Native_error _)) -> ()
+       | Error { cause = Rollback_failed { primary = { cause = Cancelled; _ }; rollback = { cause = Native _; _ } }; _ } -> ()
        | _ -> failwith "snapshot discard composite");
       check "snapshot detaches before close" (count 6 = 1 && count 7 = 1 && count 4 = 1)));
-  expect D.Closed (D.execute owner "SELECT 1"); Ok ())
+  expect D.Error.Closed (D.execute owner "SELECT 1"); Ok ())
 let mid_chunk_cancel db = connection db (fun owner ->
   let request = B.create () and calls = ref 0 in
-  expect D.Cancelled (B.run request owner ~f:(fun facade ->
-    Result.map_error ~f:(fun (e : D.Request.request_error) -> match e.cause with
-      | D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
-      (D.Request.Connection.fold facade
+  expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+    (D.Request.Connection.fold facade
         (D.Request.many D.Fields.[] D.Fields.[int64] ~row:Fn.id "SELECT * FROM range(100)") D.Args.[] ~init:()
         ~f:(fun _ () -> Int.incr calls; ok (B.cancel request); Ok (D.Continue ())))));
   check "mid-chunk cancel stops per-row fold" (!calls = 1);

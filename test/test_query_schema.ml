@@ -1,9 +1,9 @@
 open! Base
 open Duckdb
 module S = Scalar
-let ok = function Ok x -> x | Error (Native_error s) -> failwith s | Error _ -> failwith "unexpected error"
+let ok = function Ok x -> x | Error { Error.cause = Native s; _ } -> failwith s | Error _ -> failwith "unexpected error"
 let rejected = function
-  | Error (Data_error S.Parameter_schema_changed) -> ()
+  | Error { Error.cause = Parameter_schema_changed; _ } -> ()
   | _ -> failwith "expected Parameter_schema_changed"
 let count c = ok (with_prepared c "SELECT count(*)::BIGINT FROM t" ~f:(fun p ->
   Result.bind (execute_prepared p) ~f:(fun r ->
@@ -52,8 +52,8 @@ let () =
         ok (execute_transaction tx "ALTER TABLE t ALTER x TYPE DOUBLE");
         rejected (execute_prepared p);
         ok (execute_transaction tx "INSERT INTO t VALUES (42.0)");
-        Error Effects_not_allowed)) with
-     | Error Effects_not_allowed -> () | _ -> failwith "outer transaction outcome changed");
+        Error { context = Transaction; cause = Effects_not_allowed })) with
+     | Error { cause = Effects_not_allowed; _ } -> () | _ -> failwith "outer transaction outcome changed");
     assert (Int64.equal (count c) 0L);
     (* Outer rollback restores BIGINT, not just rows; no internal COMMIT occurred. *)
     ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
@@ -75,7 +75,7 @@ let () =
         "SELECT * FROM t"] ~f:run;
       (* Pinned DuckDB classifies SQL ANALYZE as VACUUM, outside the existing
          engine-type allowlist. Do not expand it in a schema-safety fix. *)
-      (match prepare c "ANALYZE t" with Error Unsupported_statement -> () | _ -> assert false);
+      (match prepare c "ANALYZE t" with Error { cause = Unsupported_statement; _ } -> () | _ -> assert false);
       run ("COPY t TO '" ^ String.substr_replace_all path ~pattern:"'" ~with_:"''" ^ "' (FORMAT CSV)");
       assert (Int64.equal (count c) 1L);
       run "DROP TABLE t";

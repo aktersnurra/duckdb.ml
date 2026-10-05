@@ -8,7 +8,7 @@ let handled = Stdlib.Atomic.make 0
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let rec contains_break = function
   | Stdlib.Sys.Break -> true
-  | D.Rollback_exception (exn, _) | D.Cleanup_exception (_, exn) -> contains_break exn
+  | D.Cleanup_exception (_, exn) -> contains_break exn
   | Exn.Finally (a, b) -> contains_break a || contains_break b
   | _ -> false
 let () =
@@ -37,7 +37,7 @@ let () =
             else if String.is_prefix mode ~prefix:"prepared-close" then (
               inject "prepared-close";
               try ok (D.close_prepared p) with Stdlib.Sys.Break ->
-                (match D.parameter_count p with Error D.Closed -> () | _ -> failwith "interrupted close did not revoke prepared");
+                (match D.parameter_count p with Error { cause = D.Error.Closed; _ } -> () | _ -> failwith "interrupted close did not revoke prepared");
                 ok (D.execute c "select 1"); raise Stdlib.Sys.Break)
             else (
               (* BEGIN, then the original execute: the schema epoch is unchanged

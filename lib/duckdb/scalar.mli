@@ -8,16 +8,6 @@ type _ t =
   | Date : int32 t | Timestamp_s : int64 t | Timestamp_ms : int64 t
   | Timestamp_us : int64 t | Timestamp_ns : int64 t | Timestamp_tz : int64 t
 
-type error =
-  | Type_mismatch of { index : int; expected : string; actual : int }
-  | Null of { column : int; row : int }
-  | Index of { index : int; length : int }
-  | Column_count of { expected : int; actual : int }
-  | Unbound_parameter of int
-  | Parameter_schema_changed
-  | Encode_rejected of { index : int; reason : Base.Error.t }
-  | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
-
 val name : 'a t -> string
 
 val native_id : 'a t -> int

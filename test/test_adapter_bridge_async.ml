@@ -71,7 +71,7 @@ let dispatched slots =
       check "dispatched request pending until worker enters" (match B.settlement request with Pending -> true | Settled -> false);
       Stdlib.Atomic.set release true;
       worker >>| fun outcome ->
-      (match S.restore outcome with Error Duckdb.Cancelled -> () | _ -> failwith "dispatched suppression");
+      (match S.restore outcome with Error { Duckdb.Error.cause = Cancelled; _ } -> () | _ -> failwith "dispatched suppression");
       check "dispatched zero native calls and controllers" (R.executions () = 0 && R.interrupts () = 0 && R.joins () = 0);
       R.check_settled request; R.check_inventory ();
       printf "async bridge: actual-dispatched cancelled-before-Bridge native-execute=0 controller-join=0\n%!")
@@ -94,7 +94,7 @@ let saturation slots =
       R.release Execute;
       joined >>| fun results ->
       List.iter2_exn (queued :: requests) results ~f:(fun r outcome ->
-        if phys_equal r queued then (match S.restore outcome with Error Duckdb.Cancelled -> () | _ -> failwith "queued suppression")
+        if phys_equal r queued then (match S.restore outcome with Error { Duckdb.Error.cause = Cancelled; _ } -> () | _ -> failwith "queued suppression")
         else R.check_outcome Execute (S.restore outcome);
         R.check_settled r);
       check "both real native interrupted completions" (R.native_errors () = 2 && R.executions () = 2 && R.joins () = 2);

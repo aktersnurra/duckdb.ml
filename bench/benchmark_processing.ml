@@ -41,7 +41,8 @@ let owned connection request () =
   match Duckdb.Request.Connection.fold connection request Duckdb.Args.[] ~init:{ rows = 0; nulls = 0; checksum = 0L }
     ~f:(fun (required, nullable) totals -> Ok (Duckdb.Continue (add required nullable totals))) with
   | Ok totals -> totals
-  | Error e -> failwith ("benchmark owned request failed in " ^ Duckdb.Request.query_of_context e.context)
+  | Error { context = Query sql; _ } -> failwith ("benchmark owned request failed in " ^ sql)
+  | Error _ -> failwith "benchmark owned request failed"
 
 let borrowed result =
   fail_error (Duckdb.fold_chunks result ~init:{ rows = 0; nulls = 0; checksum = 0L }

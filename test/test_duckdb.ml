@@ -9,14 +9,16 @@ external fail_rollback : unit -> unit = "test_fail_rollback" [@@noalloc]
 external trace_reset : unit -> unit = "test_trace_reset" [@@noalloc]
 external trace : unit -> int = "test_trace" [@@noalloc]
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
-let rec same_error (a : D.error) (b : D.error) = match a, b with
-  | Invalid_configuration a, Invalid_configuration b | Native_error a, Native_error b -> String.equal a b
-  | Embedded_nul, Embedded_nul | Closed, Closed | Busy, Busy | Live_children, Live_children
+let rec same_error (a : D.Error.cause) (b : D.Error.cause) = match a, b with
+  | Invalid_configuration a, Invalid_configuration b | Native a, Native b -> String.equal a b
+  | Embedded_nul, Embedded_nul | Closed, Closed | Busy, Busy
   | Unsupported_statement, Unsupported_statement | Effects_not_allowed, Effects_not_allowed -> true
-  | Rollback_failed (a, b), Rollback_failed (c, d) -> same_error a c && same_error b d
+  | Rollback_failed a, Rollback_failed b ->
+    same_error a.primary.cause b.primary.cause && same_error a.rollback.cause b.rollback.cause
   | _ -> false
-let error (expected : D.error) = function Error actual when same_error expected actual -> () | _ -> failwith "wrong error"
-let native_error = function Error (D.Native_error _) -> () | _ -> failwith "expected native error"
+let error (expected : D.Error.cause) = function
+  | Error { D.Error.cause; _ } when same_error expected cause -> () | _ -> failwith "wrong error"
+let native_error = function Error { D.Error.cause = Native _; _ } -> () | _ -> failwith "expected native error"
 let config = ok (D.Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let wait predicate =
@@ -25,11 +27,11 @@ let wait predicate =
 exception Callback
 let lifecycle () =
   List.iter [0; -1; Int.min_value] ~f:(fun threads ->
-    match D.Config.create ~threads Memory with Error (Invalid_configuration _) -> () | _ -> assert false);
+    match D.Config.create ~threads Memory with Error { cause = Invalid_configuration _; _ } -> () | _ -> assert false);
   List.iter [""; ":memory:"; "bad\000path"; "md:remote"; "https://remote"] ~f:(fun path ->
-    match D.Config.create (File path) with Error (Invalid_configuration _) -> () | _ -> assert false);
-  (match D.Config.create ~access:Read_only Memory with Error (Invalid_configuration _) -> () | _ -> assert false);
-  (match D.Config.create ~memory_limit_bytes:(-1) Memory with Error (Invalid_configuration _) -> () | _ -> assert false);
+    match D.Config.create (File path) with Error { cause = Invalid_configuration _; _ } -> () | _ -> assert false);
+  (match D.Config.create ~access:Read_only Memory with Error { cause = Invalid_configuration _; _ } -> () | _ -> assert false);
+  (match D.Config.create ~memory_limit_bytes:(-1) Memory with Error { cause = Invalid_configuration _; _ } -> () | _ -> assert false);
   for _ = 1 to 20 do
     native_error (D.open_database (ok (D.Config.create (File "/proc/duckdb-stage3a-missing/db")))); clean ()
   done;
@@ -44,12 +46,12 @@ let lifecycle () =
   clean ();
   let db = ok (D.open_database config) in
   let c = ok (D.connect db) in
-  error D.Live_children (D.close_database db);
+  error D.Error.Busy (D.close_database db);
   ok (D.execute c "create table t(i integer)");
   for _ = 1 to 50 do native_error (D.execute c "select missing from nowhere"); ok (D.execute c "select 42") done;
   error Embedded_nul (D.execute c "select 1\000; select 2");
   List.iter ["COMMIT"; "BEGIN"; "ROLLBACK"; "select 1; select 2"; "PREPARE x AS SELECT 1"; "EXPLAIN ANALYZE COMMIT"]
-    ~f:(fun sql -> error D.Unsupported_statement (D.execute c sql));
+    ~f:(fun sql -> error D.Error.Unsupported_statement (D.execute c sql));
   let alias = c in
   ok (D.close_connection c); ok (D.close_connection alias);
   error Closed (D.execute alias "select 1");
@@ -79,12 +81,13 @@ let transactions () =
       " then 1 else error('transaction count') end from t")) in
     let escaped = ok (D.with_transaction c ~f:(fun tx ->
       error Busy (D.execute c "select 1"); error Busy (D.close_connection c);
-      error Live_children (D.close_database db);
+      error Busy (D.close_database db);
       error Busy (D.with_transaction c ~f:(fun _ -> Ok ()));
       ok (D.execute_transaction tx "insert into t values (1)"); Ok tx)) in
     error Closed (D.execute_transaction escaped "select 1"); count 1;
     error Effects_not_allowed (D.with_transaction c ~f:(fun tx ->
-      ok (D.execute_transaction tx "insert into t values (2)"); Error Effects_not_allowed)); count 1;
+      ok (D.execute_transaction tx "insert into t values (2)");
+      Error { context = Transaction; cause = Effects_not_allowed })); count 1;
     (match D.with_transaction c ~f:(fun tx ->
       ok (D.execute_transaction tx "insert into t values (3)"); raise Callback) with
      | exception Callback -> () | _ -> assert false); count 1;
@@ -102,7 +105,7 @@ let effects () =
   error Effects_not_allowed (D.with_database config ~f:(fun _ ->
     (try Stdlib.Effect.perform Pause with _ -> ()); Ok ()));
   clean ();
-  let saved : (unit, (unit, D.error) Result.t) Stdlib.Effect.Deep.continuation option ref = ref None in
+  let saved : (unit, (unit, D.Error.t) Result.t) Stdlib.Effect.Deep.continuation option ref = ref None in
   ok (D.with_database config ~f:(fun db -> D.with_connection db ~f:(fun c ->
     D.with_transaction c ~f:(fun tx ->
       Stdlib.Effect.Deep.match_with
@@ -123,7 +126,7 @@ let ownership () =
     result := Some (D.execute c sql)) () in
   wait (fun () -> entered () = 1);
   Stdlib.Gc.full_major (); Stdlib.Gc.compact ();
-  error Busy (D.execute c "select 1"); error Busy (D.close_connection c); error Live_children (D.close_database db);
+  error Busy (D.execute c "select 1"); error Busy (D.close_connection c); error Busy (D.close_database db);
   release (); Thread.join worker; ok (Option.value_exn !result);
   ok (D.close_connection c); ok (D.close_database db); clean ();
   let worker = ref None and observer = ref None in
@@ -133,7 +136,7 @@ let ownership () =
     worker := Some (Thread.create (fun () -> ok (D.execute c "select 42")) ());
     wait (fun () -> entered () = 1);
     observer := Some (Thread.create (fun () ->
-      wait (fun () -> match D.execute c "select 1" with Error Closed -> true | Error Busy -> false | _ -> assert false);
+      wait (fun () -> match D.execute c "select 1" with Error { cause = Closed; _ } -> true | Error { cause = Busy; _ } -> false | _ -> assert false);
       release ()) ());
     Ok ()));
   Thread.join (Option.value_exn !worker); Thread.join (Option.value_exn !observer); clean ();
@@ -152,13 +155,14 @@ let rollback_failures () =
   ok (D.with_database config ~f:(fun db ->
     let c = ok (D.connect db) in
     fail_rollback ();
-    (match D.with_transaction c ~f:(fun _ -> Error D.Effects_not_allowed) with
-     | Error (Rollback_failed (Effects_not_allowed, Native_error _)) -> () | _ -> assert false);
+    (match D.with_transaction c ~f:(fun _ -> Error { D.Error.context = Transaction; cause = Effects_not_allowed }) with
+     | Error { cause = Rollback_failed { primary = { cause = Effects_not_allowed; _ }; rollback = { cause = Native _; _ } }; _ } -> ()
+     | _ -> assert false);
     error Closed (D.execute c "select 1");
     let c = ok (D.connect db) in
     fail_rollback ();
     (match D.with_transaction c ~f:(fun _ -> raise Callback) with
-     | exception D.Rollback_exception (Callback, Native_error _) -> () | _ -> assert false);
+     | exception D.Cleanup_exception ({ cause = Native _; _ }, Callback) -> () | _ -> assert false);
     error Closed (D.execute c "select 1"); Ok ()));
   clean (); Stdlib.print_endline "duckdb: rollback-failure/outcome-preservation/discard=ok"
 let transaction_drain () =
@@ -172,7 +176,7 @@ let transaction_drain () =
       error Busy (D.execute_transaction tx "select 1");
       observer := Some (Thread.create (fun () ->
         wait (fun () -> match D.execute_transaction tx "select 1" with
-          | Error Closed -> true | Error Busy -> false | _ -> assert false);
+          | Error { cause = Closed; _ } -> true | Error { cause = Busy; _ } -> false | _ -> assert false);
         error Busy (D.execute c "select 1");
         release ()) ());
       Ok ()));

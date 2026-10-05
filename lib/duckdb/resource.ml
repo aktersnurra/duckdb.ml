@@ -1,12 +1,7 @@
 open! Base
+open Failure
 module F = Duckdb_ffi
-type error = Invalid_configuration of string | Embedded_nul | Closed
-  | Busy | Cancelled | Live_children | Native_error of string | Unsupported_statement
-  | Data_error of Scalar.error
-  | Destination_exists | Unsupported_parquet_type of { column : int; actual : int }
-  | Effects_not_allowed | Rollback_failed of error * error
-exception Rollback_exception of exn * error
-exception Cleanup_exception of error * exn
+type error = cause
 
 module Syntax = struct
   let ( let* ) x f = Result.bind x ~f
@@ -176,18 +171,33 @@ let without_escaping_effects work =
             denied := true; Stdlib.Effect.Deep.discontinue k Effect_denied) }
     with Effect_denied -> Error Effects_not_allowed
   in if !denied then Error Effects_not_allowed else result
+(* How a scope's body reports errors (see the interface). A failed primary is
+   retained with its rollback failure or cleanup exception. *)
+type 'e lifting = Cause : context -> cause lifting | Flat : context -> Failure.t lifting
+let lift : type e. e lifting -> cause -> e = fun lifting cause -> match lifting with
+  | Cause _ -> cause
+  | Flat context -> { context; cause }
+let flat : type e. e lifting -> e -> Failure.t = fun lifting error -> match lifting with
+  | Cause context -> { context; cause = error }
+  | Flat _ -> error
+let rollback_failed : type e. e lifting -> e -> cause -> e = fun lifting primary rollback ->
+  let cause = Rollback_failed { primary = flat lifting primary; rollback = { context = Transaction; cause = rollback } } in
+  match lifting with
+  | Cause _ -> cause
+  | Flat _ -> { context = primary.context; cause }
+let cleanup_failed lifting primary exn = Cleanup_exception (flat lifting primary, exn)
 (* Runs [work] effect-free, then [cleanup] on every exit. A cleanup exception
    is paired with the result error it would otherwise hide. *)
-let scope work cleanup =
+let scope ~lifting work cleanup =
   let result_error = ref None in
   Exn.protect
     ~finally:(fun () ->
       try complete_cleanup cleanup with exn ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        let exception_ = match !result_error with None -> exn | Some error -> Cleanup_exception (error, exn) in
+        let exception_ = match !result_error with None -> exn | Some error -> cleanup_failed lifting error exn in
         Stdlib.Printexc.raise_with_backtrace exception_ backtrace)
     ~f:(fun () -> guarded (fun () ->
-      let result = without_escaping_effects work in
+      let result = Result.map_error (without_escaping_effects (fun () -> Ok (work ()))) ~f:(lift lifting) |> Result.join in
       Result.iter_error result ~f:(fun error -> result_error := Some error);
       result))
 
@@ -202,7 +212,7 @@ let native_status code ~message = match F.Status.of_code code with
   | F.Status.Success -> Ok ()
   | F.Status.Unsupported -> Error Unsupported_statement
   | F.Status.Suppressed -> Error Cancelled
-  | F.Status.Native_failure -> Error (Native_error (message ()))
+  | F.Status.Native_failure -> Error (Native (message ()))
 let connection_result native =
   native_status (F.connection_status native) ~message:(fun () -> F.connection_message native)
 (* [close] releases native resources; [finish] then releases the shell even
@@ -251,30 +261,25 @@ let raw_execute c sql =
       let* () = connection_result c.owner.native_connection in
       checkpoint c))
 
-(* A failed primary outcome and its rollback are both retained. [outcome] says
-   how a primary of the body's error type is paired with a rollback failure. *)
 type 'e failure = Failed of 'e | Raised of raised
-type 'e outcome = { rollback_failed : 'e -> error -> 'e; cleanup_failed : 'e -> exn -> exn }
-let core_outcome = { rollback_failed = (fun primary secondary -> Rollback_failed (primary, secondary));
-                     cleanup_failed = (fun primary secondary -> Cleanup_exception (primary, secondary)) }
-let combine outcome failure rolled_back = match failure, rolled_back with
+let combine lifting failure rolled_back = match failure, rolled_back with
   | Failed primary, Ok (Ok ()) -> Error primary
   | Raised primary, Ok (Ok ()) -> reraise primary
-  | Failed primary, Ok (Error secondary) -> Error (outcome.rollback_failed primary secondary)
+  | Failed primary, Ok (Error secondary) -> Error (rollback_failed lifting primary secondary)
   | Raised (primary, backtrace), Ok (Error secondary) ->
-    Stdlib.Printexc.raise_with_backtrace (Rollback_exception (primary, secondary)) backtrace
+    Stdlib.Printexc.raise_with_backtrace (Cleanup_exception ({ context = Transaction; cause = secondary }, primary)) backtrace
   | Failed primary, Error (secondary, backtrace) ->
-    Stdlib.Printexc.raise_with_backtrace (outcome.cleanup_failed primary secondary) backtrace
+    Stdlib.Printexc.raise_with_backtrace (cleanup_failed lifting primary secondary) backtrace
   | Raised (primary, backtrace), Error (secondary, _) ->
     Stdlib.Printexc.raise_with_backtrace (Exn.Finally (primary, secondary)) backtrace
 (* Runs [work]; any error or exception rolls back. A rollback that fails or
    raises also discards the owner before the combined outcome is reported. *)
-let settle ~outcome ~rollback ~discard work =
+let settle ~lifting ~rollback ~discard work =
   let recover failure =
     let rolled_back = attempt rollback in
     match rolled_back with
-    | Ok (Ok ()) -> combine outcome failure rolled_back
-    | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:(fun () -> combine outcome failure rolled_back) in
+    | Ok (Ok ()) -> combine lifting failure rolled_back
+    | Ok (Error _) | Error _ -> Exn.protect ~finally:discard ~f:(fun () -> combine lifting failure rolled_back) in
   match capture_all work with
   | Ok (Ok value) -> Ok value
   | Ok (Error error) -> recover (Failed error)
@@ -483,11 +488,11 @@ let close_connection c =
       && Option.is_none c.owner.lease && Option.is_none c.owner.result_owner in
     close_once gate ~destroy:(fun () -> destroy_connection c) ~refuse:(fun () ->
       all_ok [ require unleased Busy
-             ; require (fun () -> List.is_empty c.owner.prepared_children) Live_children ])
+             ; require (fun () -> List.is_empty c.owner.prepared_children) Busy ])
 let close_database db =
   let gate = db.database_gate in
   close_once gate ~destroy:(fun () -> destroy_database db) ~refuse:(fun () ->
-    all_ok [ require (idle gate) Busy; require (fun () -> List.is_empty db.children) Live_children ])
+    all_ok [ require (idle gate) Busy; require (fun () -> List.is_empty db.children) Busy ])
 let reject_nul sql = if String.contains sql '\000' then Error Embedded_nul else Ok ()
 let execute c sql =
   let* () = reject_nul sql in
@@ -513,16 +518,17 @@ let force_close_database db =
       List.iter children ~f:revoke;
       List.iter children ~f:force_close_connection;
       destroy_database db)))
-let with_database config ~f =
-  let* db = open_database config in
-  scope (fun () -> f db) (fun () -> force_close_database db)
-let with_connection db ~f =
-  let* c = connect db in
-  scope (fun () -> f c) (fun () -> force_close_connection c)
+(* Callbacks return flat errors, passed through unchanged. *)
+let scoped_error context acquire use cleanup =
+  let* owner = within context (acquire ()) in
+  scope ~lifting:(Flat context) (fun () -> use owner) (fun () -> cleanup owner)
+let with_database config ~f = scoped_error Database (fun () -> open_database config) f force_close_database
+let with_connection db ~f = scoped_error Connection (fun () -> connect db) f force_close_connection
 
-let with_transaction_lifted ~lift ~outcome c ~f =
+let with_transaction ~lifting c ~f =
   let gate = c.owner.connection_gate in
   let tx = { connection = c; active = true; failure = None } in
+  let lift = lift lifting in
   let core result = Result.map_error result ~f:lift in
   let* () = core @@ admit gate
     [ (fun () -> facade_access c)
@@ -539,14 +545,13 @@ let with_transaction_lifted ~lift ~outcome c ~f =
   let rollback () = complete_cleanup (fun () -> revoke_and_drain (); rollback_if_begun c begin_attempted) in
   let discard () = begin_discard gate; release (); complete_cleanup (fun () -> destroy_connection c) in
   Exn.protect ~finally:release ~f:(fun () ->
-    settle ~outcome ~rollback ~discard (fun () ->
+    settle ~lifting ~rollback ~discard (fun () ->
       in_native_transaction ~lift c begin_attempted (fun () ->
         let result = without_escaping_effects (fun () -> Ok (f tx)) in
         revoke_and_drain ();
         let* value = Result.join (core result) in
         let+ () = core (poisoned tx) in
         value)))
-let with_transaction c ~f = with_transaction_lifted ~lift:Fn.id ~outcome:core_outcome c ~f
 
 let with_child_snapshot (child : child) work =
   match child.transaction with
@@ -556,7 +561,7 @@ let with_child_snapshot (child : child) work =
     (* child_operation already owns exclusive admission. No public token or
        callback can use this internal transaction; materialization precedes COMMIT. *)
     let begin_attempted = ref false in
-    settle ~outcome:core_outcome
+    settle ~lifting:(Cause Transaction)
       ~rollback:(fun () -> complete_cleanup (fun () -> admit_cleanup c; rollback_if_begun c begin_attempted))
       ~discard:(fun () -> complete_cleanup (fun () -> destroy_connection c))
       (fun () -> in_native_transaction ~lift:Fn.id c begin_attempted (fun () ->
@@ -594,7 +599,7 @@ module Bridge = struct
       | Fresh -> request.request_state <- Admitted; Ok ())
 
   let run request c ~f =
-    let* () = consume request in
+    let* () = within Connection (consume request) in
     let gate = c.owner.connection_gate in
     let installed = ref false in
     let facade = { owner = c.owner; request = Some request } in
@@ -606,7 +611,7 @@ module Bridge = struct
         [ (fun () -> facade_access c)
         ; available gate
         ; require unleased Busy
-        ; require (fun () -> List.is_empty c.owner.prepared_children) Live_children ]
+        ; require (fun () -> List.is_empty c.owner.prepared_children) Busy ]
         ~claim:(fun () -> request_locked request (fun () ->
           if request.cancelled then Error Cancelled
           else (c.owner.request_lease <- Some request; installed := true; Ok ()))) in
@@ -654,12 +659,12 @@ module Bridge = struct
         signal gate;
         request.cancelled)) in
     Exn.protect ~finally:(fun () -> ignore (finish () : bool)) ~f:(fun () ->
-      let result = scope (fun () ->
-        let* () = admit_request () in
-        let* () = bind_native () in
+      let result = scope ~lifting:(Flat Connection) (fun () ->
+        let* () = within Connection (admit_request ()) in
+        let* () = within Connection (bind_native ()) in
         f facade) cleanup in
       let cancelled = finish () in
       match result with
-      | Ok _ when cancelled -> Error Cancelled
+      | Ok _ when cancelled -> Error { context = Connection; cause = Cancelled }
       | Ok _ | Error _ -> result)
 end

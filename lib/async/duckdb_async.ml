@@ -10,7 +10,7 @@ type error =
   | Pool_shutdown
   | Cancelled
   | Reentrant_call
-  | Core of Duckdb.error
+  | Core of Duckdb.Error.t
   | Offload_unavailable of Core.Error.t
 
 type exception_info = { exception_ : exn; backtrace : Stdlib.Printexc.raw_backtrace }
@@ -35,15 +35,15 @@ type execution_gate = { mutex : Gate_mutex.t; mutable execution : execution; mut
 type slot_state = Idle | Leased | Needs_close | Closing | Needs_connect | Connecting | Closed | Close_failed
 type _ operation =
   | Execute : string -> unit operation
-  | Transaction : (Duckdb.transaction -> ('a, Duckdb.error) result) -> 'a operation
+  | Transaction : (Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> 'a operation
   | Query : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn -> 'row list operation
-  | Fold_rows : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
-  | Parquet_fold_rows : string list * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> 'a operation
+  | Fold_rows : string * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a operation
+  | Parquet_fold_rows : string list * (_, 'fn, 'row) Duckdb.Fields.t * 'fn * 'a * ('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a operation
   | Parquet_export : string * string -> unit operation
   (* A typed request: its own outcome is the payload, so request errors reach
      the caller as values and cancellation/failures keep the adapter's rules. *)
-  | Typed : (W.slot -> Duckdb.Bridge.request -> ('a, Duckdb.Request.request_error) result)
-      -> ('a, Duckdb.Request.request_error) result operation
+  | Typed : (W.slot -> Duckdb.Bridge.request -> ('a, Duckdb.Error.t) result)
+      -> ('a, Duckdb.Error.t) result operation
 
 type t =
   { limits : Limits.t
@@ -118,11 +118,11 @@ let with_gate gate f =
 let latched r = with_gate r.gate (fun () -> r.gate.cancelled)
 let latch r =
   with_gate r.gate (fun () -> r.gate.cancelled <- true);
-  Option.iter r.bridge ~f:(fun bridge -> ignore (Duckdb.Bridge.cancel bridge : (unit, Duckdb.error) result))
+  Option.iter r.bridge ~f:(fun bridge -> ignore (Duckdb.Bridge.cancel bridge : (unit, Duckdb.Error.t) result))
 let classify r result =
   if not (latched r) then result
   else match result with
-    | Ok _ | Error (Expected Cancelled) | Error (Expected (Core Duckdb.Cancelled)) -> Error (Expected Cancelled)
+    | Ok _ | Error (Expected Cancelled) | Error (Expected (Core { cause = Duckdb.Error.Cancelled; _ })) -> Error (Expected Cancelled)
     | Error failure -> Error (During_cancellation failure)
 let finish (r : _ request) result =
   r.state <- Finished;
@@ -256,7 +256,7 @@ and dispatch : type a. t -> slot -> a request -> unit = fun pool slot r ->
     let result =
       if not enter then Error (Expected Cancelled)
       else
-        let run : a operation -> (a, Duckdb.error) result = function
+        let run : a operation -> (a, Duckdb.Error.t) result = function
           | Execute sql -> W.execute owner bridge sql
           | Transaction f -> W.transaction owner bridge ~f
           | Query (sql, fields, row) -> W.query owner bridge sql fields ~row
@@ -385,8 +385,8 @@ let shutdown pool =
 
 module Request = struct
   (* Submission errors are the adapter's own admission errors. *)
-  type 'a submitted = (('a, Duckdb.Request.request_error) result request, error) result
-  type nonrec error = Adapter of failure | Request of Duckdb.Request.request_error
+  type 'a submitted = (('a, Duckdb.Error.t) result request, error) result
+  type nonrec error = Adapter of failure | Request of Duckdb.Error.t
   let typed pool work = admit pool (Typed work)
   let submit_run pool shape r args = typed pool (fun slot bridge -> W.request_run slot bridge shape r args)
   let submit_exec pool r args = submit_run pool Duckdb.Request.Exec r args

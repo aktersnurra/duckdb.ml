@@ -7,7 +7,8 @@ module Q = E.Request
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let request_ok = function
   | Ok x -> x
-  | Error (Q.Request e) -> failwith ("unexpected request error in " ^ R.query_of_context e.context)
+  | Error (Q.Request { context; _ }) ->
+    failwith ("unexpected request error in " ^ match context with D.Error.Query sql -> sql | _ -> "non-query context")
   | Error (Q.Adapter _) -> failwith "unexpected adapter error"
 let require name condition = if not condition then failwith name
 let notes = D.Table.(declare "notes" Columns.[ "value", int64; "note", nullable string ] ~row:(fun v n -> (v, n)))
@@ -33,7 +34,7 @@ let () =
           | Error (Q.Adapter E.Reentrant_call) -> true | _ -> false);
         Ok (D.Continue (n + 1)))) = 2);
       require "Row_count is a request error" (match Q.find pool one_note D.Args.[42L] with
-        | Error (Q.Request { cause = R.Row_count { actual = `Zero; _ }; _ }) -> true | _ -> false);
+        | Error (Q.Request { cause = D.Error.Row_count { actual = `Zero; _ }; _ }) -> true | _ -> false);
       require "transaction rolls back on request error" (Result.is_error (Q.with_transaction pool ~f:(fun tx ->
         Result.bind (R.Transaction.exec tx insert D.Args.[3L; None]) ~f:(fun () -> R.Transaction.find tx one_note D.Args.[99L]))));
       require "rollback left no row" (List.length (request_ok (Q.collect pool values D.Args.[0L])) = 2);

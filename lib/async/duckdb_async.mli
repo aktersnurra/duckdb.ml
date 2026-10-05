@@ -17,7 +17,7 @@ type error =
   | Pool_shutdown
   | Cancelled
   | Reentrant_call
-  | Core of Duckdb.error
+  | Core of Duckdb.Error.t
   | Offload_unavailable of Core.Error.t
 
 type exception_info =
@@ -60,7 +60,7 @@ val execute : t -> string -> (unit request, error) result
     owned usable values only. An escaped token is dynamically revoked (Closed).
     Returning a Deferred directly is a type error; [Ok existing_deferred] can
     compile but is not awaited and does not extend the transaction lifetime. *)
-val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.error) result) -> ('a request, error) result
+val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a request, error) result
 
 (** Materializes owned rows on the leased worker. The fields, row constructor and SQL are
     evaluated entirely in one offload; no result/chunk owner crosses Async.
@@ -72,13 +72,13 @@ val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row li
     must not access Async or retain adapter/core owners. [Stop] is successful
     early termination and returns its accumulator. *)
 val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
-  f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) ->
+  f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) ->
   ('a request, error) result
 
 (** Reads exact local filenames in order and folds owned decoded rows on one
     worker. Paths are constructed/resolved only after worker entry. *)
 val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
-  f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) ->
+  f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) ->
   ('a request, error) result
 
 (** Exports through DuckDB's owned temporary/publication protocol on one worker.
@@ -117,9 +117,9 @@ val shutdown : t -> ((unit, failure) result Async.Deferred.t, error) result
 module Request : sig
   (** Cancellable forms (below): the existing [request], [completion] and
       [cancel] apply, and the request's own outcome is the payload. *)
-  type 'a submitted = (('a, Duckdb.Request.request_error) result request, error) result
+  type 'a submitted = (('a, Duckdb.Error.t) result request, error) result
 
-  type nonrec error = Adapter of failure | Request of Duckdb.Request.request_error
+  type nonrec error = Adapter of failure | Request of Duckdb.Error.t
   val exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result Async.Deferred.t
   val find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result Async.Deferred.t
   val find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
@@ -127,8 +127,8 @@ module Request : sig
   val collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     ('row list, error) result Async.Deferred.t
   val fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
-    f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) -> ('a, error) result Async.Deferred.t
-  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) ->
+    f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result Async.Deferred.t
+  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) ->
     ('a, error) result Async.Deferred.t
   val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
     (unit, error) result Async.Deferred.t
@@ -144,7 +144,7 @@ module Request : sig
   val submit_collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     'row list submitted
   val submit_fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
-    init:'a -> f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) -> 'a submitted
-  val submit_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) -> 'a submitted
+    init:'a -> f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a submitted
+  val submit_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> 'a submitted
   val submit_ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> unit submitted
 end

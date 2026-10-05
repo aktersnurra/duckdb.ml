@@ -37,7 +37,7 @@ let check label value = if not value then failwith label
 let ok = function Ok x -> x | Error _ -> failwith "responsiveness DuckDB error"
 let check_settled r =
   check "Bridge settlement" (match B.settlement r with Settled -> true | Pending -> false);
-  check "terminal cancellation Closed" (match B.cancel r with Error Closed -> true | _ -> false)
+  check "terminal cancellation Closed" (match B.cancel r with Error { cause = Closed; _ } -> true | _ -> false)
 let check_inventory () =
   check "ordinary cleanup no locked engine calls" (locked_engine_calls () = 0);
   check "ordinary cleanup visited finish paths" (finish_calls () > 0);
@@ -45,10 +45,10 @@ let check_inventory () =
   check "no finalizer fallback" (Duckdb_ffi.fallback_reclaims () = 0)
 let check_outcome seam outcome =
   if is_interrupted seam then (match outcome with
-    | Error (D.Native_error message) ->
+    | Error { D.Error.cause = Native message; _ } ->
       check "real native interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
     | _ -> failwith "native interrupted error was flattened")
-  else match outcome with Error D.Cancelled -> () | _ -> failwith "missing latched cancellation"
+  else match outcome with Error { D.Error.cause = Cancelled; _ } -> () | _ -> failwith "missing latched cancellation"
 let long_query = "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) t(i)"
 let with_owner f = D.with_database (ok (D.Config.create Memory)) ~f:(fun db -> D.with_connection db ~f)
 let suppressed_work request =
@@ -77,11 +77,9 @@ let work seam request =
               activate (); ok (B.cancel request); Ok (D.Stop ())))
         | Appender_clear | Appender_destroy ->
           ok (D.execute facade "CREATE TABLE t(x BIGINT)");
-          Result.map_error ~f:(fun (e : D.Request.request_error) ->
-            match e.cause with D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
-            (D.Table.with_appender facade D.Table.(declare "t" Columns.[ "x", int64 ] ~row:Fn.id) ~f:(fun a ->
-              ok (D.Table.append a [D.Args.[42L]]);
-              activate (); ok (B.cancel request); Ok ()))
+          D.Table.with_appender facade D.Table.(declare "t" Columns.[ "x", int64 ] ~row:Fn.id) ~f:(fun a ->
+            ok (D.Table.append a [D.Args.[42L]]);
+            activate (); ok (B.cancel request); Ok ())
         | Publication | Unlink ->
           let destination = Stdlib.Filename.temp_file "bridge-heartbeat-" ".parquet" in
           Stdlib.Sys.remove destination;

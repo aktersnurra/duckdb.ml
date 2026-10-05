@@ -26,23 +26,28 @@ val bind_scalar : prepared -> int -> 'a Scalar.t -> 'a option -> (unit, error) r
 val reset : prepared -> (unit, error) result
 
 (** All parameters must be bound. The result exclusively leases the connection
-    until closed; reset/reexecute/prepared close return Live_children. *)
+    until closed; reset/reexecute/prepared close return Busy. *)
 val execute_prepared : prepared -> (query_result, error) result
 val close_result : query_result -> (unit, error) result
-val with_prepared : connection -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result
-val with_prepared_transaction : transaction -> string -> f:(prepared -> ('a, error) result) -> ('a, error) result
+(* Scopes over any callback error type, as [Resource.scope]. *)
+val with_prepared : lifting:'e lifting -> connection -> string ->
+  f:(prepared -> ('a, 'e) result) -> ('a, 'e) result
+val with_prepared_transaction : lifting:'e lifting -> transaction -> string ->
+  f:(prepared -> ('a, 'e) result) -> ('a, 'e) result
 
 (** After admission, consumes/closes the result on every exit. Busy admission
     rejects without consuming it. The callback is synchronous, local,
     and guarded against outward effects. No owner transition is exposed through
     a chunk. Aliases attempting mutation/fetch/close during a callback get Busy.
     Non-null codecs reject NULL on access, not on empty-result schema validation. *)
-val fold_chunks : query_result -> init:'a -> f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result
+val fold_chunks : lifting:'e lifting -> query_result -> init:'a ->
+  f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
 val chunk_length : chunk @ local -> int
 
 (** Zero-based column and row indices, checked before reading. Each access
     validates the exact engine type; returned strings/blobs/scalars are owned.
-    [Decode_rejected.row] and [Null.row] are chunk-relative. *)
+    [Decode_rejected.row] and [Null.row] are chunk-relative. Errors are bare
+    causes; the facade attaches the statement's SQL ([chunk_sql]). *)
 val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, error) result
 
 (* Private, engine-prepared SELECT metadata; no execution or result lease. *)
@@ -52,6 +57,11 @@ val select_schema : prepared -> (int array, error) result
    statement cache instead of being a live child. *)
 val prepare_cached : connection -> string -> (prepared, error) result
 val child : prepared -> child
+
+(* The statement's SQL, for error context. *)
+val sql : prepared -> string
+val result_sql : query_result -> string
+val chunk_sql : chunk @ local -> string
 val parameter_types : prepared -> int array
 
 (* Engine result column types known at preparation (INVALID when unresolved). *)
@@ -60,6 +70,7 @@ val column_types : prepared -> (int array, error) result
 (* Cancellation checkpoint on the result's connection, for per-row loops. *)
 val result_checkpoint : query_result -> (unit, error) result
 
-(* [fold_chunks] after [validate] accepts the result's column types. *)
-val fold_validated : query_result -> validate:(int array -> (unit, error) result) -> init:'a ->
+(* [fold_chunks] after [validate] accepts the result's column types; a cleanup
+   exception is paired in [context]. *)
+val fold_validated : context:Failure.context -> query_result -> validate:(int array -> (unit, error) result) -> init:'a ->
   f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result

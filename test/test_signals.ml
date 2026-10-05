@@ -8,7 +8,7 @@ let handled = Stdlib.Atomic.make 0
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
 let rec contains_break = function
   | Stdlib.Sys.Break -> true
-  | D.Rollback_exception (exn, _) | D.Cleanup_exception (_, exn) -> contains_break exn
+  | D.Cleanup_exception (_, exn) -> contains_break exn
   | Exn.Finally (a, b) -> contains_break a || contains_break b
   | _ -> false
 let () =
@@ -39,7 +39,7 @@ let () =
                 ok (D.execute_transaction tx "insert into t values (1)");
                 if String.equal mode "transaction-callback" || String.equal mode "transaction-rollback" then
                   (trigger (); Stdlib.Gc.minor ());
-                if String.is_prefix mode ~prefix:"rollback" then (inject "rollback"; Error D.Effects_not_allowed)
+                if String.is_prefix mode ~prefix:"rollback" then (inject "rollback"; Error { D.Error.context = Transaction; cause = Effects_not_allowed })
                 else (inject "commit"; Ok ())) in
               if String.equal mode "transaction-rollback" then (
                 match transaction_result () with
@@ -54,10 +54,10 @@ let () =
      | exception exn when contains_break exn ->
        if String.is_prefix mode ~prefix:"rollback" then (
          match exn with
-         | D.Cleanup_exception (D.Effects_not_allowed, Stdlib.Sys.Break) -> ()
+         | D.Cleanup_exception ({ cause = Effects_not_allowed; _ }, Stdlib.Sys.Break) -> ()
          | _ -> failwith "rollback lost primary result error");
        if String.equal mode "commit-leave" then (
-         match exn with D.Rollback_exception (Stdlib.Sys.Break, D.Native_error _) -> ()
+         match exn with D.Cleanup_exception ({ cause = Native _; _ }, Stdlib.Sys.Break) -> ()
          | _ -> failwith "post-commit interruption must preserve failed rollback")
      | exception exn -> raise exn
      | _ -> failwith "no Break");

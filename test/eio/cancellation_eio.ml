@@ -197,9 +197,9 @@ let transaction_between_statements clock =
       unwrap (Eio.Promise.await_exn a); unwrap (Eio.Promise.await_exn b);
       check "two-statement transaction then competing B have ordered native effects" (counter 3 = 3);
       let tx = Option.value_exn !escaped in
-      check "escaped transaction token is revoked" (match Duckdb.execute_transaction tx "SELECT 1" with Error Duckdb.Closed -> true | _ -> false);
+      check "escaped transaction token is revoked" (match Duckdb.execute_transaction tx "SELECT 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false);
       check "worker callback outward scheduler effect hits core barrier"
-        (match E.transaction p ~f:(fun _ -> Eio.Fiber.yield (); Ok ()) with Error (E.Core Duckdb.Effects_not_allowed) -> true | _ -> false);
+        (match E.transaction p ~f:(fun _ -> Eio.Fiber.yield (); Ok ()) with Error (E.Core { cause = Duckdb.Error.Effects_not_allowed; _ }) -> true | _ -> false);
       unwrap (E.shutdown p)))
 
 let replacement_shutdown_wins clock =

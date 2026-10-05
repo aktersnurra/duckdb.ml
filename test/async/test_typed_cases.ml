@@ -55,8 +55,8 @@ let wide_and_multichunk () =
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "multi-chunk query has one request offload plus close/replacement" (dispatch_count () = admissions + 3);
     complete (ok (A.query pool "SELECT ?::BIGINT" rows ~row:Fn.id)) >>| fun result ->
-    require "unbound parameter keeps its core error"
-      (match result with Error (A.Expected (A.Core (Duckdb.Data_error (Duckdb.Scalar.Unbound_parameter 1)))) -> true | _ -> false))
+    require "undeclared parameter is a parameter count error"
+      (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Parameter_count { expected = 0; actual = 1 }; _ })) -> true | _ -> false))
 let fold_callbacks () =
   reset (-1);
   A.create (limits ()) (config ()) >>= fun created ->
@@ -77,9 +77,9 @@ let fold_callbacks () =
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "fold has one whole-request offload plus bounded maintenance" (dispatch_count () = admissions + 3);
     let failed = ok (A.fold_rows pool "SELECT 1::BIGINT" rows ~row:Fn.id ~init:()
-      ~f:(fun _ () -> Error (Duckdb.Native_error "fold callback error"))) in
+      ~f:(fun _ () -> Error { Duckdb.Error.context = Query "callback"; cause = Native "fold callback error" })) in
     complete failed >>= fun result ->
-    require "fold callback error retained" (match result with Error (A.Expected (A.Core (Duckdb.Native_error _))) -> true | _ -> false);
+    require "fold callback error retained" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Native _; _ })) -> true | _ -> false);
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "worker callback TLS clear after error" (callback_cleanup_observations () = 8 && callback_cleanup_is_clear ());
     let observer = Monitor.create () in
@@ -289,7 +289,7 @@ let parquet_read_failures_and_callbacks () =
       complete (ok (A.parquet_export pool ~query:"SELECT 1::BIGINT AS i" ~destination:first)) >>= fun result -> ok result;
       complete (ok (A.parquet_export pool ~query:"SELECT 'wrong'::VARCHAR AS i" ~destination:second)) >>= fun result -> ok result;
       complete (ok (A.parquet_fold_rows pool [first; second] rows ~row:Fn.id ~init:[] ~f:(fun row values -> Ok (Duckdb.Continue (row :: values))))) >>= fun result ->
-      require "later Parquet schema mismatch retained" (match result with Error (A.Expected (A.Core (Duckdb.Data_error _))) -> true | _ -> false);
+      require "later Parquet schema mismatch retained" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Type_mismatch _; _ })) -> true | _ -> false);
       In_thread.run (fun () ->
         let channel = Stdlib.open_out_bin corrupt in
         Stdlib.output_string channel "not parquet";
@@ -302,9 +302,9 @@ let parquet_read_failures_and_callbacks () =
           Ok (Duckdb.Stop value)))) >>= fun result ->
       require "Parquet fold Stop" (Int64.equal (ok result) 1L);
       let callback_error = ok (A.parquet_fold_rows pool [first] rows ~row:Fn.id ~init:()
-        ~f:(fun _ () -> Error (Duckdb.Native_error "Parquet callback error"))) in
+        ~f:(fun _ () -> Error { Duckdb.Error.context = Query "callback"; cause = Native "Parquet callback error" })) in
       complete callback_error >>= fun result ->
-      require "Parquet callback error retained" (match result with Error (A.Expected (A.Core (Duckdb.Native_error _))) -> true | _ -> false);
+      require "Parquet callback error retained" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Native _; _ })) -> true | _ -> false);
       let observer = Monitor.create () and notified = Ivar.create () in
       Monitor.detach_and_iter_errors observer ~f:(fun error -> Ivar.fill_if_empty notified (Monitor.extract_exn error));
       let callback_exception = Option.value_exn (Scheduler.within_v ~monitor:observer (fun () ->

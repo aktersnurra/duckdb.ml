@@ -78,12 +78,12 @@ let rollback_failed ~exceptional ~swallow () =
   let p = ok result in
   let observer, notifications = monitor () in
   fail_rollback (if exceptional then 2 else 1);
-  let r = in_monitor observer (fun () -> ok (A.transaction p ~f:(fun _ -> Error (Duckdb.Native_error "primary expected")))) in
+  let r = in_monitor observer (fun () -> ok (A.transaction p ~f:(fun _ -> Error { Duckdb.Error.context = Transaction; cause = Native "primary expected" }))) in
   Monitor.protect ~finally:(fun () -> fail_rollback 0; native_release_all (); complete r >>= fun _ -> shutdown observer p >>| fun _ -> ()) (fun () ->
     complete r >>= fun result ->
     (if exceptional then (
-       require "rollback cleanup exception retained" (match result with Error (A.Raised {exception_ = Duckdb.Cleanup_exception (Duckdb.Native_error _, Cleanup_failure); _}) -> true | _ -> false))
-     else require "rollback expected composite retained" (match result with Error (A.Expected (A.Core (Duckdb.Rollback_failed (Duckdb.Native_error _, Duckdb.Native_error _)))) -> true | _ -> false));
+       require "rollback cleanup exception retained" (match result with Error (A.Raised {exception_ = Duckdb.Cleanup_exception ({ cause = Native _; _ }, Cleanup_failure); _}) -> true | _ -> false))
+     else require "rollback expected composite retained" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Rollback_failed { primary = { cause = Native _; _ }; rollback = { cause = Native _; _ } }; _ })) -> true | _ -> false));
     fail_rollback 0;
     require "rollback failure retires not health probes" (disconnects () = 1 && connects () = 2);
     if swallow then (

@@ -1,11 +1,12 @@
 open Resource
 
+(* Failures are in the [Parquet] context of the path involved. *)
 type path
 
 (** Exact local filenames only: nonempty, NUL/colon/backslash/glob-free.
     Relative names are made absolute at construction; tilde is not expanded.
     No URI, remote storage, glob expansion or extension management. *)
-val path : string -> (path, error) result
+val path : string -> (path, Failure.t) result
 
 (** Export one engine-parsed, parameter-free SELECT through DuckDB COPY.
     Omit a trailing statement terminator. The destination is a bound parameter.
@@ -17,8 +18,8 @@ val path : string -> (path, error) result
     Filesystem effects are not rolled back by DuckDB transactions. A failure or
     interruption during/after publication can follow a published output. No
     crash durability, hostile-directory or atomic transaction/file claim. *)
-val export : connection -> query:string -> path -> (unit, error) result
+val export : connection -> query:string -> path -> (unit, Failure.t) result
 val fold : connection -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
-  f:('row -> 'a -> ('a Query.step, Request.request_error) result) -> ('a, Request.request_error) result
+  f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, Failure.t) result
 val fold_table : connection -> path list -> (_, 'row) Request.table -> init:'a ->
-  f:('row -> 'a -> ('a Query.step, Request.request_error) result) -> ('a, Request.request_error) result
+  f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, Failure.t) result

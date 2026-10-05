@@ -6,7 +6,7 @@ external live_at_signal : unit -> int = "signal_live" [@@noalloc]
 external fail_control : int -> unit = "schema_fail_control" [@@noalloc]
 let handled = Stdlib.Atomic.make 0
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
-let closed = function Error Closed -> () | _ -> failwith "unclean connection was not discarded"
+let closed = function Error { Error.cause = Closed; _ } -> () | _ -> failwith "unclean connection was not discarded"
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
 let config = ok (Config.create Memory)
 let count c expected = ok (execute c (Stdlib.Printf.sprintf
@@ -29,8 +29,8 @@ let signal_case ~revalidate operation boundary ordinal expected_live =
           (String.equal operation "begin" && String.equal boundary "enter") ||
           (String.equal operation "commit" && String.equal boundary "leave") in
         (match rollback || rejection_close, discarded, outcome with
-         | true, _, Error (Cleanup_exception (Data_error Scalar.Parameter_schema_changed, Stdlib.Sys.Break)) -> ()
-         | false, true, Error (Rollback_exception (Stdlib.Sys.Break, Native_error _)) -> ()
+         | true, _, Error (Cleanup_exception ({ cause = Parameter_schema_changed; _ }, Stdlib.Sys.Break)) -> ()
+         | false, true, Error (Cleanup_exception ({ cause = Native _; _ }, Stdlib.Sys.Break)) -> ()
          | false, false, Error Stdlib.Sys.Break -> ()
          | _ -> failwith "snapshot signal lost primary/rollback outcome");
         if discarded then (closed (execute c "SELECT 1"); closed (parameter_count p))
@@ -74,17 +74,17 @@ let () =
           fail_control (if fault = 4 then 2 else fault);
           let result = execute_prepared p in
           (match fault, result with
-           | 1, Error (Native_error message) ->
+           | 1, Error { cause = Native message; _ } ->
              assert (String.is_substring message ~substring:"injected snapshot control failure");
              ok (execute c "SELECT 1")
-           | 2, Error (Rollback_failed (Data_error Scalar.Parameter_schema_changed, Native_error _)) ->
+           | 2, Error { cause = Rollback_failed { primary = { cause = Parameter_schema_changed; _ }; rollback = { cause = Native _; _ } }; _ } ->
              closed (execute c "SELECT 1"); closed (parameter_count p)
-           | 4, Error (Rollback_failed (Native_error primary, Native_error secondary)) ->
+           | 4, Error { cause = Rollback_failed { primary = { cause = Native primary; _ }; rollback = { cause = Native secondary; _ } }; _ } ->
              assert (String.is_substring primary ~substring:"primary snapshot query");
              Stdlib.Printf.printf "failed rollback after native error: %s\n%!" secondary;
              assert (String.is_substring secondary ~substring:"aborted");
              closed (execute c "SELECT 1"); closed (parameter_count p)
-           | 3, Error (Rollback_failed (Native_error _, Native_error _)) ->
+           | 3, Error { cause = Rollback_failed { primary = { cause = Native _; _ }; rollback = { cause = Native _; _ } }; _ } ->
              closed (execute c "SELECT 1"); closed (parameter_count p)
            | _ -> failwith "snapshot control fault lost outcome/discard");
           count observer 0;

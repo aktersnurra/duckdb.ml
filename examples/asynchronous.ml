@@ -3,20 +3,24 @@ open! Async
 
 module A = Duckdb_async
 
-let core_error_name = function
-  | Duckdb.Invalid_configuration _ -> "Invalid_configuration"
-  | Duckdb.Embedded_nul -> "Embedded_nul"
-  | Duckdb.Closed -> "Closed"
-  | Duckdb.Busy -> "Busy"
-  | Duckdb.Cancelled -> "Cancelled"
-  | Duckdb.Live_children -> "Live_children"
-  | Duckdb.Native_error _ -> "Native_error"
-  | Duckdb.Unsupported_statement -> "Unsupported_statement"
-  | Duckdb.Data_error _ -> "Data_error"
-  | Duckdb.Destination_exists -> "Destination_exists"
-  | Duckdb.Unsupported_parquet_type _ -> "Unsupported_parquet_type"
-  | Duckdb.Effects_not_allowed -> "Effects_not_allowed"
-  | Duckdb.Rollback_failed _ -> "Rollback_failed"
+let cause_name : Duckdb.Error.cause -> string = function
+  | Invalid_configuration _ -> "Invalid_configuration" | Embedded_nul -> "Embedded_nul" | Closed -> "Closed"
+  | Busy -> "Busy" | Cancelled -> "Cancelled" | Native _ -> "Native"
+  | Unsupported_statement -> "Unsupported_statement" | Effects_not_allowed -> "Effects_not_allowed"
+  | Type_mismatch _ -> "Type_mismatch" | Null _ -> "Null" | Index _ -> "Index"
+  | Unbound_parameter _ -> "Unbound_parameter" | Parameter_count _ -> "Parameter_count"
+  | Column_count _ -> "Column_count" | Parameter_schema_changed -> "Parameter_schema_changed"
+  | Row_count _ -> "Row_count" | Unknown_column _ -> "Unknown_column" | Missing_column _ -> "Missing_column"
+  | Encode_rejected _ -> "Encode_rejected" | Decode_rejected _ -> "Decode_rejected"
+  | Destination_exists -> "Destination_exists" | Unsupported_parquet_type _ -> "Unsupported_parquet_type"
+  | Rollback_failed _ -> "Rollback_failed"
+
+let context_name : Duckdb.Error.context -> string = function
+  | Database -> "database" | Connection -> "connection" | Transaction -> "transaction"
+  | Query sql -> "query " ^ sql | Table { schema; name } -> "table " ^ schema ^ "." ^ name
+  | Parquet path -> "Parquet " ^ path
+
+let core_error_name (e : Duckdb.Error.t) = cause_name e.cause ^ " in " ^ context_name e.context
 
 let error_name = function
   | A.Invalid_connections _ -> "Invalid_connections"
@@ -67,7 +71,7 @@ let example () =
     A.Request.ingest pool table [ [ Duckdb.Args.[1L]; Duckdb.Args.[2L] ] ] ~flush:true >>| (function
       | Ok () -> ()
       | Error (A.Request.Adapter failure) -> failwith ("ingest: " ^ failure_name failure)
-      | Error (A.Request.Request e) -> failwith ("ingest: request error in " ^ Duckdb.Request.query_of_context e.context))
+      | Error (A.Request.Request e) -> failwith ("ingest: " ^ core_error_name e))
     >>= fun () ->
     let row = Duckdb.Fields.[int64] in
     await (A.query pool "SELECT i FROM example ORDER BY i" row ~row:Fn.id) >>= fun values ->

@@ -3,9 +3,9 @@ open Duckdb
 let ( let* ) x f = Result.bind x ~f
 module S = Scalar
 external prepares : unit -> int = "epoch_test_prepares" [@@noalloc]
-let ok = function Ok x -> x | Error (Native_error s) -> failwith s | Error _ -> failwith "unexpected error"
+let ok = function Ok x -> x | Error { Error.cause = Native s; _ } -> failwith s | Error _ -> failwith "unexpected error"
 let rejected = function
-  | Error (Data_error S.Parameter_schema_changed) -> ()
+  | Error { Error.cause = Parameter_schema_changed; _ } -> ()
   | _ -> failwith "expected Parameter_schema_changed"
 let config = ok (Config.create Memory)
 let clean () = assert (Duckdb_ffi.live_resources () = 0); assert (Duckdb_ffi.fallback_reclaims () = 0)
@@ -34,8 +34,8 @@ let () =
     let before = Duckdb_ffi.schema_epoch () in
     (match with_transaction c ~f:(fun tx ->
        let* () = execute_transaction tx "DROP TABLE r" in
-       after_ddl := Duckdb_ffi.schema_epoch (); Error Busy) with
-     | Error Busy -> () | _ -> failwith "rollback outcome");
+       after_ddl := Duckdb_ffi.schema_epoch (); Error { context = Transaction; cause = Busy }) with
+     | Error { cause = Busy; _ } -> () | _ -> failwith "rollback outcome");
     assert (!after_ddl > before && Duckdb_ffi.schema_epoch () > !after_ddl));
   clean ();
   Stdlib.print_endline "epoch: DDL and DDL-transaction settlement advance; DML/SELECT/plain transactions do not=ok"
@@ -90,8 +90,8 @@ let () =
     ok (with_prepared c "INSERT INTO t VALUES (?)" ~f:(fun p ->
       ok (insert p 1L);
       (match with_transaction c ~f:(fun tx ->
-         let* () = execute_transaction tx "ALTER TABLE t ALTER x TYPE DOUBLE" in Error Busy) with
-       | Error Busy -> () | _ -> failwith "rollback outcome");
+         let* () = execute_transaction tx "ALTER TABLE t ALTER x TYPE DOUBLE" in Error { context = Transaction; cause = Busy }) with
+       | Error { cause = Busy; _ } -> () | _ -> failwith "rollback outcome");
       ok (insert p 9007199254740993L);
       Ok ())));
   clean ();

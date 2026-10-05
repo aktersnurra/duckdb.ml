@@ -7,7 +7,7 @@ external waiting : unit -> bool = "query_waiting" [@@noalloc]
 external fail_bind : unit -> unit = "query_fail_bind" [@@noalloc]
 external fail_fetch : unit -> unit = "query_fail_fetch" [@@noalloc]
 let ok = function Ok x -> x | Error _ -> failwith "unexpected error"
-let busy = function Error D.Busy -> () | _ -> failwith "expected Busy"
+let busy = function Error { D.Error.cause = Busy; _ } -> () | _ -> failwith "expected Busy"
 let wait predicate =
   let deadline = Unix.gettimeofday () +. 10. in
   while not (predicate ()) do
@@ -30,12 +30,12 @@ let () =
     D.with_prepared c "select ?::BIGINT" ~f:(fun p ->
       ok (D.bind p 1 (D.Codec.Values.int64) 1L);
       fail_bind ();
-      (match D.bind p 1 (D.Codec.Values.int64) 2L with Error (D.Native_error _) -> () | _ -> assert false);
-      (match D.execute_prepared p with Error (D.Data_error (D.Scalar.Unbound_parameter 1)) -> () | _ -> assert false);
+      (match D.bind p 1 (D.Codec.Values.int64) 2L with Error { cause = Native _; _ } -> () | _ -> assert false);
+      (match D.execute_prepared p with Error { cause = Unbound_parameter 1; _ } -> () | _ -> assert false);
       ok (D.bind p 1 (D.Codec.Values.int64) 3L);
       let r = ok (D.execute_prepared p) in
       fail_fetch ();
-      (match D.fold_chunks r ~init:() ~f:(fun _ () -> assert false) with Error (D.Native_error _) -> () | _ -> assert false);
+      (match D.fold_chunks r ~init:() ~f:(fun _ () -> assert false) with Error { cause = Native _; _ } -> () | _ -> assert false);
       ok (D.close_result r);
       ok (D.close_result (ok (D.execute_prepared p))); Ok ()));
   clean (); Stdlib.print_endline "query: injected bind/fetch errors clean and reusable=ok"
@@ -88,7 +88,7 @@ let () =
             | "transaction" -> D.with_transaction c ~f:(fun tx -> launch (ok (D.prepare_transaction tx "select 1")))
             | _ -> assert false in
           ok result);
-      (match D.execute_prepared (Option.value_exn !retained) with Error D.Closed -> () | _ -> assert false);
+      (match D.execute_prepared (Option.value_exn !retained) with Error { cause = Closed; _ } -> () | _ -> assert false);
       Ok ()));
   clean (); Stdlib.print_endline "query: scoped prepared/transaction revoke and drain admitted fetch=ok"
 let () =
@@ -151,11 +151,11 @@ let () =
               ok (D.execute ddl "ALTER TABLE t ALTER x TYPE DOUBLE"));
             let result = join worker in
             (match point, explicit, result with
-             | (1 | 3), false, Error (D.Data_error D.Scalar.Parameter_schema_changed) when point = 3 || not revalidate -> ()
+             | (1 | 3), false, Error { cause = Parameter_schema_changed; _ } when point = 3 || not revalidate -> ()
              | 6, true, Ok r -> ok (D.close_result r)
-             | 6, false, Error (D.Rollback_failed (D.Native_error primary, D.Native_error _)) ->
+             | 6, false, Error { cause = Rollback_failed { primary = { cause = Native primary; _ }; rollback = { cause = Native _; _ } }; _ } ->
                assert (String.is_substring primary ~substring:"Failed to commit: Transaction conflict")
-             | _, _, Error (D.Native_error message) ->
+             | _, _, Error { cause = Native message; _ } ->
                assert (String.is_substring message ~substring:"Transaction conflict")
              | _ -> failwith "schema race did not reject at the intended boundary");
             Ok ()) in
@@ -164,12 +164,12 @@ let () =
             else run (D.with_prepared c "INSERT INTO t VALUES (?)") in
           if point = 6 && explicit then (
             match result with
-            | Error (D.Rollback_failed (D.Native_error primary, D.Native_error _)) ->
+            | Error { cause = Rollback_failed { primary = { cause = Native primary; _ }; rollback = { cause = Native _; _ } }; _ } ->
               assert (String.is_substring primary ~substring:"Failed to commit: Transaction conflict")
             | _ -> failwith "expected outer commit conflict and rollback failure")
           else ok result;
           if point = 6 then (
-            match D.execute c "SELECT 1" with Error D.Closed -> () | _ -> failwith "failed settlement did not discard")
+            match D.execute c "SELECT 1" with Error { cause = Closed; _ } -> () | _ -> failwith "failed settlement did not discard")
           else ok (D.execute c "SELECT 1");
           ok (D.execute ddl "SELECT CASE WHEN count(*)=0 THEN 1 ELSE error('rounded insert') END FROM t");
           ok (D.execute ddl "INSERT INTO t VALUES (42)");
@@ -202,8 +202,8 @@ let () =
           arm 0;
           ok (D.execute ddl "ALTER TABLE t ALTER x TYPE DOUBLE"));
         (match join worker, revalidate with
-         | Error { R.cause = R.Core (D.Data_error D.Scalar.Parameter_schema_changed); _ }, false -> ()
-         | Error { R.cause = R.Core (D.Native_error message); _ }, true ->
+         | Error { D.Error.cause = Parameter_schema_changed; _ }, false -> ()
+         | Error { cause = Native message; _ }, true ->
            (* Re-validated in the transaction's own snapshot: the DDL conflicts instead. *)
            assert (String.is_substring message ~substring:"onflict")
          | Ok (), _ -> failwith "lent typed request committed across a schema change"

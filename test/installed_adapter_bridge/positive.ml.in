@@ -20,5 +20,5 @@ let () =
               Ok (Duckdb.Continue (text :: rows))))))))) in
   assert (List.equal String.equal rows ["installed-owned"]);
   assert (match Duckdb.Bridge.settlement request with Settled -> true | Pending -> false);
-  assert (match Duckdb.Bridge.cancel request with Error Closed -> true | _ -> false);
+  assert (match Duckdb.Bridge.cancel request with Error { cause = Closed; _ } -> true | _ -> false);
   Stdlib.print_endline "installed Bridge: owned transaction, settled, late cancel Closed, no scheduler startup"

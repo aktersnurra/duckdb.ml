@@ -1,5 +1,6 @@
 open! Base
 open Resource
+open Failure
 open Syntax
 module F = Duckdb_ffi
 module S = Scalar
@@ -15,7 +16,7 @@ let poison a e =
   poison_transaction a.tx e;
   Error first
 let or_poison a = function Ok () -> Ok () | Error e -> poison a e
-let interrupted = Native_error "Appender operation or scope interrupted; transaction must roll back"
+let interrupted = Native "Appender operation or scope interrupted; transaction must roll back"
 let destroy c native =
   admit_cleanup c;
   (* Resource retries a cleanup interrupted by one Break. The first attempt
@@ -29,7 +30,7 @@ let destroy c native =
 let register c tx native ~types ~nullable =
   let self = ref None in
   let child = register_child c (Some tx) ~cleanup:(fun () ->
-    let e = Native_error "Unclosed appender discarded at scope exit" in
+    let e = Native "Unclosed appender discarded at scope exit" in
     (match !self with None -> poison_transaction tx e | Some a -> ignore (poison a e));
     Exn.protect ~finally:(fun () -> Option.iter !self ~f:(fun a -> release_result a.child))
       ~f:(fun () -> ignore (destroy c native))) in
@@ -72,13 +73,13 @@ let validate_cell a row column (Cell (typ, value)) =
   let apply : type b. b S.t -> b option -> (F.append_cell, error) result = fun typ value ->
     let actual = a.types.(column) in
     if actual <> S.native_id typ then
-      Error (Data_error (S.Type_mismatch { index = column; expected = S.name typ; actual }))
-    else if Option.is_none value && not a.nullable.(column) then Error (Data_error (S.Null { column; row }))
+      Error (Type_mismatch { index = column; expected = S.name typ; actual = type_name actual })
+    else if Option.is_none value && not a.nullable.(column) then Error (Null { column; row })
     else Ok (encode typ value) in
   apply typ value
 let validate_row a row cells =
   let expected = Array.length a.types and actual = List.length cells in
-  if actual <> expected then Error (Data_error (S.Column_count { expected; actual }))
+  if actual <> expected then Error (Column_count { expected; actual })
   else
     let+ cells = Result.all (List.mapi cells ~f:(validate_cell a row)) in
     Array.of_list cells
@@ -117,22 +118,6 @@ let close_appender a =
          | Some e -> Error e
          | None -> or_poison a (let* () = flushed in let* () = !destroyed in checkpoint c))
       | exception exn -> ignore (poison a interrupted); raise exn))
-let with_appender_transaction tx ?schema table ~f =
-  let* a = open_appender tx ?schema table in
-  let work () =
-    match f a with
-    | Error e -> ignore (poison a e); Error e
-    | Ok x -> let+ () = close_appender a in x in
-  (* Scope can turn a caught effect denial into an error after work returned.
-     Even a manually closed child must poison settlement on that outcome.
-     Capture before crossing the runtime primitive: otherwise it replaces the
-     source callback backtrace, even though Resource.scope retained it. *)
-  match capture_all (fun () -> scope work (fun () -> force_close_child a.child)) with
-  | Ok (Ok _ as ok) -> ok
-  | Ok (Error e as error) -> poison_transaction tx e; error
-  | Error raised -> poison_transaction tx interrupted; reraise raised
-let with_appender c ?schema table ~f =
-  with_transaction c ~f:(fun tx -> with_appender_transaction tx ?schema table ~f)
 
 let child a = a.child
 let types a = a.types

@@ -9,7 +9,7 @@ let close p = ok (A.shutdown p) >>| ok
 let long_query = "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) t(i)"
 let cancelled = function Error (A.Expected A.Cancelled) | Error (A.During_cancellation _) -> true | _ -> false
 let interrupted = function
-  | Error (A.During_cancellation (A.Expected (A.Core (Duckdb.Native_error text)))) ->
+  | Error (A.During_cancellation (A.Expected (A.Core { cause = Duckdb.Error.Native text; _ }))) ->
     String.is_substring (String.lowercase text) ~substring:"interrupt"
   | _ -> false
 let heartbeat deferred seam =
@@ -114,7 +114,7 @@ let heartbeat_cancel seam () = with_pool (fun p ->
   complete r >>| fun result -> require "cleanup retains cancellation" (cancelled result))
 let ordinary_error () = with_pool (fun p ->
   complete (ok (A.execute p "select missing_column")) >>= fun result ->
-  require "core native error preserved" (match result with Error (A.Expected (A.Core (Duckdb.Native_error _))) -> true | _ -> false);
+  require "core native error preserved" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Native _; _ })) -> true | _ -> false);
   require "error retires uncertain owner" (connects () = 2 && disconnects () = 1);
   complete (ok (A.execute p "select 1")) >>| ok)
 let replacement_failed () =
@@ -167,7 +167,7 @@ let transaction_exclusion () = with_pool (fun p ->
     complete a >>= fun result -> ok result;
     complete b >>| fun result ->
     require "whole transaction visible to next borrower" (Int64.equal (ok result) 2L);
-    require "escaped transaction revoked" (match Duckdb.execute_transaction (Option.value_exn !escaped) "select 1" with Error Duckdb.Closed -> true | _ -> false)))
+    require "escaped transaction revoked" (match Duckdb.execute_transaction (Option.value_exn !escaped) "select 1" with Error { cause = Duckdb.Error.Closed; _ } -> true | _ -> false)))
 let commit_cancel ~after () = with_pool (fun p ->
   complete (ok (A.execute p "create table t(i integer)")) >>= fun result -> ok result;
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
@@ -199,13 +199,11 @@ let heartbeat_typed seam ~cancel () = with_pool (fun p ->
           Ok (Duckdb.Stop ())))
     | Appender_clear | Appender_destroy ->
       let t = Duckdb.Table.(declare "t" Columns.[ "i", int64 ] ~row:Fn.id) in
-      Result.map_error ~f:(fun (e : Duckdb.Request.request_error) ->
-        match e.cause with Duckdb.Request.Core e -> e | _ -> failwith "unexpected typed failure")
-        (Duckdb.Table.with_appender_transaction tx t ~f:(fun appender ->
-          ok (Duckdb.Table.append appender [Duckdb.Args.[42L]]);
-          native_hold seam;
-          if cancel then Error { Duckdb.Request.context = Transaction; cause = Core (Duckdb.Native_error "intentional rollback") }
-          else Ok ()))
+      Duckdb.Table.with_appender_transaction tx t ~f:(fun appender ->
+        ok (Duckdb.Table.append appender [Duckdb.Args.[42L]]);
+        native_hold seam;
+        if cancel then Error { Duckdb.Error.context = Transaction; cause = Native "intentional rollback" }
+        else Ok ())
     | _ -> assert false)) in
   heartbeat (complete r) seam >>= fun () ->
   if cancel then ignore (ok (A.cancel r));
@@ -262,7 +260,7 @@ let result_error () = with_pool (fun p ->
           | Ok _ -> Ok (Duckdb.Stop ())
           | Error e -> Error e))))) in
   complete r >>| fun result ->
-  require "typed result error retained" (match result with Error (A.Expected (A.Core (Duckdb.Data_error _))) -> true | _ -> false);
+  require "typed result error retained" (match result with Error (A.Expected (A.Core { cause = Duckdb.Error.Type_mismatch _; _ })) -> true | _ -> false);
   require "typed result failed lease retired" (connects () = 2))
 let heartbeat_copy () =
   let path = Stdlib.Filename.temp_file "stage4c-copy-" ".parquet" in
@@ -278,7 +276,7 @@ let swallowed_statement_error () = with_pool (fun p ->
   let swallowed = Stdlib.Atomic.make false in
   let r = ok (A.transaction p ~f:(fun tx ->
     Stdlib.Atomic.set swallowed (Result.is_error (Duckdb.execute_transaction tx "select __stage4c_absent_column__"));
-    require "manual transaction SQL rejected on token" (match Duckdb.execute_transaction tx "ROLLBACK" with Error Duckdb.Unsupported_statement -> true | _ -> false);
+    require "manual transaction SQL rejected on token" (match Duckdb.execute_transaction tx "ROLLBACK" with Error { cause = Duckdb.Error.Unsupported_statement; _ } -> true | _ -> false);
     Ok 42)) in
   complete r >>| fun result ->
   require "callback actually swallowed a statement error" (Stdlib.Atomic.get swallowed);

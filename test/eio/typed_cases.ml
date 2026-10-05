@@ -45,9 +45,9 @@ let typed_values_and_failures () =
     check "ordered multi-chunk query" (match whole "query" (fun () -> E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id) with
       | Ok values -> equal_rows values (List.init 3000 ~f:(fun i -> Int64.of_int i)) | Error _ -> false);
     check "empty typed result" (match E.query p "SELECT i::BIGINT FROM range(0) t(i)" rows ~row:Fn.id with Ok [] -> true | _ -> false);
-    check "unbound parameter keeps its core error" (match E.query p "SELECT ?::BIGINT" rows ~row:Fn.id with
-      | Error (E.Core (Duckdb.Data_error (Duckdb.Scalar.Unbound_parameter 1))) -> true | _ -> false);
-    check "mismatched decoder returns an error" (match E.query p "SELECT 'wrong'::VARCHAR" rows ~row:Fn.id with Error (E.Core (Duckdb.Data_error _)) -> true | _ -> false);
+    check "undeclared parameter is a parameter count error" (match E.query p "SELECT ?::BIGINT" rows ~row:Fn.id with
+      | Error (E.Core { cause = Duckdb.Error.Parameter_count { expected = 0; actual = 1 }; _ }) -> true | _ -> false);
+    check "mismatched decoder returns an error" (match E.query p "SELECT 'wrong'::VARCHAR" rows ~row:Fn.id with Error (E.Core { cause = Duckdb.Error.Type_mismatch _; _ }) -> true | _ -> false);
     let before = P.callbacks () in
     check "fold Stop retains owned accumulator" (match whole "fold" (fun () -> E.fold_rows p "SELECT i::BIGINT FROM range(4) t(i)" rows ~row:Fn.id ~init:0L
       ~f:(fun value total ->
@@ -56,8 +56,8 @@ let typed_values_and_failures () =
     callback_tls "Stop" before 3;
     let before = P.callbacks () in
     check "fold callback error retained" (match E.fold_rows p "SELECT 1::BIGINT" rows ~row:Fn.id ~init:()
-      ~f:(fun _ () -> Error (Duckdb.Native_error "typed callback error")) with
-      | Error (E.Core (Duckdb.Native_error message)) -> String.equal message "typed callback error" | _ -> false);
+      ~f:(fun _ () -> Error { Duckdb.Error.context = Query "callback"; cause = Native "typed callback error" }) with
+      | Error (E.Core { cause = Duckdb.Error.Native message; _ }) -> String.equal message "typed callback error" | _ -> false);
     callback_tls "error" before 1;
     let before = P.callbacks () and disconnects = H.execute_entries 1 in
     let raised = try ignore (E.fold_rows p "SELECT 1::BIGINT" rows ~row:Fn.id ~init:() ~f:fold_callback_failure_frame); false with

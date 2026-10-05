@@ -1,5 +1,6 @@
 open! Base
 open Resource
+open Failure
 open Syntax
 module F = Duckdb_ffi
 module S = Scalar
@@ -66,7 +67,7 @@ let prepare_cached c sql = prepare_on ~cached:true c None sql
 let prepare_transaction tx sql = prepare_on (transaction_connection tx) (Some tx) sql
 
 let without_result ?(cleanup = false) p work = child_operation ~cleanup p.child ~allow_result:true (fun () ->
-  if Option.is_some p.result then Error Live_children else work ())
+  if Option.is_some p.result then Error Busy else work ())
 let close_prepared p =
   if child_is_closed p.child then Ok ()
   else without_result ~cleanup:true p (fun () ->
@@ -90,12 +91,12 @@ let accepts actual typ = actual = F.Type_id.invalid || actual = F.Type_id.any ||
 let bind_scalar : type b. prepared -> int -> b S.t -> b option -> (unit, error) result = fun p index typ value ->
   without_result p (fun () ->
     let count = Array.length p.bound in
-    if index < 1 || index > count then Error (Data_error (S.Index { index; length = count }))
+    if index < 1 || index > count then Error (Index { index; length = count })
     else
       let actual = p.parameter_types.(index - 1) in
       let* () =
         if accepts actual typ then Ok ()
-        else Error (Data_error (S.Type_mismatch { index; expected = S.name typ; actual })) in
+        else Error (Type_mismatch { index; expected = S.name typ; actual = type_name actual }) in
       p.bound.(index - 1) <- false;
       Exn.protect ~finally:(fun () -> F.clear_prepared_input p.native)
         ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
@@ -106,7 +107,7 @@ let bind_scalar : type b. prepared -> int -> b S.t -> b option -> (unit, error) 
 (* User encoders run before connection admission. *)
 let bind : type a n. prepared -> int -> (a, n) Codec.t -> a -> (unit, error) result = fun p index codec value ->
   let encoded encode value = Result.map_error (encode value) ~f:(fun reason ->
-    Data_error (S.Encode_rejected { index; reason })) in
+    Encode_rejected { index; reason }) in
   match codec with
   | Codec.Non_null (Codec.Plan plan) ->
     let* b = encoded plan.encode value in bind_scalar p index plan.scalar (Some b)
@@ -120,11 +121,11 @@ let check_parameter_schema p =
   let unchanged () =
     F.parameter_count fresh = Array.length p.parameter_types
     && Array.for_alli p.parameter_types ~f:(fun i typ -> F.parameter_type fresh (i + 1) = typ) in
-  scope (fun () ->
+  scope ~lifting:(Cause (Query p.sql)) (fun () ->
     let* () = checkpoint p.connection in
     F.prepare fresh p.sql;
     let* () = settled p.connection fresh in
-    if unchanged () then checkpoint p.connection else Error (Data_error S.Parameter_schema_changed))
+    if unchanged () then checkpoint p.connection else Error Parameter_schema_changed)
     (fun () -> native_close p.connection fresh)
 (* How execution established that its parameter types are current. *)
 type validation =
@@ -159,7 +160,7 @@ let recheck_after_execution p = function
       checked
 let execute_prepared p = without_result p (fun () ->
   match Array.findi p.bound ~f:(fun _ bound -> not bound) with
-  | Some (i, _) -> Error (Data_error (S.Unbound_parameter (i + 1)))
+  | Some (i, _) -> Error (Unbound_parameter (i + 1))
   | None ->
     let execute () =
       let* validation = validate_parameter_schema p in
@@ -183,47 +184,51 @@ let close_result r =
   else child_operation ~cleanup:true r.prepared.child ~allow_result:true (fun () ->
     if not r.closed then destroy_result r;
     Ok ())
-let scoped prepare ~f =
-  let* p = prepare () in
-  scope (fun () -> f p) (fun () -> force_close_child p.child)
-let with_prepared c sql ~f = scoped (fun () -> prepare c sql) ~f
-let with_prepared_transaction tx sql ~f = scoped (fun () -> prepare_transaction tx sql) ~f
+let scoped ~lifting prepare ~f =
+  let* p = Result.map_error (prepare ()) ~f:(lift lifting) in
+  scope ~lifting (fun () -> f p) (fun () -> force_close_child p.child)
+let with_prepared ~lifting c sql ~f = scoped ~lifting (fun () -> prepare c sql) ~f
+let with_prepared_transaction ~lifting tx sql ~f = scoped ~lifting (fun () -> prepare_transaction tx sql) ~f
 
 let chunk_length = Borrowed_chunk.length
 let column = Borrowed_chunk.column
 (* The loop keeps explicit matches: each borrowed chunk is stack-allocated and
    must not be captured by a heap closure. *)
 let result_checkpoint r = checkpoint r.prepared.connection
-let fold_internal r validate ~init ~f =
-  let c = r.prepared.connection and native = r.prepared.native in
-  let finish acc = Result.map (checkpoint c) ~f:(fun () -> acc) in
-  child_operation r.prepared.child ~allow_result:true (fun () ->
+let fold_internal ~lifting r validate ~init ~f =
+  let c = r.prepared.connection and native = r.prepared.native and sql = r.prepared.sql in
+  let lift = lift lifting in
+  let core result = Result.map_error result ~f:lift in
+  let finish acc = core (Result.map (checkpoint c) ~f:(fun () -> acc)) in
+  (* Admission failures are causes; the scope's outcome has the callback's type. *)
+  Result.join (core (child_operation r.prepared.child ~allow_result:true (fun () ->
     if r.closed then Error Closed
-    else scope (fun () ->
+    else Ok (scope ~lifting (fun () ->
       let rec loop acc =
         match checkpoint c with
-        | Error e -> Error e
+        | Error e -> Error (lift e)
         | Ok () ->
           match F.next_chunk native with
           | F.Exhausted -> finish acc
-          | F.Fetch_failed -> Result.bind (status native) ~f:(fun () -> Error (Native_error "DuckDB fetch failed"))
+          | F.Fetch_failed -> core (Result.bind (status native) ~f:(fun () -> Error (Native "DuckDB fetch failed")))
           | F.Chunk ->
             match checkpoint c with
-            | Error e -> Error e
+            | Error e -> Error (lift e)
             | Ok () ->
-              let chunk = stack_ { Borrowed_chunk.native } in
+              let chunk = stack_ { Borrowed_chunk.native; sql } in
               if chunk_length chunk = 0 then loop acc
               else match f chunk acc with
                 | Error e -> Error e
                 | Ok (Stop acc) -> finish acc
                 | Ok (Continue acc) -> loop acc in
-      let* () = checkpoint c in
-      let* () = validate native in
+      let* () = core (checkpoint c) in
+      let* () = core (validate native) in
       loop init)
-      (fun () -> destroy_result r))
-let fold_chunks r ~init ~f = fold_internal r (fun _ -> Ok ()) ~init ~f
-let fold_validated r ~validate ~init ~f =
-  fold_internal r (fun native -> validate (F.prepared_column_types native)) ~init ~f
+      (fun () -> destroy_result r)))))
+let fold_chunks ~lifting r ~init ~f = fold_internal ~lifting r (fun _ -> Ok ()) ~init ~f
+let fold_validated ~context r ~validate ~init ~f =
+  fold_internal ~lifting:(Cause context) r
+    (fun native -> validate (F.prepared_column_types native)) ~init ~f
 let select_schema p = without_result p (fun () ->
   if F.prepared_kind p.native <> F.Statement_kind.select || not (Array.is_empty p.bound) then
     Error Unsupported_statement
@@ -233,6 +238,9 @@ let select_schema p = without_result p (fun () ->
     types)
 
 let child p = p.child
+let sql p = p.sql
+let result_sql r = r.prepared.sql
+let chunk_sql (chunk @ local) = chunk.Borrowed_chunk.sql
 let parameter_types p = p.parameter_types
 let column_types p = child_operation p.child ~allow_result:true (fun () ->
   let types = F.prepared_column_types p.native in

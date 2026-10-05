@@ -23,7 +23,7 @@ let transaction () =
             let text = ok (Duckdb.column chunk ~column:0 ~row:0 (Duckdb.Codec.Values.string)) in
             Ok (Duckdb.Continue (text :: rows)))))))) in
   (match Duckdb.execute_transaction (Option.value_exn !escaped) "SELECT 1" with
-   | Error Duckdb.Closed -> () | _ -> failwith "escaped token usable");
+   | Error { cause = Closed; _ } -> () | _ -> failwith "escaped token usable");
   assert (Duckdb_ffi.live_resources () = 0);
   rows
 
@@ -101,9 +101,9 @@ let cases () =
   assert (Stdlib.Atomic.get cleaned);
   assert (not (Deferred.is_determined (Option.value_exn !raw)));
   (* Never join that deliberately undetermined raw deferred. *)
-  In_thread.run (fun () -> S.capture (fun () -> Error Duckdb.Embedded_nul))
+  In_thread.run (fun () -> S.capture (fun () -> Error Duckdb.Error.Embedded_nul))
   >>= fun ordinary ->
-  (match ordinary with S.Returned (Error Duckdb.Embedded_nul) -> () | _ -> assert false);
+  (match ordinary with S.Returned (Error Duckdb.Error.Embedded_nul) -> () | _ -> assert false);
   let executed = Stdlib.Atomic.make false in
   submit ~fail_dispatch:true (fun () -> Stdlib.Atomic.set executed true)
   >>= fun dispatch ->

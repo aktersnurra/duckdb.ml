@@ -1,7 +1,7 @@
 (** Direct-style Eio adapter. Pools and their producers belong to [sw]; native
     owners never leave synchronous workers. No scheduler is started on import. *)
 type phase = Operation | Connect | Close_connection | Close_database
-type cause = Core_failure of Duckdb.error | Raised_failure of exn * Printexc.raw_backtrace
+type cause = Core_failure of Duckdb.Error.t | Raised_failure of exn * Printexc.raw_backtrace
 type failure = { phase : phase; cause : cause }
 type error =
   | Invalid_connections of int
@@ -9,7 +9,7 @@ type error =
   | Queue_full
   | Pool_shutdown
   | Reentrant_call
-  | Core of Duckdb.error
+  | Core of Duckdb.Error.t
   | Lifecycle_errors of failure list
 
 (** A raised worker failure alone is reraised with its original raw backtrace.
@@ -21,7 +21,7 @@ exception Lifecycle_failure of failure list
 (** Ordinary cancellation reraises the original [Eio.Cancel.Cancelled]. If
     settlement also fails, this retains that cancellation, its raw backtrace,
     and all failure constituents instead of silently dropping cleanup. A lone
-    operation [Cancelled] or [Native_error] (the engine's interruption outcome)
+    operation [Cancelled] or [Native] (the engine's interruption outcome)
     does not wrap ordinary cancellation; cleanup/raised failures always do. *)
 exception Cancelled_with_failures of exn * Printexc.raw_backtrace * failure list
 
@@ -52,7 +52,7 @@ val execute : t -> string -> (unit, error) result
 (** Synchronous worker callback; token revoked on return. Adapter reentry is
     rejected before scheduler effects. EVERY transaction retires its connection,
     including success. Nonreturning callbacks prevent shutdown completion. *)
-val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.error) result) -> ('a, error) result
+val transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, error) result
 
 (** Materializes owned rows on one worker. The fields, row constructor and SQL evaluation do not
     let a result, chunk, or connection owner cross back to the Eio scheduler.
@@ -63,12 +63,12 @@ val query : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row li
 (** Folds owned decoded rows synchronously on one worker. [Stop] returns its
     accumulator; callback reentry into this adapter is rejected. *)
 val fold_rows : t -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
-  f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, error) result
+  f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
 
 (** Reads exact local filenames in order and folds owned rows on one worker.
     Path construction, including relative-path resolution, occurs on that worker. *)
 val parquet_fold_rows : t -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
-  f:('row -> 'a -> ('a Duckdb.step, Duckdb.error) result) -> ('a, error) result
+  f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
 
 (** Exports through DuckDB's connection-level temporary/publication protocol on
     one worker. The destination is converted to a local path on that worker. *)
@@ -86,15 +86,15 @@ val shutdown : t -> (unit, error) result
     [Request]; an adapter error is [Adapter]; caller cancellation raises as for
     every other operation. *)
 module Request : sig
-  type nonrec error = Adapter of error | Request of Duckdb.Request.request_error
+  type nonrec error = Adapter of error | Request of Duckdb.Error.t
   val exec : t -> ('p, unit, [< `Zero ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> (unit, error) result
   val find : t -> ('p, 'row, [< `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row, error) result
   val find_opt : t -> ('p, 'row, [< `Zero | `One ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('row option, error) result
   val collect : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     ('row list, error) result
   val fold : t -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
-    f:('row -> 'a -> ('a Duckdb.step, Duckdb.Request.request_error) result) -> ('a, error) result
-  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Request.request_error) result) -> ('a, error) result
+    f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
+  val with_transaction : t -> f:(Duckdb.transaction -> ('a, Duckdb.Error.t) result) -> ('a, error) result
   val ingest : t -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
 
   (** The same operations as an instance, for code generic over backends. *)

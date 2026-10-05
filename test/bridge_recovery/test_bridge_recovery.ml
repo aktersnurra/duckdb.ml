@@ -23,9 +23,9 @@ let still_admitted request owner =
   check "ordinary rollback retains the single native installation"
     (count 5 = 1 && count 6 = 0 && count 7 = 0 && count 4 = 0);
   check "owner alias stays Busy after recoverable rollback"
-    (match D.execute owner "SELECT 1" with Error D.Busy -> true | _ -> false)
+    (match D.execute owner "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false)
 let expect_native_error = function
-  | Error (D.Native_error message) ->
+  | Error { D.Error.cause = Native message; _ } ->
     check "native diagnostic retained" (not (String.is_empty message))
   | _ -> failwith "expected native error, not cancellation or revocation"
 type failure = Result_error | Native_error | Callback_exception
@@ -39,13 +39,13 @@ let transaction_recovery failure owner observer =
       try `Result (D.with_transaction facade ~f:(fun transaction ->
         ok (D.execute_transaction transaction "INSERT INTO recovery_rows VALUES (1)");
         match failure with
-        | Result_error -> Error D.Embedded_nul
+        | Result_error -> Error { D.Error.context = Transaction; cause = Embedded_nul }
         | Native_error -> D.execute_transaction transaction "SELECT missing_recovery_column"
         | Callback_exception -> raise_recoverable_callback ()))
       with Recoverable_callback as exception_ ->
         `Exception (exception_, Stdlib.Printexc.get_raw_backtrace ()) in
     (match failure, outcome with
-     | Result_error, `Result (Error D.Embedded_nul) -> ()
+     | Result_error, `Result (Error { cause = Embedded_nul; _ }) -> ()
      | Native_error, `Result result -> expect_native_error result
      | Callback_exception, `Exception (exception_, backtrace) ->
        check "recoverable exception identity" (phys_equal exception_ Recoverable_callback);

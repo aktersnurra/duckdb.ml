@@ -13,9 +13,9 @@ external arm_drain_wait : bool -> unit = "delivery_arm_drain_wait"
 external drain_wait_entered : unit -> bool = "delivery_drain_wait_entered"
 let check name condition = if not condition then failwith name
 let ok = function Ok x -> x | Error _ -> failwith "expected Ok"
-let cancelled = function Error D.Cancelled -> () | _ -> failwith "expected cancellation"
+let cancelled = function Error { D.Error.cause = Cancelled; _ } -> () | _ -> failwith "expected cancellation"
 let native_error = function
-  | Error (D.Native_error message) -> check "native diagnostic retained" (not (String.is_empty message))
+  | Error { D.Error.cause = Native message; _ } -> check "native diagnostic retained" (not (String.is_empty message))
   | _ -> failwith "expected native error"
 let release () = for i = 1 to 13 do gate i false done; selected_gate false; fail_start false
 let wait id = E.await ~label:("native boundary " ^ Int.to_string id) (fun () -> entered id > 0)
@@ -59,8 +59,8 @@ let running ~transaction ~recover owner =
   let request = B.create () in
   E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
     if recover then (
-      (match D.with_transaction facade ~f:(fun _ -> Error D.Embedded_nul) with
-       | Error D.Embedded_nul -> () | _ -> failwith "recoverable rollback outcome");
+      (match D.with_transaction facade ~f:(fun _ -> Error { D.Error.context = Transaction; cause = Embedded_nul }) with
+       | Error { cause = Embedded_nul; _ } -> () | _ -> failwith "recoverable rollback outcome");
       check "same controller survives ordinary rollback" (count 10 = 1 && count 12 = 0));
     let sql = "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) t(i)" in
     if transaction then D.with_transaction facade ~f:(fun tx -> D.execute_transaction tx sql)
@@ -81,13 +81,13 @@ let running ~transaction ~recover owner =
       check "disconnect waits for join and all selected retirement" (count 12 = 1 && count 14 = count 17 && count 13 = 1);
       gate 10 false;
       (match join () with
-       | Error (D.Native_error message) ->
+       | Error { cause = Native message; _ } ->
          check "real native interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
        | _ -> failwith "native interrupted return was flattened");
       check "persistent delivery survives real execute reset" (count 4 > before && count 3 = 1);
       one_controller (); settled request;
       check "actual delivered owner discarded" (count 5 = 1);
-      check "interrupted owner not reusable" (match D.execute owner "SELECT 1" with Error D.Closed -> true | _ -> false)))
+      check "interrupted owner not reusable" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false)))
 let between_subcalls point owner =
   reset (); gate point true; selected_gate true;
   let request = B.create () in
@@ -137,7 +137,7 @@ let rollback_race ~before owner =
     (match D.with_transaction facade ~f:(fun tx ->
       ok (D.execute_transaction tx "SELECT 1");
       if before then ok (B.cancel request);
-      Error D.Embedded_nul) with Error D.Embedded_nul -> () | _ -> failwith "rollback primary preserved");
+      Error { D.Error.context = Transaction; cause = Embedded_nul }) with Error { cause = Embedded_nul; _ } -> () | _ -> failwith "rollback primary preserved");
     cancelled (D.execute facade "SELECT 2"); Ok ()))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 11; pending request;
@@ -246,8 +246,8 @@ let selected_terminal owner =
       gate 6 false; wait_count 11 1;
       pending request;
       check "no join completion/detach/close while selected" (count 12 = 0 && count 13 = 0 && count 5 = 0);
-      check "owner Busy before retirement" (match D.close_connection owner with Error D.Busy -> true | _ -> false);
-      check "fresh B cannot reuse before A retirement" (match B.run (B.create ()) owner ~f:(fun _ -> Ok ()) with Error D.Busy -> true | _ -> false);
+      check "owner Busy before retirement" (match D.close_connection owner with Error { cause = Busy; _ } -> true | _ -> false);
+      check "fresh B cannot reuse before A retirement" (match B.run (B.create ()) owner ~f:(fun _ -> Ok ()) with Error { cause = Busy; _ } -> true | _ -> false);
       selected_gate false; cancelled (join ());
       check "late ticket skipped" (count 4 = 0 && count 16 = 1 && count 17 = 1);
       one_controller (); settled request));

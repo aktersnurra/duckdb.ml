@@ -26,28 +26,14 @@ val many : ?oneshot:bool -> ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t 
   string -> ('params, 'row, many) t
 val query : (_, _, _) t -> string
 
-type context = Query of string | Table of { schema : string; name : string } | Transaction
-type cause =
-  | Core of error
-  | Parameter_count of { expected : int; actual : int }
-  | Row_count of { expected : [ `One | `Zero_or_one ]; actual : [ `Zero | `More_than_one ] }
-  | Unknown_column of { name : string }
-  | Missing_column of { name : string }
-  | Encode_rejected of { index : int; reason : Error.t }
-  | Decode_rejected of { column : int; row : int; reason : Error.t }
-  | Rollback_failed of { primary : request_error; rollback : error }
-and request_error = { context : context; cause : cause }
-val query_of_context : context -> string
-exception Cleanup_exception of request_error * exn
-
 val declare_table : ?schema:string -> string -> ('columns, 'fn, 'row) Columns.t -> row:'fn -> ('columns, 'row) table
 val fields_of_columns : ('list, 'fn, 'result) Columns.t -> ('list, 'fn, 'result) Fields.t
 
 type ('columns, 'row) appender
 val with_appender_transaction : transaction -> ('columns, 'row) table ->
-  f:(('columns, 'row) appender -> ('a, request_error) result) -> ('a, request_error) result
-val append : ('columns, _) appender -> 'columns Args.t list -> (unit, request_error) result
-val flush : (_, _) appender -> (unit, request_error) result
+  f:(('columns, 'row) appender -> ('a, Failure.t) result) -> ('a, Failure.t) result
+val append : ('columns, _) appender -> 'columns Args.t list -> (unit, Failure.t) result
+val flush : (_, _) appender -> (unit, Failure.t) result
 
 module type QUERY = sig
   type owner
@@ -60,12 +46,12 @@ module type QUERY = sig
   val collect : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
     ('row list, error) result future
   val fold : owner -> ('params, 'row, [< `Zero | `One | `Many ]) t -> 'params Args.t ->
-    init:'a -> f:('row -> 'a -> ('a Query.step, request_error) result) -> ('a, error) result future
+    init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) -> ('a, error) result future
 end
 
 module type CONNECTION = sig
   include QUERY
-  val with_transaction : owner -> f:(transaction -> ('a, request_error) result) -> ('a, error) result future
+  val with_transaction : owner -> f:(transaction -> ('a, Failure.t) result) -> ('a, error) result future
   val ingest : owner -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
     (unit, error) result future
 end
@@ -76,17 +62,18 @@ type ('row, 'out) shape =
   | Find : ('row, 'row) shape
   | Find_opt : ('row, 'row option) shape
   | Collect : ('row, 'row list) shape
-  | Fold : { init : 'a; f : 'row -> 'a -> ('a Query.step, request_error) result } -> ('row, 'a) shape
+  | Fold : { init : 'a; f : 'row -> 'a -> ('a Query.step, Failure.t) result } -> ('row, 'a) shape
 
 (* The one execution entry point per shape, used by the adapters; prefer the named operations of [Connection], which
    carry the row-count guards ([run] accepts any multiplicity with [Find], [Find_opt], [Collect] and [Fold]). *)
-val run : connection -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t -> ('out, request_error) result
+val run : connection -> ('row, 'out) shape -> ('params, 'row, _) t -> 'params Args.t -> ('out, Failure.t) result
 
-(* Runs a parameterless request on a connection, as [Connection.fold]. *)
-val fold_on : connection -> (unit, 'row, _) t -> init:'a -> f:('row -> 'a -> ('a Query.step, request_error) result) ->
-  ('a, request_error) result
+(* Runs a parameterless request on a connection, as [Connection.fold], with
+   its errors in [context]. *)
+val fold_on : context:Failure.context -> connection -> (unit, 'row, _) t -> init:'a -> f:('row -> 'a -> ('a Query.step, Failure.t) result) ->
+  ('a, Failure.t) result
 
 module Connection : CONNECTION
-  with type owner = connection and type error = request_error and type 'a future = 'a
+  with type owner = connection and type error = Failure.t and type 'a future = 'a
 module Transaction : QUERY
-  with type owner = transaction and type error = request_error and type 'a future = 'a
+  with type owner = transaction and type error = Failure.t and type 'a future = 'a

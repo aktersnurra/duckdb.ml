@@ -111,11 +111,11 @@ let primary_and_close raised_primary =
   Eio.Switch.run (fun sw ->
     let p = pool sw 1 1 in
     fail_close 1 0;
-    let fs = failures (fun () -> E.transaction p ~f:(if raised_primary then raised_callback else fun _ -> Error Duckdb.Embedded_nul)) in
+    let fs = failures (fun () -> E.transaction p ~f:(if raised_primary then raised_callback else fun _ -> Error { Duckdb.Error.context = Transaction; cause = Embedded_nul })) in
     check "primary plus raised retirement close preserved" (List.length fs = 2 && close_faults fs = 1);
     (match List.hd_exn fs with
      | { E.phase = Operation; cause = Raised_failure (Requested, bt) } when raised_primary -> check_trace bt
-     | { E.phase = Operation; cause = Core_failure Duckdb.Embedded_nul } when not raised_primary -> ()
+     | { E.phase = Operation; cause = Core_failure { cause = Duckdb.Error.Embedded_nul; _ } } when not raised_primary -> ()
      | _ -> failwith "original primary constituent lost");
     let fs = failures (fun () -> E.shutdown p) in
     check "retirement failure also retained by shutdown" (close_faults fs = 1);
@@ -249,7 +249,7 @@ let parent_switch clock cancellation =
           Eio.Fiber.fork ~sw (fun () -> Eio.Cancel.protect (fun () ->
             let result = E.execute p sql in
             check "running native interruption error retained" (match result with
-              | Error (E.Core (Duckdb.Cancelled | Duckdb.Native_error _)) -> true | _ -> false);
+              | Error (E.Core { cause = Duckdb.Error.(Cancelled | Native _); _ }) -> true | _ -> false);
             running_settled := true));
           until clock "held work before parent failure" (fun () -> counter 5 = 1);
           Eio.Fiber.fork ~sw (fun () -> Eio.Cancel.protect (fun () ->
@@ -309,9 +309,10 @@ let held_rollback clock cancellation =
       let context, resolve_context = Eio.Promise.create () in
       let owner = Eio.Fiber.fork_promise ~sw (fun () -> Eio.Cancel.sub (fun cc ->
         Eio.Promise.resolve resolve_context cc;
-        if cancellation then (try ignore (E.transaction p ~f:(fun _ -> Error Duckdb.Embedded_nul)); false
+        if cancellation then (try ignore (E.transaction p ~f:(fun _ -> Error { Duckdb.Error.context = Transaction; cause = Embedded_nul })); false
           with ex -> cancelled ex)
-        else (match E.transaction p ~f:(fun _ -> Error Duckdb.Embedded_nul) with Error (E.Core Duckdb.Embedded_nul) -> true | _ -> false))) in
+        else (match E.transaction p ~f:(fun _ -> Error { Duckdb.Error.context = Transaction; cause = Embedded_nul }) with
+          Error (E.Core { cause = Duckdb.Error.Embedded_nul; _ }) -> true | _ -> false))) in
       until clock "rollback entry or completion" (fun () -> held_entry 16 > 0 || Eio.Promise.is_resolved owner);
       check "rollback selected held-entry acknowledged" (held_entry 16 = 1);
       check "rollback gate entered after runtime release" (counter 6 = 0 && not (Eio.Promise.is_resolved owner));
@@ -358,10 +359,8 @@ let child_cleanup_responsiveness clock =
   let appender tx =
     unwrap (Duckdb.execute_transaction tx "CREATE TABLE cleanup_appender(x INTEGER)");
     (* The declared table's scope opens and closes the appender. *)
-    Result.map_error ~f:(fun (e : Duckdb.Request.request_error) ->
-      match e.cause with Duckdb.Request.Core e -> e | _ -> failwith "unexpected typed failure")
-      (Duckdb.Table.with_appender_transaction tx
-        Duckdb.Table.(declare "cleanup_appender" Columns.[ "x", int32 ] ~row:Fn.id) ~f:(fun _ -> Ok ())) in
+    Duckdb.Table.with_appender_transaction tx
+      Duckdb.Table.(declare "cleanup_appender" Columns.[ "x", int32 ] ~row:Fn.id) ~f:(fun _ -> Ok ()) in
   List.iter [9, "result", result; 10, "prepared", prepared; 11, "appender", appender; 15, "chunk", chunk]
     ~f:(fun (kind, name, callback) -> held_child_cleanup clock kind name callback false;
       held_child_cleanup clock kind (name ^ " cancellation") callback true);
@@ -431,7 +430,7 @@ let cancellation_cleanup clock inject_close =
             check "original cancellation trace" (Stdlib.Printexc.raw_backtrace_length bt > 0);
             check "Bridge primary plus actual close failure inside cancellation" (match fs with
               | [{ E.phase = Operation; cause = Raised_failure
-                     (Duckdb.Cleanup_exception (Duckdb.Native_error _, Close_fault 1), bt) }] ->
+                     (Duckdb.Cleanup_exception ({ cause = Native _; _ }, Close_fault 1), bt) }] ->
                 Stdlib.Printexc.raw_backtrace_length bt > 0
               | _ -> false))) in
       entered ();

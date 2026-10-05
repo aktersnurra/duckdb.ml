@@ -77,7 +77,7 @@ let dispatched clock slots =
         ok (B.cancel request); ok (B.cancel request);
         check "dispatched Pending until actual Bridge.run" (match B.settlement request with Pending -> true | Settled -> false);
         Stdlib.Atomic.set release true;
-        (match S.restore (Eio.Promise.await completion) with Error Duckdb.Cancelled -> () | _ -> failwith "dispatched suppression");
+        (match S.restore (Eio.Promise.await completion) with Error { Duckdb.Error.cause = Cancelled; _ } -> () | _ -> failwith "dispatched suppression");
         check "dispatched zero native calls and controllers" (R.executions () = 0 && R.interrupts () = 0 && R.joins () = 0);
         R.check_settled request; R.check_inventory ();
         Stdlib.print_endline "eio bridge: actual-dispatched cancelled-before-Bridge native-execute=0 controller-join=0"))
@@ -111,7 +111,7 @@ let saturation clock slots =
         R.release Execute;
         List.iter2_exn (extra :: requests) all ~f:(fun r completion ->
           let outcome = S.restore (Eio.Promise.await completion) in
-          if phys_equal r extra then (match outcome with Error Duckdb.Cancelled -> () | _ -> failwith "queued suppression")
+          if phys_equal r extra then (match outcome with Error { Duckdb.Error.cause = Cancelled; _ } -> () | _ -> failwith "queued suppression")
           else R.check_outcome Execute outcome;
           R.check_settled r);
         check "two actual interrupted returns and joins" (R.native_errors () = 2 && R.executions () = 2 && R.joins () = 2);

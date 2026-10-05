@@ -14,7 +14,7 @@ external control_failure : int -> unit = "delivery_control_failure"
 external unlink_failure : bool -> unit = "delivery_unlink_failure"
 let check name condition = if not condition then failwith name
 let ok = function Ok x -> x | Error _ -> failwith "control-publication expected Ok"
-let cancelled = function Error D.Cancelled -> () | _ -> failwith "control-publication expected Cancelled"
+let cancelled = function Error { D.Error.cause = Cancelled; _ } -> () | _ -> failwith "control-publication expected Cancelled"
 let reset () = reset_hooks (); query_mode ()
 let release () = for i = 1 to 95 do gate i false done; selected_gate false
 let wait id = E.await ~label:("control-publication boundary " ^ Int.to_string id) (fun () -> entered id > 0)
@@ -103,7 +103,7 @@ let reservation_or_copy point owner = with_directory (fun dir ->
     cancelled (D.Parquet.export c ~query:"SELECT 2" destination); result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point;
-      check "reservation retains exclusive facade admission" (match D.execute owner "SELECT 1" with Error D.Busy -> true | _ -> false);
+      check "reservation retains exclusive facade admission" (match D.execute owner "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
       ok (B.cancel request); gate point false; cancelled (join ());
       check "one or suppressed native reservation decision" (count 43 = (if point = 74 then 0 else 1));
       check "exact owned temp syscall count" (count 44 = (if point = 74 then 0 else 1));
@@ -120,9 +120,8 @@ let next_file owner = with_directory (fun dir ->
   reset ();
   let request = B.create () in
   cancelled (B.run request owner ~f:(fun c ->
-    Result.map_error ~f:(fun (e : D.Request.request_error) -> match e.cause with D.Request.Core e -> e | _ -> failwith "unexpected typed failure")
-      (D.Parquet.fold c [file;missing] D.Fields.[int64] ~row:Fn.id ~init:()
-        ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ())))));
+    D.Parquet.fold c [file;missing] D.Fields.[int64] ~row:Fn.id ~init:()
+      ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ()))));
   (* The first file's parameterless SELECT is extracted once (no validating
      re-prepare) and executed once; the next file is never extracted. *)
   check "next file has no extraction/execute" (count 0 = 1 && count 2 = 1);
@@ -137,7 +136,7 @@ let () = Stdlib.Callback.Safe.register_exception "control_snapshot_failure" Snap
 let[@inline never] raise_control_primary () = raise Primary_failure
 let capture f = try Ok (f ()) with exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
 let has_trace trace name = String.is_substring (Stdlib.Printexc.raw_backtrace_to_string trace) ~substring:name
-let native_message = function D.Native_error message -> not (String.is_empty message) | _ -> false
+let native_message (e : D.Error.t) = match e.cause with Native message -> not (String.is_empty message) | _ -> false
 let rollback_matrix primary mode owner =
   reset (); control_failure mode;
   let request = B.create () in
@@ -145,14 +144,15 @@ let rollback_matrix primary mode owner =
     ok (D.execute_transaction tx "SELECT 1");
     let error = if String.equal primary "native" then (
       match D.execute_transaction tx "SELECT no_such_column" with Error e -> e | Ok () -> failwith "expected SQL failure")
-      else D.Cancelled in
+      else { D.Error.context = Transaction; cause = Cancelled } in
     ok (B.cancel request);
     if String.equal primary "exception" then raise_control_primary () else Error error))) in
-  let primary_matches = if String.equal primary "native" then native_message else function D.Cancelled -> true | _ -> false in
+  let primary_matches = if String.equal primary "native" then native_message
+    else fun (e : D.Error.t) -> match e.cause with Cancelled -> true | _ -> false in
   (match outcome, mode, primary with
-   | Ok (Error (D.Rollback_failed (p, secondary))), 1, _ ->
+   | Ok (Error { cause = Rollback_failed { primary = p; rollback = secondary }; _ }), 1, _ ->
      check "rollback retains primary/native diagnostic" (primary_matches p && native_message secondary)
-   | Error (D.Rollback_exception (Primary_failure, secondary), trace), 1, "exception" ->
+   | Error (D.Cleanup_exception (secondary, Primary_failure), trace), 1, "exception" ->
      check "rollback preserves callback backtrace" (native_message secondary && has_trace trace "raise_control_primary")
    | Error (D.Cleanup_exception (p, Rollback_failure), trace), 2, _ ->
      check "rollback exception retains primary and source" (primary_matches p && has_trace trace "raw_control")
@@ -160,18 +160,18 @@ let rollback_matrix primary mode owner =
      check "two exceptions preserve original callback trace" (has_trace trace "raise_control_primary")
    | _ -> failwith "rollback matrix lost constituent outcome");
   control_failure 0;
-  check "failed rollback discards owner" (match D.execute owner "SELECT 1" with Error D.Closed -> true | _ -> false);
+  check "failed rollback discards owner" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false);
   one_controller ()
 let commit_return_exception _ = with_pair (fun owner observer ->
   reset (); control_failure 3;
   let outcome = capture (fun () -> B.run (B.create ()) owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
     D.execute_transaction tx "INSERT INTO cp VALUES(1)"))) in
   (match outcome with
-   | Error (D.Rollback_exception (Commit_return_failure, secondary), trace) ->
+   | Error (D.Cleanup_exception (secondary, Commit_return_failure), trace) ->
      check "uncertain commit exception and rollback diagnostics retained" (native_message secondary && has_trace trace "raw_control")
    | _ -> failwith "uncertain commit transition exception lost");
   control_failure 0;
-  check "uncertain commit discards rather than reuses" (match D.execute owner "SELECT 1" with Error D.Closed -> true | _ -> false);
+  check "uncertain commit discards rather than reuses" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false);
   check "actual commit precedes transition exception" (count 7 = 1 && count 8 = 1);
   one_controller ();
   check "commit transition exception cannot undo effects" (Int64.equal (scalar observer "SELECT count(*) FROM cp") 1L))
@@ -185,10 +185,10 @@ let file_outcome ~rollback ~exists ~cancel ~unlink owner = with_directory (fun d
     D.Parquet.export c ~query:"SELECT 42::BIGINT" destination)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 72; if cancel then ok (B.cancel request); gate 72 false;
-      let primary_matches = if exists then (function D.Destination_exists -> true | _ -> false)
-        else (function D.Cancelled -> cancel | _ -> false) in
+      let primary_matches (e : D.Error.t) = match e.cause with
+        | Destination_exists -> exists | Cancelled -> cancel && not exists | _ -> false in
       (match join () with
-       | Error (D.Rollback_exception (D.Cleanup_exception (primary, Stdlib.Sys_error message), secondary), trace) ->
+       | Error (D.Cleanup_exception (secondary, D.Cleanup_exception (primary, Stdlib.Sys_error message)), trace) ->
          check "file error unlink and rollback error retained" (rollback = 1 && primary_matches primary && native_message secondary && not (String.is_empty message) && has_trace trace "Parquet.remove")
        | Error (Exn.Finally (D.Cleanup_exception (primary, Stdlib.Sys_error message), Rollback_failure), trace) ->
          check "file error unlink and rollback exception retained" (rollback = 2 && primary_matches primary && not (String.is_empty message) && has_trace trace "Parquet.remove")
@@ -217,17 +217,17 @@ let snapshot_rollback ~exception_ mode _ = with_pair (fun owner observer ->
       check "snapshot rollback cannot run before retirement" (count 8 = 0 && count 12 = 0 && count 13 = 0);
       selected_gate false;
       (match join (), exception_, mode with
-       | Ok (Error (D.Rollback_failed (primary, secondary))), false, 1 ->
+       | Ok (Error { cause = Rollback_failed { primary; rollback = secondary }; _ }), false, 1 ->
          check "snapshot both native diagnostics retained" (native_message primary && native_message secondary)
        | Error (D.Cleanup_exception (primary, Rollback_failure), trace), false, 2 ->
          check "snapshot rollback exception retains native primary/source" (native_message primary && has_trace trace "raw_control")
-       | Error (D.Rollback_exception (Snapshot_failure, secondary), trace), true, 1 ->
+       | Error (D.Cleanup_exception (secondary, Snapshot_failure), trace), true, 1 ->
          check "snapshot original exception/source retained" (native_message secondary && has_trace trace "Query.execute_prepared")
        | Error (Exn.Finally (Snapshot_failure, Rollback_failure), trace), true, 2 ->
          check "snapshot two exceptions/source retained" (has_trace trace "Query.execute_prepared")
        | _ -> failwith "snapshot rollback composite lost");
       snapshot_exception false; control_failure 0;
-      check "snapshot rollback failure discards" (match D.execute owner "SELECT 1" with Error D.Closed -> true | _ -> false);
+      check "snapshot rollback failure discards" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false);
       one_controller ();
       check "snapshot discard cannot commit" (Int64.equal (scalar observer "SELECT count(*) FROM cp") 0L))))
 let unlink_ordinary owner = with_directory (fun dir ->
