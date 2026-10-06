@@ -20,6 +20,12 @@ val open_appender : transaction -> ?schema:string -> string -> (appender, error)
 val native : appender -> Duckdb_ffi.appender
 val nullable : appender -> int -> bool
 val append_staged : appender -> null:(int * int) option -> (unit, error) result
+
+(** Appends [rows] rows slice by slice inside one admission: [stage ~pos ~n]
+    fills staging rows [0, n) (one chunk, [n] at most one vector) from input
+    rows [pos, pos + n), then the slice is appended. Cancellation is checked
+    per slice; failures poison as [append_staged]. *)
+val append_slices : appender -> rows:int -> stage:(pos:int -> n:int -> unit) -> (unit, error) result
 val flush_appender : appender -> (unit, error) result
 
 (** Flushes on success, then clears/destroys. Never commits the transaction.

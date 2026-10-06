@@ -184,3 +184,135 @@ let () =
     assert (A1.dim data = 12);
     for i = 0 to 11 do assert (Int64.equal data.{i} (Int64.of_int (i % 4))) done);
   Stdlib.print_endline "bulk: parameterised statements collect=ok"
+
+(* Columnar ingest across chunk boundaries, with NULL masks and strings. *)
+let () =
+  connected (fun c ->
+    ok (D.execute c "CREATE TABLE users(id BIGINT, name VARCHAR, age INTEGER)");
+    let users = D.Table.(declare "users" Columns.["id", int64; "name", string; "age", nullable int32]
+      ~row:(fun id name age -> (id, name, age))) in
+    let n = 5000 in
+    let ids = A1.init Bigarray.int64 Bigarray.c_layout n Int64.of_int in
+    let ages = A1.init Bigarray.int32 Bigarray.c_layout n Int32.of_int_trunc in
+    let valid = A1.init Bigarray.int8_unsigned Bigarray.c_layout n (fun i -> if i % 4 = 0 then 0 else 1) in
+    let names = Array.init n ~f:(fun i -> "u" ^ Int.to_string i) in
+    ok (D.Table.with_appender c users ~f:(fun a ->
+      D.Table.append_columns a D.Bulk.Columns.[
+        Int64 (D.Scalar.Int64, ids); Strings (D.Scalar.String, names); Nullable (Int32 (D.Scalar.Int32, ages), valid) ]));
+    let back = ok (D.Request.Session.collect c (D.Table.select users) D.Args.[]) in
+    let back = List.sort back ~compare:(fun (a, _, _) (b, _, _) -> Int64.compare a b) in
+    assert (List.length back = n);
+    List.iteri back ~f:(fun i (id, name, age) ->
+      assert (Int64.equal id (Int64.of_int i) && String.equal name ("u" ^ Int.to_string i));
+      assert (Option.equal Int32.equal age (if i % 4 = 0 then None else Some (Int32.of_int_trunc i)))));
+  Stdlib.print_endline "bulk: append_columns across chunks with masks and strings=ok"
+
+(* Runtime rejections, all before any native work. Masks are all-valid except
+   in the NULL case, so each attempt trips exactly one check. *)
+let () =
+  connected (fun c ->
+    ok (D.execute c "CREATE TABLE t(a BIGINT NOT NULL, ts TIMESTAMP, v BIGINT)");
+    let positive = D.Codec.Values.custom ~encode:(fun (n : int64) -> if Int64.(n > 0L) then Ok n else Or_error.error_string "neg")
+      ~decode:Or_error.return D.Codec.Values.int64 in
+    let custom = D.Table.(declare "t" Columns.["a", nullable int64; "ts", timestamp_us; "v", positive] ~row:(fun a ts v -> (a, ts, v))) in
+    let plain = D.Table.(declare "t" Columns.["a", nullable int64; "ts", timestamp_us; "v", int64] ~row:(fun a ts v -> (a, ts, v))) in
+    let i64 n = A1.create Bigarray.int64 Bigarray.c_layout n in
+    let valid n = A1.init Bigarray.int8_unsigned Bigarray.c_layout n (fun _ -> 1) in
+    let hole n = A1.init Bigarray.int8_unsigned Bigarray.c_layout n (fun i -> if i = 1 then 0 else 1) in
+    let attempt table cols = D.Table.with_appender c table ~f:(fun a -> D.Table.append_columns a cols) in
+    (match attempt plain D.Bulk.Columns.[Nullable (Int64 (D.Scalar.Int64, i64 3), valid 3); Int64 (D.Scalar.Timestamp_us, i64 2); Int64 (D.Scalar.Int64, i64 3)] with
+     | Error { cause = Length_mismatch { column = 1; expected = 3; actual = 2 }; _ } -> ()
+     | _ -> failwith "length mismatch expected");
+    (match attempt plain D.Bulk.Columns.[Nullable (Int64 (D.Scalar.Int64, i64 3), valid 3); Int64 (D.Scalar.Int64, i64 3); Int64 (D.Scalar.Int64, i64 3)] with
+     | Error { cause = Type_mismatch { index = 1; _ }; _ } -> ()
+     | _ -> failwith "engine scalar mismatch expected");
+    (match attempt custom D.Bulk.Columns.[Nullable (Int64 (D.Scalar.Int64, i64 3), valid 3); Int64 (D.Scalar.Timestamp_us, i64 3); Int64 (D.Scalar.Int64, i64 3)] with
+     | Error { cause = Encode_rejected { index = 3; _ }; _ } -> ()
+     | _ -> failwith "custom codec rejection expected");
+    (match attempt plain D.Bulk.Columns.[Nullable (Int64 (D.Scalar.Int64, i64 3), hole 3); Int64 (D.Scalar.Timestamp_us, i64 3); Int64 (D.Scalar.Int64, i64 3)] with
+     | Error { cause = Null { column = 0; row = 1 }; _ } -> ()
+     | _ -> failwith "NULL in NOT NULL column expected");
+    assert (Int64.equal (ok (D.Request.Session.find c (D.Request.one D.Fields.[] D.Fields.[int64] ~row:Fn.id
+      "SELECT count(*)::BIGINT FROM t") D.Args.[])) 0L));
+  Stdlib.print_endline "bulk: append_columns rejects lengths, scalars, custom codecs and NULLs before native work=ok"
+
+(* A rejected pre-check leaves the appender usable; invalid UTF-8 fails and
+   poisons like row ingest, while a masked-NULL string is never validated. *)
+let () =
+  connected (fun c ->
+    ok (D.execute c "CREATE TABLE s(n BIGINT NOT NULL, name VARCHAR)");
+    let s = D.Table.(declare "s" Columns.["n", int64; "name", nullable string] ~row:(fun n name -> (n, name))) in
+    let bad = "\xff\xfe" in
+    let ns k = A1.init Bigarray.int64 Bigarray.c_layout k Int64.of_int in
+    let mask l = A1.of_array Bigarray.int8_unsigned Bigarray.c_layout l in
+    ok (D.Table.with_appender c s ~f:(fun a ->
+      (match D.Table.append_columns a D.Bulk.Columns.[Int64 (D.Scalar.Int64, ns 2); Nullable (Strings (D.Scalar.String, [| "x" |]), mask [| 1 |])] with
+       | Error { cause = Length_mismatch { column = 1; expected = 2; actual = 1 }; _ } -> ()
+       | _ -> failwith "length mismatch expected");
+      D.Table.append_columns a D.Bulk.Columns.[Int64 (D.Scalar.Int64, ns 2); Nullable (Strings (D.Scalar.String, [| "x"; bad |]), mask [| 1; 0 |])]));
+    let back = ok (D.Request.Session.collect c (D.Table.select s) D.Args.[]) in
+    assert (List.equal Poly.equal (List.sort back ~compare:Poly.compare) [ (0L, Some "x"); (1L, None) ]);
+    let first = ref None in
+    (match D.Table.with_appender c s ~f:(fun a ->
+       (match D.Table.append_columns a D.Bulk.Columns.[Int64 (D.Scalar.Int64, ns 2); Nullable (Strings (D.Scalar.String, [| "y"; bad |]), mask [| 1; 1 |])] with
+        | Error ({ cause = Native _; _ } as e) -> first := Some e
+        | _ -> failwith "invalid UTF-8 expected");
+       match D.Table.append_columns a D.Bulk.Columns.[Int64 (D.Scalar.Int64, ns 1); Nullable (Strings (D.Scalar.String, [| "z" |]), mask [| 1 |])] with
+       | Error e -> assert (Poly.equal (Some e) !first); Ok ()
+       | Ok () -> failwith "poisoned appender expected") with
+     | Error _ -> ()
+     | Ok () -> failwith "poisoned scope expected");
+    let count = ok (D.Request.Session.find c (D.Request.one D.Fields.[] D.Fields.[int64] ~row:Fn.id
+      "SELECT count(*)::BIGINT FROM s") D.Args.[]) in
+    assert (Int64.equal count 2L));
+  Stdlib.print_endline "bulk: append_columns pre-checks do not poison; invalid UTF-8 poisons; masked strings unchecked=ok"
+
+(* Every fixed-width kind blits across slices; booleans normalize to 0/1. *)
+let () =
+  connected (fun c ->
+    ok (D.execute c "CREATE TABLE k(b BOOLEAN, i8 TINYINT, i16 SMALLINT, f32 FLOAT, f64 DOUBLE, d DATE)");
+    let k = D.Table.(declare "k" Columns.["b", bool; "i8", int8; "i16", int16; "f32", float32; "f64", float64; "d", date]
+      ~row:(fun b i8 i16 f32 f64 d -> (b, i8, i16, f32, f64, d))) in
+    let n = 3000 in
+    let init kind f = A1.init kind Bigarray.c_layout n f in
+    ok (D.Table.with_appender c k ~f:(fun a ->
+      D.Table.append_columns a D.Bulk.Columns.[
+        Bool (init Bigarray.int8_unsigned (fun i -> i % 3));
+        Int8 (init Bigarray.int8_signed (fun i -> i % 100 - 50));
+        Int16 (init Bigarray.int16_signed (fun i -> i - 1500));
+        Float32 (init Bigarray.float32 (fun i -> Float.of_int i /. 2.));
+        Float64 (init Bigarray.float64 (fun i -> Float.of_int i /. 4.));
+        Int32 (D.Scalar.Date, init Bigarray.int32 Int32.of_int_trunc) ]));
+    let back = ok (D.Request.Session.collect c (D.Table.select k) D.Args.[]) in
+    let back = List.sort back ~compare:(fun (_, _, a, _, _, _) (_, _, b, _, _, _) ->
+      Int.compare (Stdlib_stable.Int16.to_int a) (Stdlib_stable.Int16.to_int b)) in
+    assert (List.length back = n);
+    List.iteri back ~f:(fun i (b, i8, i16, f32, f64, d) ->
+      assert (Bool.equal b (i % 3 <> 0));
+      assert (Stdlib_stable.Int8.to_int i8 = i % 100 - 50 && Stdlib_stable.Int16.to_int i16 = i - 1500);
+      assert (Float.equal (Stdlib_stable.Float32.to_float f32) (Float.of_int i /. 2.));
+      assert (Float.equal f64 (Float.of_int i /. 4.) && Int32.equal d (Int32.of_int_trunc i))));
+  Stdlib.print_endline "bulk: append_columns blits bool, int8, int16, float32, float64 and date=ok"
+
+(* Zero rows insert nothing; an exact multiple of the vector size; timestamp
+   scalars; BLOB bytes are not UTF-8 validated. *)
+let () =
+  connected (fun c ->
+    ok (D.execute c "CREATE TABLE e(ts TIMESTAMP NOT NULL, bytes BLOB)");
+    let e = D.Table.(declare "e" Columns.["ts", timestamp_us; "bytes", nullable blob] ~row:(fun ts b -> (ts, b))) in
+    let count () = ok (D.Request.Session.find c (D.Request.one D.Fields.[] D.Fields.[int64] ~row:Fn.id
+      "SELECT count(*)::BIGINT FROM e") D.Args.[]) in
+    let columns k ~blob = D.Bulk.Columns.[
+      Int64 (D.Scalar.Timestamp_us, A1.init Bigarray.int64 Bigarray.c_layout k (fun i -> Int64.of_int (i * 1_000_000)));
+      Nullable (Strings (D.Scalar.Blob, Array.init k ~f:blob), A1.init Bigarray.int8_unsigned Bigarray.c_layout k (fun _ -> 1)) ] in
+    ok (D.Table.with_appender c e ~f:(fun a -> D.Table.append_columns a (columns 0 ~blob:(fun _ -> ""))));
+    assert (Int64.equal (count ()) 0L);
+    let blob i = if i % 2 = 0 then "\xff\xfe" ^ Int.to_string i else Int.to_string i in
+    ok (D.Table.with_appender c e ~f:(fun a -> D.Table.append_columns a (columns 4096 ~blob)));
+    assert (Int64.equal (count ()) 4096L);
+    let back = List.sort (ok (D.Request.Session.collect c (D.Table.select e) D.Args.[]))
+      ~compare:(fun (a, _) (b, _) -> Int64.compare a b) in
+    List.iteri back ~f:(fun i (ts, bytes) ->
+      assert (Int64.equal ts (Int64.of_int (i * 1_000_000)));
+      assert (Option.equal String.equal bytes (Some (blob i)))));
+  Stdlib.print_endline "bulk: append_columns zero rows, 4096 rows, timestamps and raw BLOB bytes=ok"

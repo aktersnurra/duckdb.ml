@@ -7,6 +7,7 @@ let cause_name : Duckdb.Error.cause -> string = function
   | Busy -> "Busy" | Cancelled -> "Cancelled" | Native _ -> "Native"
   | Unsupported_statement -> "Unsupported_statement" | Effects_not_allowed -> "Effects_not_allowed"
   | Type_mismatch _ -> "Type_mismatch" | Null _ -> "Null" | Index _ -> "Index"
+  | Length_mismatch _ -> "Length_mismatch"
   | Unbound_parameter _ -> "Unbound_parameter" | Parameter_count _ -> "Parameter_count"
   | Column_count _ -> "Column_count" | Parameter_schema_changed -> "Parameter_schema_changed"
   | Row_count _ -> "Row_count" | Unknown_column _ -> "Unknown_column" | Missing_column _ -> "Missing_column"

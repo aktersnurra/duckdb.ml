@@ -144,6 +144,11 @@ external stage_float : appender -> int -> int -> float# -> unit
 external stage_string : appender -> int -> int -> string -> unit = "ml_duckdb_stage_string" [@@noalloc]
 external stage_null : appender -> int -> int -> unit = "ml_duckdb_stage_null" [@@noalloc]
 external clear_stage : appender -> unit = "ml_duckdb_clear_stage" [@@noalloc]
+external stage_blit : appender -> int -> ('a, 'b, Bigarray.c_layout) Bigarray.Array1.t -> int -> int -> unit
+  = "ml_duckdb_stage_blit" [@@noalloc]
+external stage_mask : appender -> int -> (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> int -> int -> unit
+  = "ml_duckdb_stage_mask" [@@noalloc]
+external vector_size : unit -> int = "ml_duckdb_vector_size" [@@noalloc]
 external append_staged : appender -> unit = "ml_duckdb_append_staged"
 external flush_appender : appender -> unit = "ml_duckdb_flush_appender"
 external close_appender : appender -> bool -> unit = "ml_duckdb_close_appender"

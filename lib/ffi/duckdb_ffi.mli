@@ -210,6 +210,18 @@ external stage_float : appender -> int -> int -> float# -> unit
 external stage_string : appender -> int -> int -> string -> unit = "ml_duckdb_stage_string" [@@noalloc]
 external stage_null : appender -> int -> int -> unit = "ml_duckdb_stage_null" [@@noalloc]
 external clear_stage : appender -> unit = "ml_duckdb_clear_stage" [@@noalloc]
+
+(** Columnar staging into the first staging chunk: [stage_blit a column ba pos n]
+    copies [ba.{pos .. pos + n - 1}] into rows [0, n) of [column];
+    [stage_mask a column mask pos n] marks rows [0, n) NULL where the mask is
+    0. When the Bigarray kind does not match the column's physical type, or
+    the range is empty or exceeds the input, the staged rows or one vector,
+    both copy nothing and fail the batch (reported by [append_staged]). [vector_size ()] is DuckDB's rows per vector and staging chunk. *)
+external stage_blit : appender -> int -> ('a, 'b, Bigarray.c_layout) Bigarray.Array1.t -> int -> int -> unit
+  = "ml_duckdb_stage_blit" [@@noalloc]
+external stage_mask : appender -> int -> (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> int -> int -> unit
+  = "ml_duckdb_stage_mask" [@@noalloc]
+external vector_size : unit -> int = "ml_duckdb_vector_size" [@@noalloc]
 val append_staged : appender -> unit
 val flush_appender : appender -> unit
 val close_appender : appender -> bool -> unit

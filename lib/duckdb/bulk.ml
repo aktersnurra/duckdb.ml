@@ -13,6 +13,19 @@ type ('k, 'e, 'n) t = { data : ('k, 'e, Bigarray.c_layout) Bigarray.Array1.t; va
 type _ strings =
   | Strings : string array -> Codec.non_null strings
   | Strings_opt : string option array -> Codec.nullable strings
+module Columns = struct
+  type _ col =
+    | Int64 : int64 Scalar.t * (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t -> int64 col
+    | Int32 : int32 Scalar.t * (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t -> int32 col
+    | Int16 : (int, Bigarray.int16_signed_elt, Bigarray.c_layout) Bigarray.Array1.t -> int16 col
+    | Int8 : (int, Bigarray.int8_signed_elt, Bigarray.c_layout) Bigarray.Array1.t -> int8 col
+    | Bool : (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> bool col
+    | Float64 : (float, Bigarray.float64_elt, Bigarray.c_layout) Bigarray.Array1.t -> float col
+    | Float32 : (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t -> float32 col
+    | Strings : string Scalar.t * string array -> string col
+    | Nullable : 'a col * mask -> 'a option col
+  type _ t = [] : unit t | (::) : 'a col * 'l t -> ('a * 'l) t
+end
 let scalar : type a k e. (a, k, e) kind -> a Scalar.t = function
   | Int64 s -> s | Int32 s -> s | Int16 -> Scalar.Int16 | Int8 -> Scalar.Int8
   | Bool -> Scalar.Bool | Float64 -> Scalar.Float64 | Float32 -> Scalar.Float32

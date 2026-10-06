@@ -400,6 +400,94 @@ let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
     Duckdb_ffi.clear_stage native;
     Stdlib.Printexc.raise_with_backtrace exn backtrace
   | null -> within context (Appender.append_staged a.core ~null)
+(* Columnar ingest. Every check runs before any native work and outside
+   admission, so a rejection neither poisons nor touches the appender. *)
+let rec bulk_length : type a. a Bulk.Columns.col -> int = function
+  | Bulk.Columns.Int64 (_, d) -> Bigarray.Array1.dim d
+  | Bulk.Columns.Int32 (_, d) -> Bigarray.Array1.dim d
+  | Bulk.Columns.Int16 d -> Bigarray.Array1.dim d
+  | Bulk.Columns.Int8 d -> Bigarray.Array1.dim d
+  | Bulk.Columns.Bool d -> Bigarray.Array1.dim d
+  | Bulk.Columns.Float64 d -> Bigarray.Array1.dim d
+  | Bulk.Columns.Float32 d -> Bigarray.Array1.dim d
+  | Bulk.Columns.Strings (_, s) -> Array.length s
+  | Bulk.Columns.Nullable (inner, _) -> bulk_length inner
+let rec bulk_scalar : type a. a Bulk.Columns.col -> Codec.packed_scalar = function
+  | Bulk.Columns.Int64 (s, _) -> Codec.Packed_scalar s
+  | Bulk.Columns.Int32 (s, _) -> Codec.Packed_scalar s
+  | Bulk.Columns.Int16 _ -> Codec.Packed_scalar Scalar.Int16
+  | Bulk.Columns.Int8 _ -> Codec.Packed_scalar Scalar.Int8
+  | Bulk.Columns.Bool _ -> Codec.Packed_scalar Scalar.Bool
+  | Bulk.Columns.Float64 _ -> Codec.Packed_scalar Scalar.Float64
+  | Bulk.Columns.Float32 _ -> Codec.Packed_scalar Scalar.Float32
+  | Bulk.Columns.Strings (s, _) -> Codec.Packed_scalar s
+  | Bulk.Columns.Nullable (inner, _) -> bulk_scalar inner
+let first_zero (mask : Bulk.mask) ~len =
+  let rec go i = if i = len then None else if mask.{i} = 0 then Some i else go (i + 1) in
+  go 0
+let rec check_columns_bulk : type l f r. Appender.appender -> (l, f, r) Columns.t -> l Bulk.Columns.t ->
+  column:int -> rows:int -> (unit, cause) Result.t = fun a declared bulk ~column ~rows ->
+  match declared, bulk with
+  | Columns.[], Bulk.Columns.[] -> Ok ()
+  | Columns.((_, codec) :: declared), Bulk.Columns.(col :: bulk) ->
+    let length = bulk_length col in
+    let mask_length = match col with Bulk.Columns.Nullable (_, m) -> Bigarray.Array1.dim m | _ -> length in
+    let custom = match codec with
+      | Codec.Non_null (Codec.Plan _) -> true
+      | Codec.Nullable (Codec.Plan _) -> true
+      | Codec.Non_null (Codec.Identity _) -> false
+      | Codec.Nullable (Codec.Identity _) -> false in
+    let (Codec.Packed_scalar s) = bulk_scalar col in
+    let actual = (Appender.types a).(column) in
+    let* () =
+      if length <> rows then Error (Length_mismatch { column; expected = rows; actual = length })
+      else if mask_length <> rows then Error (Length_mismatch { column; expected = rows; actual = mask_length })
+      else if custom then
+        Error (Encode_rejected { index = column + 1;
+          reason = Base.Error.of_string "a column with a custom codec cannot be appended in bulk" })
+      else if actual <> Scalar.native_id s then
+        Error (Type_mismatch { index = column; expected = Scalar.name s; actual = type_name actual })
+      else match col with
+        | Bulk.Columns.Nullable (_, m) when not (Appender.nullable a column) ->
+          (match first_zero m ~len:rows with Some row -> Error (Null { column; row }) | None -> Ok ())
+        | _ -> Ok () in
+    check_columns_bulk a declared bulk ~column:(column + 1) ~rows
+(* Stages input rows [pos, pos + n) into staging rows [0, n). A string under a
+   NULL mask entry is never staged (so never validated). *)
+let rec stage_column : type a. Duckdb_ffi.appender -> a Bulk.Columns.col -> column:int -> pos:int -> n:int -> unit =
+  fun native col ~column ~pos ~n ->
+  match col with
+  | Bulk.Columns.Int64 (_, d) -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Int32 (_, d) -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Int16 d -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Int8 d -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Bool d -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Float64 d -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Float32 d -> Duckdb_ffi.stage_blit native column d pos n
+  | Bulk.Columns.Strings (_, s) -> for i = 0 to n - 1 do Duckdb_ffi.stage_string native column i s.(pos + i) done
+  | Bulk.Columns.Nullable (Bulk.Columns.Strings (_, s), m) ->
+    for i = 0 to n - 1 do
+      if m.{pos + i} = 0 then Duckdb_ffi.stage_null native column i
+      else Duckdb_ffi.stage_string native column i s.(pos + i)
+    done
+  | Bulk.Columns.Nullable (inner, m) ->
+    stage_column native inner ~column ~pos ~n;
+    Duckdb_ffi.stage_mask native column m pos n
+let rec stage_columns : type l. Duckdb_ffi.appender -> l Bulk.Columns.t -> column:int -> pos:int -> n:int -> unit =
+  fun native bulk ~column ~pos ~n ->
+  match bulk with
+  | Bulk.Columns.[] -> ()
+  | Bulk.Columns.(col :: rest) ->
+    stage_column native col ~column ~pos ~n;
+    stage_columns native rest ~column:(column + 1) ~pos ~n
+let append_columns (type c) (a : (c, _) appender) (bulk : c Bulk.Columns.t) =
+  let (Table_def t) = a.table in
+  let context = table_context a.table in
+  let rows = match bulk with Bulk.Columns.[] -> 0 | Bulk.Columns.(col :: _) -> bulk_length col in
+  let* () = within context (check_columns_bulk a.core t.columns bulk ~column:0 ~rows) in
+  let native = Appender.native a.core in
+  within context (Appender.append_slices a.core ~rows ~stage:(fun ~pos ~n ->
+    stage_columns native bulk ~column:0 ~pos ~n))
 let flush a = within (table_context a.table) (Appender.flush_appender a.core)
 
 (* A transaction owned by the calling scope; errors pass through flat. *)

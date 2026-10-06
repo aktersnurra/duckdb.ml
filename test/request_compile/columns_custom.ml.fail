@@ -1,0 +1,8 @@
+module D = Duckdb
+module A1 = Bigarray.Array1
+let ids = A1.create Bigarray.int64 Bigarray.c_layout 2
+let mask = A1.create Bigarray.int8_unsigned Bigarray.c_layout 2
+type user_id = User_id of int64
+let user_id = D.Codec.Values.custom ~encode:(fun (User_id n) -> Ok n) ~decode:(fun n -> Ok (User_id n)) D.Codec.Values.int64
+let users = D.Table.(declare "users" Columns.["id", user_id] ~row:(fun id -> id))
+let f c = D.Table.with_appender c users ~f:(fun a -> D.Table.append_columns a D.Bulk.Columns.[Int64 (D.Scalar.Int64, ids)])

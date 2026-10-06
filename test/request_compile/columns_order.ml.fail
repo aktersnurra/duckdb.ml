@@ -1,0 +1,7 @@
+module D = Duckdb
+module A1 = Bigarray.Array1
+let ids = A1.create Bigarray.int64 Bigarray.c_layout 2
+let mask = A1.create Bigarray.int8_unsigned Bigarray.c_layout 2
+let users = D.Table.(declare "users" Columns.["id", int64; "name", string; "age", nullable int32]
+  ~row:(fun id name age -> (id, name, age)))
+let f (a : (int64 * (string * (int32 option * unit)), _) D.Table.appender @ local) = D.Table.append_columns a D.Bulk.Columns.[Strings (D.Scalar.String, [||]); Int64 (D.Scalar.Int64, ids); Nullable (Int32 (D.Scalar.Int32, A1.create Bigarray.int32 Bigarray.c_layout 2), mask)]

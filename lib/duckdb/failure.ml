@@ -8,6 +8,7 @@ type cause =
   | Type_mismatch of { index : int; expected : string; actual : string }
   | Null of { column : int; row : int }
   | Index of { index : int; length : int }
+  | Length_mismatch of { column : int; expected : int; actual : int }
   | Unbound_parameter of int
   | Parameter_count of { expected : int; actual : int }
   | Column_count of { expected : int; actual : int }

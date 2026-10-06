@@ -82,6 +82,9 @@ module Error : sig
     | Index of { index : int; length : int }
     (** An out-of-range position. Only from the low-level statement API:
         positional [bind] and chunk [column] access. *)
+    | Length_mismatch of { column : int; expected : int; actual : int }
+    (** [Table.append_columns]: this zero-based column (or its NULL mask) has
+        [actual] rows where the first column has [expected]. *)
     | Unbound_parameter of int
     (** [Statement.fold_chunks] with this one-based parameter unbound. Only from the
         low-level statement API; typed requests bind every parameter. *)
@@ -332,6 +335,22 @@ module Bulk : sig
     'n Statement.Column.nulls -> (('k, 'e, 'n) t, Error.t) result
   val collect_strings : Statement.prepared @ local -> column:int -> string Scalar.t ->
     'n Statement.Column.nulls -> ('n strings, Error.t) result
+
+  (** Whole columns for [Table.append_columns], indexed by the table's declared
+      column types. [Nullable] pairs a column with its mask (1 valid, 0 NULL). *)
+  module Columns : sig
+    type _ col =
+      | Int64 : int64 Scalar.t * (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t -> int64 col
+      | Int32 : int32 Scalar.t * (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t -> int32 col
+      | Int16 : (int, Bigarray.int16_signed_elt, Bigarray.c_layout) Bigarray.Array1.t -> int16 col
+      | Int8 : (int, Bigarray.int8_signed_elt, Bigarray.c_layout) Bigarray.Array1.t -> int8 col
+      | Bool : (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> bool col
+      | Float64 : (float, Bigarray.float64_elt, Bigarray.c_layout) Bigarray.Array1.t -> float col
+      | Float32 : (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t -> float32 col
+      | Strings : string Scalar.t * string array -> string col
+      | Nullable : 'a col * mask -> 'a option col
+    type _ t = [] : unit t | (::) : 'a col * 'l t -> ('a * 'l) t
+  end
 end
 
 (** Declared parameters or result columns, e.g. [Fields.[int64; nullable string]].
@@ -450,6 +469,19 @@ module Table : sig
       a [None] in a NOT NULL column poisons this appender and the transaction;
       later operations return the first error. *)
   val append : ('columns, _) appender @ local -> 'columns Args.t list -> (unit, Error.t) result
+
+  (** Appends whole columns. The column list is typed by the declaration;
+      columns with a custom codec are rejected at runtime. Checks run column
+      by column in column order, and within a column: length
+      ([Length_mismatch] against the first column), mask length, custom codec
+      ([Encode_rejected]), engine type other than the catalog's
+      ([Type_mismatch]), a NULL mask entry in a NOT NULL column ([Null], with
+      the zero-based row). All run before any native work and leave the
+      appender usable (the enclosing scope still rolls back if [f] returns the
+      error). The rows are then staged and appended slice by slice (one
+      vector each) in one admission; an engine failure, invalid UTF-8 in a
+      VARCHAR value or interrupted native work poisons as [append]. *)
+  val append_columns : ('columns, _) appender @ local -> 'columns Bulk.Columns.t -> (unit, Error.t) result
 
   (** Explicit flush; an engine error poisons as [append]. *)
   val flush : (_, _) appender @ local -> (unit, Error.t) result

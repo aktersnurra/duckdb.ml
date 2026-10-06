@@ -60,3 +60,10 @@ let (_ : D.connection -> (int64 list, D.Error.t) result) = Sync_count.all
 let _all_valid (t : (int64, Bigarray.int64_elt, D.Codec.non_null) D.Bulk.t) = match t.D.Bulk.validity with D.Bulk.All_valid -> ()
 let _mask (t : (float, Bigarray.float64_elt, D.Codec.nullable) D.Bulk.t) = match t.D.Bulk.validity with D.Bulk.Mask m -> m
 let _strings_opt : D.Codec.nullable D.Bulk.strings -> string option array = function D.Bulk.Strings_opt v -> v
+let _columns (a : (int64 * (string * (int32 option * unit)), _) D.Table.appender @ local) =
+  let module A1 = Bigarray.Array1 in
+  D.Table.append_columns a D.Bulk.Columns.[
+    Int64 (D.Scalar.Int64, A1.create Bigarray.int64 Bigarray.c_layout 0);
+    Strings (D.Scalar.String, [||]);
+    Nullable (Int32 (D.Scalar.Int32, A1.create Bigarray.int32 Bigarray.c_layout 0),
+              A1.create Bigarray.int8_unsigned Bigarray.c_layout 0) ]

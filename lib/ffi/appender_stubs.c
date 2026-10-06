@@ -1,5 +1,6 @@
 #include "query_native.h"
 #include <caml/alloc.h>
+#include <caml/bigarray.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
 #include <caml/memory.h>
@@ -330,6 +331,74 @@ value ml_duckdb_stage_null(value v, value column, value row) {
     duckdb_validity_set_row_invalid(duckdb_vector_get_validity(vec), i);
     return Val_unit;
 }
+/* The Bigarray kind whose elements are this column type's physical values,
+   or -1 when the column cannot be blitted. */
+static int stage_kind(int t) {
+    switch (t) {
+    case DUCKDB_TYPE_BOOLEAN: return CAML_BA_UINT8;
+    case DUCKDB_TYPE_TINYINT: return CAML_BA_SINT8;
+    case DUCKDB_TYPE_SMALLINT: return CAML_BA_SINT16;
+    case DUCKDB_TYPE_INTEGER: case DUCKDB_TYPE_DATE: return CAML_BA_INT32;
+    case DUCKDB_TYPE_FLOAT: return CAML_BA_FLOAT32;
+    case DUCKDB_TYPE_DOUBLE: return CAML_BA_FLOAT64;
+    case DUCKDB_TYPE_BIGINT: case DUCKDB_TYPE_TIMESTAMP: case DUCKDB_TYPE_TIMESTAMP_S:
+    case DUCKDB_TYPE_TIMESTAMP_MS: case DUCKDB_TYPE_TIMESTAMP_NS: case DUCKDB_TYPE_TIMESTAMP_TZ:
+        return CAML_BA_INT64;
+    default: return -1;
+    }
+}
+/* Whether staging rows [0, n) of [column] (one chunk, n > 0) can take input
+   rows [at, at + n) of the one-dimensional Bigarray [b]. */
+static bool stage_range(appender_owner *p, intnat c, const struct caml_ba_array *b, intnat at, intnat n) {
+    return p && p->staged && p->staged_capacity > 0 && c >= 0 && (idx_t)c < p->columns && n > 0
+        && (size_t)n <= p->staged_rows && (size_t)n <= duckdb_vector_size()
+        && b->num_dims == 1 && at >= 0 && at <= b->dim[0] - n;
+}
+/* A columnar write that cannot be honoured fails the batch (as invalid UTF-8
+   does) instead of leaving stale staging data to be appended. The first
+   staging failure is kept. */
+static void stage_fail(appender_owner *p, const char *message) {
+    if (!p || p->stage_failed) return;
+    snprintf(p->stage_message, sizeof(p->stage_message), "%s", message);
+    p->staged_rows = 0; p->stage_failed = true;
+}
+/* Copies [n] elements of [ba] from [pos] into staging rows [0, n) of
+   [column]. Booleans are normalized to 0/1. A kind mismatch or out-of-range
+   request copies nothing and fails the batch; OCaml checks both first. */
+value ml_duckdb_stage_blit(value v, value column, value ba, value pos, value count) {
+    appender_owner *p = Appender(v); intnat c = Long_val(column), at = Long_val(pos), n = Long_val(count);
+    const struct caml_ba_array *b = Caml_ba_array_val(ba);
+    if (!stage_range(p, c, b, at, n)) { stage_fail(p, "Bulk column range mismatch"); return Val_unit; }
+    int t = p->types[c];
+    size_t w = duckdb_ml_type_width((duckdb_type)t);
+    if (!w || stage_kind(t) != (int)(b->flags & CAML_BA_KIND_MASK)) {
+        stage_fail(p, "Bulk column kind mismatch"); return Val_unit;
+    }
+    char *d = duckdb_vector_get_data(duckdb_data_chunk_get_vector(p->staged[0], (idx_t)c));
+    const char *s = (const char *)b->data + (size_t)at * w;
+    if (t == DUCKDB_TYPE_BOOLEAN) for (intnat i = 0; i < n; ++i) ((bool *)d)[i] = s[i] != 0;
+    else memcpy(d, s, (size_t)n * w);
+    return Val_unit;
+}
+/* Marks staging rows [0, n) of [column] NULL where [mask] (from [pos]) is 0.
+   A bad mask or range fails the batch as [stage_blit] does. */
+value ml_duckdb_stage_mask(value v, value column, value mask, value pos, value count) {
+    appender_owner *p = Appender(v); intnat c = Long_val(column), at = Long_val(pos), n = Long_val(count);
+    const struct caml_ba_array *b = Caml_ba_array_val(mask);
+    if (!stage_range(p, c, b, at, n) || (b->flags & CAML_BA_KIND_MASK) != CAML_BA_UINT8) {
+        stage_fail(p, "Bulk mask kind or range mismatch"); return Val_unit;
+    }
+    const uint8_t *m = (const uint8_t *)b->data + at;
+    duckdb_vector vec = duckdb_data_chunk_get_vector(p->staged[0], (idx_t)c);
+    uint64_t *validity = NULL;
+    for (intnat i = 0; i < n; ++i) if (!m[i]) {
+        if (!validity) { duckdb_vector_ensure_validity_writable(vec); validity = duckdb_vector_get_validity(vec); }
+        duckdb_validity_set_row_invalid(validity, (idx_t)i);
+    }
+    return Val_unit;
+}
+/* DuckDB's rows per vector (and per staging chunk). */
+value ml_duckdb_vector_size(value unit) { (void)unit; return Val_long(duckdb_vector_size()); }
 value ml_duckdb_clear_stage(value v) { clear_input(Appender(v)); return Val_unit; }
 /* Appends every staged chunk. Each chunk is one interruptible engine call
    (it can automatically flush through a real INSERT); the first failure stops

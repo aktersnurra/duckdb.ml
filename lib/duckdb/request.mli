@@ -33,6 +33,7 @@ type ('columns, 'row) appender
 val with_appender_transaction : transaction -> ('columns, 'row) table ->
   f:(('columns, 'row) appender -> ('a, Failure.t) result) -> ('a, Failure.t) result
 val append : ('columns, _) appender -> 'columns Args.t list -> (unit, Failure.t) result
+val append_columns : ('columns, _) appender -> 'columns Bulk.Columns.t -> (unit, Failure.t) result
 val flush : (_, _) appender -> (unit, Failure.t) result
 
 module type QUERY = sig

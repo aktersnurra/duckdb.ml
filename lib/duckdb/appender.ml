@@ -77,6 +77,23 @@ let append_staged a ~null =
         let* () = checkpoint (connection a) in
         F.append_staged a.native;
         status a.native))
+(* Each slice is at most one vector, so [stage_begin] makes exactly one
+   staging chunk, which the columnar writers fill as chunk 0. *)
+let append_slices a ~rows ~stage =
+  let size = F.vector_size () in
+  Exn.protect ~finally:(fun () -> F.clear_stage a.native) ~f:(fun () ->
+    operation a (fun () ->
+      let rec slice pos =
+        if pos >= rows then Ok ()
+        else
+          let n = Int.min size (rows - pos) in
+          let* () = checkpoint (connection a) in
+          F.stage_begin a.native n;
+          stage ~pos ~n;
+          F.append_staged a.native;
+          let* () = status a.native in
+          slice (pos + n) in
+      slice 0))
 let flush_appender a = operation a (fun () -> F.flush_appender a.native; status a.native)
 let close_appender a =
   if child_is_closed a.child then Ok ()
