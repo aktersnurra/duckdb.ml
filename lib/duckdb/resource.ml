@@ -31,7 +31,8 @@ end
 type state = Open | Closing | Closed_state
 type gate = { mutex : Stdlib.Mutex.t; changed : Condition.t; mutable state : state; mutable busy : bool }
 (* Lock order: owner gate -> request mutex -> native try-guard. Cancellation
-   takes only the request mutex and publishes an atomic native latch. Native
+   takes a Bridge canceller mutex, then each bound request mutex (canceller ->
+   request mutex; see [Bridge]), and publishes an atomic native latch. Native
    unref/disposal/destruction and controller join happen outside ML locks.
    Worker and sole controller root the admitted tree through selected retirement.
    The controller holds the runtime during its nonblocking native guard entry. *)
@@ -569,27 +570,11 @@ let with_child_snapshot (child : child) work =
         work ()))
 
 module Bridge = struct
-  type nonrec request = request
   type settlement = Pending | Settled
 
   let create () =
     { interrupt_mutex = Stdlib.Mutex.create (); request_state = Fresh; cancelled = false; native_request = None;
       controller = None; controller_stop = false; interrupted = false; controller_failure = None }
-
-  let cancel request =
-    request_locked request (fun () ->
-      match request.request_state with
-      | Finished -> Error Closed
-      | Fresh | Admitted | Running | Quiescing | Settling ->
-        request.cancelled <- true;
-        Option.iter request.native_request ~f:F.Native_request.cancel;
-        Ok ())
-
-  let settlement request =
-    request_locked request (fun () ->
-      match request.request_state with
-      | Finished -> Settled
-      | Fresh | Admitted | Running | Quiescing | Settling -> Pending)
 
   let consume request =
     request_locked request (fun () ->
@@ -667,4 +652,56 @@ module Bridge = struct
       match result with
       | Ok _ when cancelled -> Error { context = Connection; cause = Cancelled }
       | Ok _ | Error _ -> result)
+
+  (* A canceller fans one cancellation out to every request bound to it, and
+     latches so that requests bound later start cancelled. Lock order:
+     canceller [fan_mutex] -> request mutex ([cancel_state] and [settlement]
+     take the latter while holding the former); nothing takes a canceller
+     mutex while holding a request mutex or an owner gate. *)
+  type canceller = { fan_mutex : Stdlib.Mutex.t; mutable latched : bool; mutable bound_any : bool;
+                     mutable live : request list }
+  type handle = request
+
+  let canceller () = { fan_mutex = Stdlib.Mutex.create (); latched = false; bound_any = false; live = [] }
+
+  let fan k f =
+    Stdlib.Mutex.lock k.fan_mutex;
+    Exn.protect ~finally:(fun () -> Stdlib.Mutex.unlock k.fan_mutex)
+      ~f:(fun () -> Stdlib.Sys.with_async_exns f)
+
+  let finished request =
+    request_locked request (fun () ->
+      match request.request_state with
+      | Finished -> true
+      | Fresh | Admitted | Running | Quiescing | Settling -> false)
+
+  (* Under [fan_mutex]: finished requests need no further fan-out. *)
+  let prune k = k.live <- List.filter k.live ~f:(fun request -> not (finished request))
+
+  let cancel_state request =
+    request_locked request (fun () ->
+      match request.request_state with
+      | Finished -> ()
+      | Fresh | Admitted | Running | Quiescing | Settling ->
+        request.cancelled <- true;
+        Option.iter request.native_request ~f:F.Native_request.cancel)
+
+  let request k =
+    let state = create () in
+    fan k (fun () ->
+      prune k;
+      (* [state] is not yet shared; the canceller mutex orders it with [cancel]. *)
+      if k.latched then state.cancelled <- true;
+      k.bound_any <- true;
+      k.live <- state :: k.live);
+    state
+
+  (* An asynchronous exception during the fan-out leaves [latched] set (later
+     requests start cancelled) but may skip earlier live siblings. *)
+  let cancel k = fan k (fun () -> k.latched <- true; prune k; List.iter k.live ~f:cancel_state)
+
+  let settlement k =
+    fan k (fun () ->
+      prune k;
+      if k.bound_any && List.is_empty k.live then Settled else Pending)
 end

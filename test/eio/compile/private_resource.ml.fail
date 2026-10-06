@@ -1,1 +1,1 @@
-let _ = Duckdb__Resource.Bridge.create
+let _ = Duckdb__Resource.Bridge.canceller

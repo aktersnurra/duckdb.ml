@@ -18,22 +18,22 @@ module type S = sig
   val connect : database -> (slot, D.Error.t) result
   val close_slot : slot -> (unit, D.Error.t) result
   val close_database : database -> (unit, D.Error.t) result
-  val execute : slot -> D.Bridge.request -> string -> (unit, D.Error.t) result
-  val transaction : slot -> D.Bridge.request -> f:(D.transaction @ local -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
-  val query : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> ('row list, D.Error.t) result
-  val fold_rows : slot -> D.Bridge.request -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
+  val execute : slot -> D.Bridge.request @ unique -> string -> (unit, D.Error.t) result
+  val transaction : slot -> D.Bridge.request @ unique -> f:(D.transaction @ local -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
+  val query : slot -> D.Bridge.request @ unique -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> ('row list, D.Error.t) result
+  val fold_rows : slot -> D.Bridge.request @ unique -> string -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.Error.t) result) -> ('a, D.Error.t) result
-  val parquet_fold_rows : slot -> D.Bridge.request -> string list -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
+  val parquet_fold_rows : slot -> D.Bridge.request @ unique -> string list -> (_, 'fn, 'row) D.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a D.step, D.Error.t) result) -> ('a, D.Error.t) result
-  val parquet_export : slot -> D.Bridge.request -> query:string -> destination:string -> (unit, D.Error.t) result
+  val parquet_export : slot -> D.Bridge.request @ unique -> query:string -> destination:string -> (unit, D.Error.t) result
 
   (** Typed requests (each one bridged request). Bridge failures are reported
       in the request's context; row callbacks run inside the callback marker. *)
-  val request_run : slot -> D.Bridge.request -> ('row, 'out) D.Owned.shape -> ('p, 'row, _) D.Request.t ->
+  val request_run : slot -> D.Bridge.request @ unique -> ('row, 'out) D.Owned.shape -> ('p, 'row, _) D.Request.t ->
     'p D.Args.t -> ('out, D.Error.t) result
-  val request_transaction : slot -> D.Bridge.request ->
+  val request_transaction : slot -> D.Bridge.request @ unique ->
     f:(D.transaction @ local -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
-  val table_ingest : slot -> D.Bridge.request -> ('c, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
+  val table_ingest : slot -> D.Bridge.request @ unique -> ('c, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
     (unit, D.Error.t) result
   val is_in_callback : unit -> bool
 end

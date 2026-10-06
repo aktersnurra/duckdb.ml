@@ -35,21 +35,27 @@ let rows c sql = D.Statement.with_prepared c sql ~f:(fun p ->
     match !failure with None -> Ok (D.Continue !xs) | Some e -> Error e))
 exception Callback_failure
 let callback_failure () = raise Callback_failure
+(* Cancelling a settled canceller changes no outcome; it only latches the
+   requests bound to it later. (Running one request twice is a type error:
+   scope_compile bridge_twice.) *)
+let cancel_settled owner k =
+  check "settled" (Poly.equal (B.settlement k) B.Settled);
+  B.cancel k;
+  check "still settled" (Poly.equal (B.settlement k) B.Settled);
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun _ -> failwith "latched canceller ran a request"))
 let aliases db = connection db (fun owner ->
-  let request = B.create () in
+  let k = B.canceller () in
   (* The facade is local to the callback: it cannot escape or be closed. *)
-  ok (B.run request owner ~f:(fun facade ->
+  ok (B.run (B.request k) owner ~f:(fun facade ->
     expect D.Error.Busy (D.execute owner "SELECT 1");
     expect D.Error.Busy (D.Owned.close_connection owner);
-    expect D.Error.Busy (B.run request owner ~f:(fun _ -> Ok ()));
-    expect D.Error.Busy (B.run (B.create ()) facade ~f:(fun _ -> Ok ()));
+    expect D.Error.Busy (B.run (B.request k) owner ~f:(fun _ -> Ok ()));
+    expect D.Error.Busy (B.run (B.request (B.canceller ())) facade ~f:(fun _ -> Ok ()));
     D.execute facade "SELECT 42"));
-  expect D.Error.Closed (B.cancel request);
-  expect D.Error.Closed (B.run request owner ~f:(fun _ -> Ok ()));
-  check "settled" (Poly.equal (B.settlement request) B.Settled);
+  cancel_settled owner k;
   List.iter [false; true] ~f:(fun exceptional ->
-    let request = B.create () in
-    let outcome = E.capture (fun () -> B.run request owner ~f:(fun _ ->
+    let k = B.canceller () in
+    let outcome = E.capture (fun () -> B.run (B.request k) owner ~f:(fun _ ->
       if exceptional then callback_failure () else failed D.Error.Embedded_nul)) in
     (match outcome with
      | E.Returned result when not exceptional -> expect D.Error.Embedded_nul result
@@ -57,63 +63,66 @@ let aliases db = connection db (fun owner ->
        check "exception identity" (phys_equal failure.exception_ Callback_failure);
        check "callback backtrace" (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string failure.backtrace) ~substring:"callback_failure")
      | _ -> failwith "callback outcome");
-    expect D.Error.Closed (B.cancel request));
-  check "owned return" (String.equal (ok (B.run (B.create ()) owner ~f:(fun _ -> Ok "owned"))) "owned");
+    cancel_settled owner k);
+  check "owned return" (String.equal (ok (B.run (B.request (B.canceller ())) owner ~f:(fun _ -> Ok "owned"))) "owned");
   D.execute owner "SELECT 1")
 let pre_entry db = connection db (fun owner ->
-  let request = B.create () in
+  let k = B.canceller () in
+  let request = B.request k in
   reset_counts ();
-  ok (B.cancel request); ok (B.cancel request);
-  check "fresh pending" (Poly.equal (B.settlement request) B.Pending);
+  B.cancel k; B.cancel k;
+  check "fresh pending" (Poly.equal (B.settlement k) B.Pending);
   expect D.Error.Cancelled (B.run request owner ~f:(fun _ -> failwith "cancelled callback ran"));
   check "pre-entry SQL count" (count 0 = 0 && count 1 = 0 && count 2 = 0);
   D.execute owner "SELECT 1")
 let live_children db = connection db (fun owner ->
   ok (D.Statement.with_prepared owner "SELECT 1" ~f:(fun p ->
-    let request = B.create () in
-    expect D.Error.Busy (B.run request owner ~f:(fun _ -> Ok ()));
-    expect D.Error.Closed (B.cancel request);
+    let k = B.canceller () in
+    expect D.Error.Busy (B.run (B.request k) owner ~f:(fun _ -> Ok ()));
+    (* Failed admission settles the request; cancelling afterwards is a no-op. *)
+    check "failed admission settled" (Poly.equal (B.settlement k) B.Settled);
+    B.cancel k;
     (* A live result (inside its fold) is a child too. *)
     D.Statement.fold_chunks p ~init:() ~f:(fun _ () ->
-      expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
+      expect D.Error.Busy (B.run (B.request (B.canceller ())) owner ~f:(fun _ -> Ok ()));
       Ok (D.Stop ()))));
   ok (D.execute owner "CREATE TABLE live_appender (i BIGINT)");
   let live = bigints "live_appender" in
   ok (D.with_transaction owner ~f:(fun tx ->
     D.Table.with_appender tx live ~f:(fun _ ->
-      expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ()));
+      expect D.Error.Busy (B.run (B.request (B.canceller ())) owner ~f:(fun _ -> Ok ()));
       Ok ())));
   (* An appender cannot escape its scope: scope_compile appender_escape. *)
   Ok ())
 let concurrent db = connection db (fun owner ->
   let entered = A.make false and release = A.make false in
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
     A.set entered true; E.await ~label:"callback release" (fun () -> A.get release);
     D.execute facade "SELECT 1")) ~f:(fun join ->
     Exn.protect ~finally:(fun () -> A.set release true) ~f:(fun () ->
       E.await ~label:"callback entered" (fun () -> A.get entered);
       E.with_worker (fun () ->
-        expect D.Error.Busy (B.run request owner ~f:(fun _ -> Ok ()));
+        expect D.Error.Busy (B.run (B.request k) owner ~f:(fun _ -> Ok ()));
         expect D.Error.Busy (D.execute owner "SELECT 1");
         expect D.Error.Busy (D.Owned.close_connection owner);
-        expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> Ok ())))
+        expect D.Error.Busy (B.run (B.request (B.canceller ())) owner ~f:(fun _ -> Ok ())))
         ~f:(fun second -> second ());
       A.set release true; ok (join ())));
   D.execute owner "SELECT 1")
 let transactions db = connection db (fun owner -> connection db (fun observer ->
   ok (D.execute owner "CREATE TABLE cancelled_rows (i BIGINT)");
   List.iter [0; 1; 2] ~f:(fun variant ->
-    let request = B.create () in
+    let k = B.canceller () in
     reset_counts ();
-    let result = B.run request owner ~f:(fun facade ->
+    let result = B.run (B.request k) owner ~f:(fun facade ->
       (* Ignore the entire transaction error. Variant zero has no earlier
          Cancelled operation/poison: only the real pre-COMMIT latch saves it. *)
       ignore (D.with_transaction facade ~f:(fun tx ->
         ok (D.execute tx "INSERT INTO cancelled_rows VALUES (1)");
         let entered = A.make false and release = A.make false in
         E.with_worker (fun () -> E.await ~label:"cancel handshake" (fun () -> A.get entered);
-          ok (B.cancel request); A.set release true) ~f:(fun join ->
+          B.cancel k; A.set release true) ~f:(fun join ->
           Exn.protect ~finally:(fun () -> A.set entered true) ~f:(fun () ->
             A.set entered true; E.await ~label:"cancel acknowledged" (fun () -> A.get release); join ()));
         if variant = 1 then ignore (D.execute tx "INSERT INTO cancelled_rows VALUES (2)");
@@ -127,44 +136,44 @@ let transactions db = connection db (fun owner -> connection db (fun observer ->
   ok (D.execute owner "CREATE SEQUENCE appender_flush_probe START 1");
   ok (D.execute owner "CREATE TABLE discarded_buffer (i BIGINT CHECK (nextval('appender_flush_probe') > 0))");
   let discarded = bigints "discarded_buffer" in
-  let request = B.create () in
-  expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun facade ->
     D.Table.with_appender facade discarded ~f:(fun a ->
       ok (D.Table.append a [D.Args.[9L]]);
-      ok (B.cancel request); ignore (D.Table.flush a); Ok ())));
+      B.cancel k; ignore (D.Table.flush a); Ok ())));
   check "appender discarded" (Poly.equal (ok (rows observer "SELECT count(*) FROM discarded_buffer")) [0L]);
   (* Sequences are not rolled back: this distinguishes discard from a flush
      followed by rollback, without an unsafe appender/test FFI entry point. *)
   check "cancelled appender never flushed" (Poly.equal (ok (rows observer "SELECT nextval('appender_flush_probe')")) [1L]);
   ok (D.Table.with_appender owner discarded ~f:(fun a -> D.Table.append a [D.Args.[10L]]));
   check "ordinary appender flush control" (match ok (rows observer "SELECT nextval('appender_flush_probe')") with [n] -> Int64.(n > 2L) | _ -> false);
-  let request = B.create () in
-  expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun facade ->
     D.Statement.with_prepared facade "SELECT 1::BIGINT" ~f:(fun p ->
-      ok (B.cancel request); ignore (D.Statement.execute p); Ok ())));
+      B.cancel k; ignore (D.Statement.execute p); Ok ())));
   Ok ()))
 let traversal db = connection db (fun owner ->
   List.iter [false; true] ~f:(fun stop ->
-    let request = B.create () and visits = ref 0 in
-    expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+    let k = B.canceller () and visits = ref 0 in
+    expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun facade ->
       D.Statement.with_prepared facade "SELECT i::BIGINT FROM range(5000) t(i)" ~f:(fun p ->
         D.Statement.fold_chunks p ~init:() ~f:(fun _ () ->
-          Int.incr visits; ok (B.cancel request);
+          Int.incr visits; B.cancel k;
           Ok (if stop then D.Stop () else D.Continue ())))));
     check "no next callback after latch" (!visits = 1));
   D.execute owner "SELECT 1")
 let snapshots db = connection db (fun owner -> connection db (fun observer ->
   ok (D.execute owner "CREATE TABLE snapshot_rows (i BIGINT)");
   List.iter [false; true] ~f:(fun cancelled ->
-    let request = B.create () in
+    let k = B.canceller () in
     reset_counts (); execute_gate 2;
-    E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+    E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
       (* This statement actually materializes inside with_child_snapshot. *)
       D.Statement.with_prepared facade "INSERT INTO snapshot_rows VALUES (8) RETURNING i" ~f:D.Statement.execute)) ~f:(fun join ->
       Exn.protect ~finally:(fun () -> execute_gate 0) ~f:(fun () ->
         E.await ~label:"snapshot native result produced" (fun () -> execute_entered () = 2);
         check "snapshot BEGIN" (count 1 = 1 && count 0 = 1 && count 2 = 0);
-        if cancelled then ok (B.cancel request);
+        if cancelled then B.cancel k;
         execute_gate 0;
         let result = join () in
         if cancelled then expect D.Error.Cancelled result else ok result));
@@ -176,23 +185,23 @@ let cleanup_failure () = raise Cleanup_failure
 let diagnostics db =
   List.iter [false; true] ~f:(fun cancelled ->
     ok (connection db (fun owner ->
-      let request = B.create () in
-      expect D.Error.Embedded_nul (B.run request owner ~f:(fun _ ->
-        if cancelled then ok (B.cancel request); failed D.Error.Embedded_nul));
-      let exceptional_request = B.create () in
-      let outcome = E.capture (fun () -> B.run exceptional_request owner ~f:(fun _ ->
-        if cancelled then ok (B.cancel exceptional_request);
+      let k = B.canceller () in
+      expect D.Error.Embedded_nul (B.run (B.request k) owner ~f:(fun _ ->
+        if cancelled then B.cancel k; failed D.Error.Embedded_nul));
+      let exceptional = B.canceller () in
+      let outcome = E.capture (fun () -> B.run (B.request exceptional) owner ~f:(fun _ ->
+        if cancelled then B.cancel exceptional;
         Exn.protect ~f:callback_failure ~finally:cleanup_failure)) in
       (match outcome with
        | E.Raised { exception_ = Exn.Finally (Callback_failure, Cleanup_failure); backtrace } ->
          check "Finally backtrace" (not (String.is_empty (Stdlib.Printexc.raw_backtrace_to_string backtrace)))
        | _ -> failwith "Finally composite lost"); Ok ())));
   connection db (fun owner ->
-    let request = B.create () in
+    let k = B.canceller () in
     reset_counts (); fail_rollback true;
     let result = Exn.protect ~finally:(fun () -> fail_rollback false) ~f:(fun () ->
-      B.run request owner ~f:(fun facade -> D.with_transaction facade ~f:(fun _ ->
-        ok (B.cancel request); failed D.Error.Embedded_nul))) in
+      B.run (B.request k) owner ~f:(fun facade -> D.with_transaction facade ~f:(fun _ ->
+        B.cancel k; failed D.Error.Embedded_nul))) in
     (match result with Error { cause = Rollback_failed { primary = { cause = Embedded_nul; _ }; rollback = { cause = Native _; _ } }; _ } -> ()
      | _ -> failwith "result rollback composite lost");
     check "transaction discard detached/disposed" (count 6 = 1 && count 7 = 1 && count 4 = 1);
@@ -201,17 +210,17 @@ type _ Stdlib.Effect.t += Escape : unit Stdlib.Effect.t
 let effects_and_rollback db = connection db (fun owner ->
   let delivered = ref 0 in
   let result = Stdlib.Effect.Deep.try_with (fun () ->
-    B.run (B.create ()) owner ~f:(fun facade -> D.with_transaction facade ~f:(fun _ ->
+    B.run (B.request (B.canceller ())) owner ~f:(fun facade -> D.with_transaction facade ~f:(fun _ ->
       Stdlib.Effect.perform Escape; Ok ()))) ()
     { effc = fun (type a) (effect : a Stdlib.Effect.t) -> match effect with
         | Escape -> Some (fun (k : (a, _) Stdlib.Effect.Deep.continuation) ->
           Int.incr delivered; Stdlib.Effect.Deep.continue k ())
         | _ -> None } in
   expect D.Error.Effects_not_allowed result; check "outer effect denied" (!delivered = 0);
-  let request = B.create () in
+  let k = B.canceller () in
   fail_rollback true;
   let outcome = Exn.protect ~finally:(fun () -> fail_rollback false) ~f:(fun () ->
-    E.capture (fun () -> B.run request owner ~f:(fun facade ->
+    E.capture (fun () -> B.run (B.request k) owner ~f:(fun facade ->
       D.with_transaction facade ~f:(fun _ -> callback_failure ())))) in
   (match outcome with
    | E.Raised { exception_ = D.Cleanup_exception ({ cause = Native _; _ }, Callback_failure); backtrace } ->
@@ -225,11 +234,11 @@ let parquet db = connection db (fun owner ->
     let path = ok (D.Parquet.path name) in
     ok (D.Parquet.export owner ~query:"SELECT 7::BIGINT AS i" path);
     let missing = ok (D.Parquet.path (name ^ ".missing")) in
-    let request = B.create () in
+    let k = B.canceller () in
     reset_counts ();
-    expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+    expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun facade ->
       (D.Parquet.fold facade [path; missing] D.Fields.[int64] ~row:Fn.id
-          ~init:() ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ())))));
+          ~init:() ~f:(fun _ () -> B.cancel k; Ok (D.Continue ())))));
     check "next parquet suppressed" (count 0 = 1); Ok ()))
 exception Native_create_failure
 let[@inline never] run_create_failure request owner =
@@ -239,29 +248,29 @@ let native_admission_failures db = connection db (fun owner ->
   List.iter [1; 2] ~f:(fun mode ->
     reset_counts ();
     let before = Duckdb_ffi.live_resources () in
-    let request = B.create () in
+    let k = B.canceller () in
     request_failure mode;
     let result = Exn.protect ~finally:(fun () -> request_failure 0) ~f:(fun () ->
-      E.capture (fun () -> run_create_failure request owner)) in
+      E.capture (fun () -> run_create_failure (B.request k) owner)) in
     (match mode, result with
      | 1, E.Raised { exception_ = Native_create_failure; backtrace } ->
        check "create failure backtrace retained"
          (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string backtrace) ~substring:"run_create_failure")
      | 2, E.Returned (Error { D.Error.cause = Busy; _ }) -> ()
      | _ -> failwith "native acquisition failure outcome");
-    check "failed binding settles admitted lease" (Poly.equal (B.settlement request) B.Settled);
+    check "failed binding settles admitted lease" (Poly.equal (B.settlement k) B.Settled);
     check "failed binding deterministic cleanup"
       (count 5 = 0 && count 6 = 0 && count 7 = (if mode = 2 then 1 else 0)
        && Duckdb_ffi.live_resources () = before);
     ok (D.execute owner "SELECT 1");
-    ok (B.run (B.create ()) owner ~f:(fun facade -> D.execute facade "SELECT 2")));
+    ok (B.run (B.request (B.canceller ())) owner ~f:(fun facade -> D.execute facade "SELECT 2")));
   reset_counts ();
   let before = Duckdb_ffi.live_resources () in
-  let request = B.create () in
-  ok (B.cancel request);
-  expect D.Error.Cancelled (B.run request owner ~f:(fun _ -> failwith "pre-cancelled admission"));
+  let k = B.canceller () in
+  B.cancel k;
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun _ -> failwith "pre-cancelled admission"));
   ok (D.Statement.with_prepared owner "SELECT 1" ~f:(fun _ ->
-    expect D.Error.Busy (B.run (B.create ()) owner ~f:(fun _ -> failwith "child admission")); Ok ()));
+    expect D.Error.Busy (B.run (B.request (B.canceller ())) owner ~f:(fun _ -> failwith "child admission")); Ok ()));
   check "failed ML admission allocates no native request"
     (count 5 = 0 && count 7 = 0 && Duckdb_ffi.live_resources () = before);
   Ok ())
@@ -269,8 +278,8 @@ let native_lifecycle db = connection db (fun owner ->
   List.iter [0; 1; 2; 3; 4] ~f:(fun outcome ->
     reset_counts ();
     let before = Duckdb_ffi.live_resources () in
-    let request = B.create () in
-    let result = E.capture (fun () -> B.run request owner ~f:(fun facade ->
+    let k = B.canceller () in
+    let result = E.capture (fun () -> B.run (B.request k) owner ~f:(fun facade ->
       check "Resource binds after admission" (count 5 = 1);
       check "native lease stays live in callback" (Duckdb_ffi.live_resources () = before + 1);
       ok (D.execute facade "SELECT 1");
@@ -278,7 +287,7 @@ let native_lifecycle db = connection db (fun owner ->
       | 0 -> Ok ()
       | 1 -> failed D.Error.Embedded_nul
       | 2 -> callback_failure ()
-      | 3 -> ok (B.cancel request);
+      | 3 -> B.cancel k;
         check "native cancel published before acknowledgement" (count 8 = 1);
         Ok ()
       | _ -> D.execute facade "SELECT missing_resource_lifecycle_column")) in
@@ -296,7 +305,7 @@ let native_root_lifetime db = connection db (fun owner ->
   let entered = A.make false and release = A.make false in
   reset_counts ();
   let before = Duckdb_ffi.fallback_reclaims () in
-  E.with_worker (fun () -> B.run (B.create ()) owner ~f:(fun facade ->
+  E.with_worker (fun () -> B.run (B.request (B.canceller ())) owner ~f:(fun facade ->
     ok (D.execute facade "SELECT 1");
     A.set entered true;
     E.await ~label:"rooted callback release" (fun () -> A.get release);
@@ -313,33 +322,70 @@ let native_root_lifetime db = connection db (fun owner ->
   Ok ())
 let native_snapshot_discard db = connection db (fun owner ->
   reset_counts (); execute_gate 2; fail_rollback true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
     D.Statement.with_prepared facade "SELECT 1::BIGINT" ~f:D.Statement.execute)) ~f:(fun join ->
     Exn.protect ~finally:(fun () -> execute_gate 0; fail_rollback false) ~f:(fun () ->
       E.await ~label:"snapshot discard result produced" (fun () -> execute_entered () = 2);
-      ok (B.cancel request); execute_gate 0;
+      B.cancel k; execute_gate 0;
       (match join () with
        | Error { cause = Rollback_failed { primary = { cause = Cancelled; _ }; rollback = { cause = Native _; _ } }; _ } -> ()
        | _ -> failwith "snapshot discard composite");
       check "snapshot detaches before close" (count 6 = 1 && count 7 = 1 && count 4 = 1)));
   expect D.Error.Closed (D.execute owner "SELECT 1"); Ok ())
 let mid_chunk_cancel db = connection db (fun owner ->
-  let request = B.create () and calls = ref 0 in
-  expect D.Error.Cancelled (B.run request owner ~f:(fun facade ->
+  let k = B.canceller () and calls = ref 0 in
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun facade ->
     (D.Request.Session.fold facade
         (D.Request.many D.Fields.[] D.Fields.[int64] ~row:Fn.id "SELECT * FROM range(100)") D.Args.[] ~init:()
-        ~f:(fun _ () -> Int.incr calls; ok (B.cancel request); Ok (D.Continue ())))));
+        ~f:(fun _ () -> Int.incr calls; B.cancel k; Ok (D.Continue ())))));
   check "mid-chunk cancel stops per-row fold" (!calls = 1);
   Stdlib.print_endline "bridge: mid-chunk cancel stops per-row fold=ok";
   Ok ())
+(* One canceller latches every request bound to it; cancelling a settled
+   canceller is a no-op. *)
+let canceller_fan_out db = connection db (fun owner ->
+  let k = B.canceller () in
+  check "unbound canceller pending" (Poly.equal (B.settlement k) B.Pending);
+  ok (B.run (B.request k) owner ~f:(fun _ -> Ok ()));
+  check "settled canceller" (Poly.equal (B.settlement k) B.Settled);
+  B.cancel k;
+  B.cancel k;
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun _ -> failwith "latched canceller ran a later request"));
+  (* Cancelling during one request also latches a sibling bound earlier. *)
+  let k = B.canceller () in
+  let first = B.request k and second = B.request k in
+  expect D.Error.Cancelled (B.run first owner ~f:(fun _ -> B.cancel k; Ok ()));
+  check "sibling still pending" (Poly.equal (B.settlement k) B.Pending);
+  expect D.Error.Cancelled (B.run second owner ~f:(fun _ -> failwith "fan-out missed a bound request"));
+  check "siblings settled" (Poly.equal (B.settlement k) B.Settled);
+  Stdlib.print_endline "bridge: canceller fan-out, settled cancel no-op=ok";
+  D.execute owner "SELECT 1")
+(* A long-lived canceller: settled requests leave its fan-out set, yet it
+   stays Settled and later cancellation is still a no-op for them. *)
+let canceller_reuse db = connection db (fun owner ->
+  let k = B.canceller () in
+  for i = 1 to 200 do
+    ok (B.run (B.request k) owner ~f:(fun facade -> D.execute facade "SELECT 1"));
+    check "reused canceller settled" (Poly.equal (B.settlement k) B.Settled);
+    if i = 100 then (
+      (* A pending request keeps it Pending until that request settles. *)
+      let pending = B.request k in
+      check "bound pending request" (Poly.equal (B.settlement k) B.Pending);
+      ok (B.run pending owner ~f:(fun _ -> Ok ())))
+  done;
+  B.cancel k;
+  check "cancel after reuse no-op" (Poly.equal (B.settlement k) B.Settled);
+  expect D.Error.Cancelled (B.run (B.request k) owner ~f:(fun _ -> failwith "latched reused canceller ran"));
+  Stdlib.print_endline "bridge: reused canceller 200 settled requests, settled=ok";
+  D.execute owner "SELECT 1")
 let run () =
   Stdlib.Printexc.record_backtrace true;
   memory (fun db ->
     List.iter ["native_admission_failures", native_admission_failures; "native_lifecycle", native_lifecycle; "native_root_lifetime", native_root_lifetime;
       "native_snapshot_discard", native_snapshot_discard; "aliases", aliases; "pre_entry", pre_entry; "live_children", live_children;
       "concurrent", concurrent; "transactions", transactions; "snapshots", snapshots; "traversal", traversal; "diagnostics", diagnostics; "effects_and_rollback", effects_and_rollback;
-      "parquet", parquet; "mid_chunk_cancel", mid_chunk_cancel] ~f:(fun (name, test) ->
+      "parquet", parquet; "mid_chunk_cancel", mid_chunk_cancel; "canceller_fan_out", canceller_fan_out; "canceller_reuse", canceller_reuse] ~f:(fun (name, test) ->
         Stdlib.print_endline name; ok (test db)); Ok ());
   check "no native resources" (Duckdb_ffi.live_resources () = 0);
   check "no fallback reclamation" (Duckdb_ffi.fallback_reclaims () = 0);

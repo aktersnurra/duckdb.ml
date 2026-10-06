@@ -20,7 +20,7 @@ type lifecycle = Accepting | Stopping | Stopped
 type request_state = Admitted | Waiting of Eio.Cancel.t | Running | Settled
 exception Remove_waiter
 type request = {
-  bridge : Duckdb.Bridge.request;
+  canceller : Duckdb.Bridge.canceller;
   mutable cancelled : bool;
   mutable state : request_state;
   settlement : unit Eio.Promise.t;
@@ -85,7 +85,7 @@ let cancel request =
   | Admitted | Settled -> ()
   | Waiting cc -> Eio.Cancel.cancel cc Remove_waiter
   | Running ->
-    match Duckdb.Bridge.cancel request.bridge with Ok () | Error { cause = Duckdb.Error.Closed; _ } -> () | Error _ -> ()
+    Duckdb.Bridge.cancel request.canceller
 let is_accepting t = locked t (fun () -> Poly.equal t.lifecycle Accepting)
 let start_shutdown t failures =
   let start = locked t (fun () ->
@@ -179,7 +179,7 @@ let create ~sw limits config =
               start_shutdown pool [];
               deliver (Error (failures @ errors (Eio.Promise.await pool.shutdown_done)))))
 
-let submit : type a. pool -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (a, Duckdb.Error.t) result) -> (a, error) result =
+let submit : type a. pool -> reuse:bool -> (W.slot -> Duckdb.Bridge.request @ unique -> (a, Duckdb.Error.t) result) -> (a, error) result =
  fun t ~reuse run ->
   if W.is_in_callback () then Error Reentrant_call
   else (
@@ -195,7 +195,7 @@ let submit : type a. pool -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (
     | Error e -> Error e
     | Ok () ->
       let settlement, resolve_settlement = Eio.Promise.create () in
-      let request = { bridge = Duckdb.Bridge.create (); cancelled = false; state = Admitted; settlement } in
+      let request = { canceller = Duckdb.Bridge.canceller (); cancelled = false; state = Admitted; settlement } in
       let completion, resolve = Eio.Promise.create () in
       locked t (fun () -> t.active <- request :: t.active);
       (* Admission through fork is scheduler-local and non-yielding except for
@@ -228,7 +228,7 @@ let submit : type a. pool -> reuse:bool -> (W.slot -> Duckdb.Bridge.request -> (
               else (
                 let owner = locked t (fun () -> Option.value_exn (Queue.dequeue t.idle)) in
                 slot := Some owner;
-                Finished (offload Operation (fun () -> run owner request.bridge)))
+                Finished (offload Operation (fun () -> run owner (Duckdb.Bridge.request request.canceller))))
             with
             | Remove_waiter | Eio.Cancel.Cancelled Remove_waiter -> Rejected
             | ex -> Finished (Error [raised Operation ex]) in

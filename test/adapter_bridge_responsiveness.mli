@@ -17,11 +17,11 @@ val executions : unit -> int
 val joins : unit -> int
 val finish_calls : unit -> int
 val locked_engine_calls : unit -> int
-val work : seam -> Duckdb.Bridge.request -> (unit, Duckdb.Error.t) result
-val suppressed_work : Duckdb.Bridge.request -> (unit, Duckdb.Error.t) result
-val reused_work : Duckdb.Bridge.request -> Duckdb.Bridge.request -> (unit, Duckdb.Error.t) result
+val work : seam -> Duckdb.Bridge.canceller -> (unit, Duckdb.Error.t) result
+val suppressed_work : Duckdb.Bridge.canceller -> (unit, Duckdb.Error.t) result
+val reused_work : Duckdb.Bridge.canceller -> Duckdb.Bridge.canceller -> (unit, Duckdb.Error.t) result
 val check_outcome : seam -> (unit, Duckdb.Error.t) result -> unit
-val check_settled : Duckdb.Bridge.request -> unit
+val check_settled : Duckdb.Bridge.canceller -> unit
 val check_inventory : unit -> unit
 
 exception Worker_failure
@@ -30,5 +30,5 @@ exception Cleanup_failure
 (** Real Bridge callback exception, followed by native rollback; the optional
     cleanup exception is injected at the ordinary rollback ABI on that worker.
     The callback's named source frame and composite must survive transport. *)
-val exceptional_work : fail_cleanup:bool -> Duckdb.Bridge.request -> unit
+val exceptional_work : fail_cleanup:bool -> Duckdb.Bridge.canceller -> unit
 val check_exception : fail_cleanup:bool -> unit Evidence_support.outcome -> unit

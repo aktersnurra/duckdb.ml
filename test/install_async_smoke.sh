@@ -93,7 +93,7 @@ for name in private_resource private_worker forge_request forge_pointer domain b
     grep -Fq 'result' "$work/$name.log"
     ;;
   private_resource)
-    grep -Fq 'Duckdb__Resource.Bridge.create' "$work/$name.log"
+    grep -Fq 'Duckdb__Resource.Bridge.canceller' "$work/$name.log"
     grep -Fq 'Unbound module "Duckdb__Resource"' "$work/$name.log"
     ;;
   forge_request)

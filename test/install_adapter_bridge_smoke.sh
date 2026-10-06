@@ -78,11 +78,11 @@ for name in private_resource forge_request forge_pointer domain borrowed; do
   grep -Fq 'File "main.ml", line 1' "$work/$name.log"
   case "$name" in
   private_resource)
-    grep -Fq 'Duckdb__Resource.Bridge.create' "$work/$name.log"
+    grep -Fq 'Duckdb__Resource.Bridge.canceller' "$work/$name.log"
     grep -Fq 'Unbound module "Duckdb__Resource"' "$work/$name.log"
     ;;
   forge_request)
-    grep -Fq 'Duckdb.Bridge.cancel ()' "$work/$name.log"
+    grep -Fq 'Duckdb.Bridge.run ()' "$work/$name.log"
     grep -Fq 'type "unit"' "$work/$name.log"
     grep -Fq '"Duckdb.Bridge.request"' "$work/$name.log"
     ;;

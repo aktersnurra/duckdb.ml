@@ -42,7 +42,7 @@ type _ operation =
   | Parquet_export : string * string -> unit operation
   (* A typed request: its own outcome is the payload, so request errors reach
      the caller as values and cancellation/failures keep the adapter's rules. *)
-  | Typed : (W.slot -> Duckdb.Bridge.request -> ('a, Duckdb.Error.t) result)
+  | Typed : (W.slot -> Duckdb.Bridge.request @ unique -> ('a, Duckdb.Error.t) result)
       -> ('a, Duckdb.Error.t) result operation
 
 type pool =
@@ -74,7 +74,7 @@ and 'a request =
   ; mutable state : request_state
   ; mutable node : packed Doubly_linked.Elt.t option
   ; mutable operation : 'a operation option
-  ; mutable bridge : Duckdb.Bridge.request option
+  ; mutable canceller : Duckdb.Bridge.canceller option
   ; mutable outcome : ('a, failure) result option
   }
 and packed = Pack : 'a request -> packed
@@ -121,7 +121,7 @@ let with_gate gate f =
 let latched r = with_gate r.gate (fun () -> r.gate.cancelled)
 let latch r =
   with_gate r.gate (fun () -> r.gate.cancelled <- true);
-  Option.iter r.bridge ~f:(fun bridge -> ignore (Duckdb.Bridge.cancel bridge : (unit, Duckdb.Error.t) result))
+  Option.iter r.canceller ~f:Duckdb.Bridge.cancel
 let classify r result =
   if not (latched r) then result
   else match result with
@@ -130,7 +130,7 @@ let classify r result =
 let finish (r : _ request) result =
   r.state <- Finished;
   r.operation <- None;
-  r.bridge <- None;
+  r.canceller <- None;
   r.outcome <- None;
   Ivar.fill_exn r.result (classify r result);
   notify r.observer (Option.value_exn (Ivar.peek r.result))
@@ -245,8 +245,8 @@ and dispatch : type a. pool -> slot -> a request -> unit = fun pool slot r ->
   slot.state <- Leased;
   slot.lease <- Some (Pack r);
   r.state <- Dispatched;
-  let bridge = Duckdb.Bridge.create () in
-  r.bridge <- Some bridge;
+  let canceller = Duckdb.Bridge.canceller () in
+  r.canceller <- Some canceller;
   let owner = Option.value_exn slot.owner in
   let operation = Option.value_exn r.operation in
   r.operation <- None;
@@ -259,7 +259,7 @@ and dispatch : type a. pool -> slot -> a request -> unit = fun pool slot r ->
     let result =
       if not enter then Error (Expected Cancelled)
       else
-        let run : a operation -> (a, Duckdb.Error.t) result = function
+        let run (bridge @ unique) : a operation -> (a, Duckdb.Error.t) result = function
           | Execute sql -> W.execute owner bridge sql
           | Transaction f -> W.transaction owner bridge ~f
           | Query (sql, fields, row) -> W.query owner bridge sql fields ~row
@@ -267,7 +267,7 @@ and dispatch : type a. pool -> slot -> a request -> unit = fun pool slot r ->
           | Parquet_fold_rows (names, fields, row, init, f) -> W.parquet_fold_rows owner bridge names fields ~row ~init ~f
           | Parquet_export (query, destination) -> W.parquet_export owner bridge ~query ~destination
           | Typed work -> Ok (work owner bridge) in
-        core (fun () -> run operation) in
+        core (fun () -> run (Duckdb.Bridge.request canceller) operation) in
     with_gate gate (fun () -> gate.execution <- Returned);
     result in
   don't_wait_for (offload slot.helper work >>| fun result ->
@@ -352,7 +352,7 @@ let admit pool operation =
       else (
         let r = { pool; observer = Monitor.current (); result = Ivar.create ()
           ; gate = { mutex = Gate_mutex.create (); execution = Awaiting_entry; cancelled = false }
-          ; state = Queued; node = None; operation = Some operation; bridge = None; outcome = None } in
+          ; state = Queued; node = None; operation = Some operation; canceller = None; outcome = None } in
         under_producer pool (fun () -> match idle with
           | Some slot -> dispatch pool slot r
           | None -> r.node <- Some (Doubly_linked.insert_last pool.queue (Pack r)));

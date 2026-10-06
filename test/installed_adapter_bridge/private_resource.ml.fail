@@ -1,1 +1,1 @@
-let forged = Duckdb__Resource.Bridge.create ()
+let forged = Duckdb__Resource.Bridge.canceller ()

@@ -33,8 +33,8 @@ CONTROLS = {
         "typed_values_and_failures",
         "query one Operation worker",
         "duckdb_eio.ml",
-        "Finished (offload Operation (fun () -> run owner request.bridge))",
-        "let _ = offload Operation (fun () -> Ok ()) in Finished (offload Operation (fun () -> run owner request.bridge))",
+        "Finished (offload Operation (fun () -> run owner (Duckdb.Bridge.request request.canceller)))",
+        "let _ = offload Operation (fun () -> Ok ()) in Finished (offload Operation (fun () -> run owner (Duckdb.Bridge.request request.canceller)))",
     ),
     "bypass_selected_end_row": (
         "native_cancellation",

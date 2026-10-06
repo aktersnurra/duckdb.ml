@@ -46,13 +46,21 @@ type transaction
    cancellation-driven/terminal cleanup joins before destruction or lease release.
    Any actual native delivery makes the owner discard-only. *)
 module Bridge : sig
-  type request
+  (* A canceller is shareable and latches every request bound to it; cancelling
+     after its requests settled is a no-op. A handle is a request's state; it runs once.
+     [settlement] is [Settled] once at least one request is bound and every
+     bound request finished. *)
+  type canceller
+  type handle
   type settlement = Pending | Settled
-  val create : unit -> request
-  val cancel : request -> (unit, error) result
-  val settlement : request -> settlement
-  (* Bridge failures are in the [Connection] context; callback errors pass through. *)
-  val run : request -> connection ->
+  val canceller : unit -> canceller
+  val request : canceller -> handle
+  val cancel : canceller -> unit
+  val settlement : canceller -> settlement
+  (* Bridge failures are in the [Connection] context; callback errors pass through.
+     A handle runs once; a second run is a runtime [Closed]/[Busy] (the public
+     facade makes it a type error). *)
+  val run : handle -> connection ->
     f:(connection -> ('a, Failure.t) result) -> ('a, Failure.t) result
 end
 val open_database : Config.t -> (database, error) result

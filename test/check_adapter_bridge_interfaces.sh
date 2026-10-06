@@ -22,11 +22,11 @@ for name in private_resource forge_request forge_pointer domain; do
   grep -Fq "File \"$name.ml\", line 1" "$name.out"
   case "$name" in
   private_resource)
-    grep -Fq 'Duckdb__Resource.Bridge.create' "$name.out"
+    grep -Fq 'Duckdb__Resource.Bridge.canceller' "$name.out"
     grep -Fq 'Unbound module "Duckdb__Resource"' "$name.out"
     ;;
   forge_request)
-    grep -Fq 'Duckdb.Bridge.cancel ()' "$name.out"
+    grep -Fq 'Duckdb.Bridge.run ()' "$name.out"
     grep -Fq 'type "unit"' "$name.out"
     grep -Fq '"Duckdb.Bridge.request"' "$name.out"
     ;;

@@ -1,1 +1,1 @@
-let forged = Duckdb.Bridge.cancel ()
+let forged connection = Duckdb.Bridge.run () connection ~f:(fun _ -> Ok ())

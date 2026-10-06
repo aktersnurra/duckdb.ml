@@ -16,10 +16,17 @@ type 'k session = 'k Session.t
 type connection = [ `Connection ] session
 type transaction = [ `Transaction ] session
 module Bridge = struct
-  include R.Bridge
-  let cancel request = within Connection (cancel request)
-  let run request (Session.Connection c : connection @ local) ~f =
-    R.Bridge.run request c ~f:(fun facade -> f (Session.Connection facade))
+  type canceller = R.Bridge.canceller
+  (* A fresh record per request carries the uniqueness; the payload is aliased
+     so that consuming the record does not consume the canceller's state (P1). *)
+  type request = { cell : R.Bridge.handle @@ aliased }
+  type settlement = R.Bridge.settlement = Pending | Settled
+  let canceller = R.Bridge.canceller
+  let request k : request @ unique = { cell = R.Bridge.request k }
+  let cancel = R.Bridge.cancel
+  let settlement = R.Bridge.settlement
+  let run (r @ unique) (Session.Connection c : connection @ local) ~f =
+    R.Bridge.run r.cell c ~f:(fun facade -> f (Session.Connection facade))
 end
 let execute (s @ local) sql = within (Query sql) (match Session.within s with
   | None -> R.execute (Session.connection s) sql

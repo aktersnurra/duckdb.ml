@@ -34,13 +34,13 @@ let with_pair f =
 let commit_case ~snapshot point _ = with_pair (fun owner observer ->
   reset (); gate point true;
   if point = 67 || point = 68 then selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result = if snapshot then D.Statement.with_prepared c "INSERT INTO cp VALUES(1) RETURNING x" ~f:D.Statement.execute
     else D.with_transaction c ~f:(fun tx -> D.execute tx "INSERT INTO cp VALUES(1)") in
     cancelled (D.execute c "INSERT INTO cp VALUES(2)"); result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request);
+      wait point; B.cancel k;
       if point = 67 || point = 68 then E.await ~label:"COMMIT actually selected" selected_entered;
       gate point false;
       if point = 67 || point = 68 then (
@@ -54,10 +54,10 @@ let commit_case ~snapshot point _ = with_pair (fun owner observer ->
       check "independent committed row observer" (Int64.equal (scalar observer "SELECT count(*) FROM cp") (if point = 65 then 0L else 1L)))))
 let begin_case point _ = with_pair (fun owner observer ->
   reset (); gate point true; if point = 66 then selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c -> D.with_transaction c ~f:(fun _ -> failwith "cancelled BEGIN callback")))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c -> D.with_transaction c ~f:(fun _ -> failwith "cancelled BEGIN callback")))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request);
+      wait point; B.cancel k;
       if point = 66 then E.await ~label:"BEGIN selected" selected_entered;
       gate point false; selected_gate false; cancelled (join ());
       check "BEGIN native decision suppresses SQL and rollback" (count 6 = (if point = 64 then 0 else 1) && count 8 = (if point = 64 then 0 else 1));
@@ -76,14 +76,14 @@ let publication point owner = with_directory (fun dir ->
   let file = Stdlib.Filename.concat dir "out.parquet" in
   let destination = ok (D.Parquet.path file) in
   reset (); gate point true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result = D.Parquet.export c ~query:"SELECT 42::BIGINT AS x" destination in
     cancelled (D.Parquet.export c ~query:"SELECT 1" destination); result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point;
       if point = 72 then check "actual linked file reader before cancel" (String.is_prefix (read_file file) ~prefix:"PAR1");
-      ok (B.cancel request);
+      B.cancel k;
       let attempts = count 50 in
       E.await ~label:"controller completed reserve decision while file held" (fun () -> count 50 > attempts);
       check "filesystem publication never eligible for delivery" (count 51 = 0 && count 4 = 0);
@@ -99,14 +99,14 @@ let reservation_or_copy point owner = with_directory (fun dir ->
   let file = Stdlib.Filename.concat dir "out.parquet" in
   let destination = ok (D.Parquet.path file) in
   reset (); gate point true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result = D.Parquet.export c ~query:"SELECT 42::BIGINT AS x" destination in
     cancelled (D.Parquet.export c ~query:"SELECT 2" destination); result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point;
       check "reservation retains exclusive facade admission" (match D.execute owner "SELECT 1" with Error { cause = Busy; _ } -> true | _ -> false);
-      ok (B.cancel request); gate point false; cancelled (join ());
+      B.cancel k; gate point false; cancelled (join ());
       check "one or suppressed native reservation decision" (count 43 = (if point = 74 then 0 else 1));
       check "exact owned temp syscall count" (count 44 = (if point = 74 then 0 else 1));
       check "COPY next extraction suppressed" (count 45 = (if point <= 77 then 0 else if point = 80 then 2 else 1));
@@ -120,10 +120,10 @@ let next_file owner = with_directory (fun dir ->
   let missing = ok (D.Parquet.path (Stdlib.Filename.concat dir "missing.parquet")) in
   ok (D.Parquet.export owner ~query:"SELECT 1::BIGINT" file);
   reset ();
-  let request = B.create () in
-  cancelled (B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  cancelled (B.run (B.request k) owner ~f:(fun c ->
     D.Parquet.fold c [file;missing] D.Fields.[int64] ~row:Fn.id ~init:()
-      ~f:(fun _ () -> ok (B.cancel request); Ok (D.Continue ()))));
+      ~f:(fun _ () -> B.cancel k; Ok (D.Continue ()))));
   (* The first file's parameterless SELECT is extracted once (no validating
      re-prepare) and executed once; the next file is never extracted. *)
   check "next file has no extraction/execute" (count 0 = 1 && count 2 = 1);
@@ -141,13 +141,13 @@ let has_trace trace name = String.is_substring (Stdlib.Printexc.raw_backtrace_to
 let native_message (e : D.Error.t) = match e.cause with Native message -> not (String.is_empty message) | _ -> false
 let rollback_matrix primary mode owner =
   reset (); control_failure mode;
-  let request = B.create () in
-  let outcome = capture (fun () -> B.run request owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
+  let k = B.canceller () in
+  let outcome = capture (fun () -> B.run (B.request k) owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
     ok (D.execute tx "SELECT 1");
     let error = if String.equal primary "native" then (
       match D.execute tx "SELECT no_such_column" with Error e -> e | Ok () -> failwith "expected SQL failure")
       else { D.Error.context = Transaction; cause = Cancelled } in
-    ok (B.cancel request);
+    B.cancel k;
     if String.equal primary "exception" then raise_control_primary () else Error error))) in
   let primary_matches = if String.equal primary "native" then native_message
     else fun (e : D.Error.t) -> match e.cause with Cancelled -> true | _ -> false in
@@ -166,7 +166,7 @@ let rollback_matrix primary mode owner =
   one_controller ()
 let commit_return_exception _ = with_pair (fun owner observer ->
   reset (); control_failure 3;
-  let outcome = capture (fun () -> B.run (B.create ()) owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
+  let outcome = capture (fun () -> B.run (B.request (B.canceller ())) owner ~f:(fun c -> D.with_transaction c ~f:(fun tx ->
     D.execute tx "INSERT INTO cp VALUES(1)"))) in
   (match outcome with
    | Error (D.Cleanup_exception (secondary, Commit_return_failure), trace) ->
@@ -182,11 +182,11 @@ let file_outcome ~rollback ~exists ~cancel ~unlink owner = with_directory (fun d
   let destination = ok (D.Parquet.path file) in
   if exists then (let channel = Stdlib.open_out_bin file in Stdlib.output_string channel "original"; Stdlib.close_out channel);
   reset (); control_failure rollback; unlink_failure unlink; gate 72 true;
-  let request = B.create () in
-  E.with_worker (fun () -> capture (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> capture (fun () -> B.run (B.request k) owner ~f:(fun c ->
     D.Parquet.export c ~query:"SELECT 42::BIGINT" destination)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 72; if cancel then ok (B.cancel request); gate 72 false;
+      wait 72; if cancel then B.cancel k; gate 72 false;
       let primary_matches (e : D.Error.t) = match e.cause with
         | Destination_exists -> exists | Cancelled -> cancel && not exists | _ -> false in
       (match join () with
@@ -209,11 +209,11 @@ let file_outcome ~rollback ~exists ~cancel ~unlink owner = with_directory (fun d
       one_controller ())))
 let snapshot_rollback ~exception_ mode _ = with_pair (fun owner observer ->
   reset (); control_failure mode; snapshot_exception exception_; gate 6 true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> capture (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> capture (fun () -> B.run (B.request k) owner ~f:(fun c ->
     D.Statement.with_prepared c (if exception_ then "INSERT INTO cp VALUES(1) RETURNING x" else "SELECT CAST('invalid' AS BIGINT)") ~f:D.Statement.execute)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 6; ok (B.cancel request); E.await ~label:"snapshot selected" selected_entered;
+      wait 6; B.cancel k; E.await ~label:"snapshot selected" selected_entered;
       gate 6 false; E.await ~label:"snapshot rollback joins" (fun () -> count 11 > 0);
       check "snapshot rollback cannot run before retirement" (count 8 = 0 && count 12 = 0 && count 13 = 0);
       selected_gate false;
@@ -235,22 +235,22 @@ let unlink_ordinary owner = with_directory (fun dir ->
   let file = Stdlib.Filename.concat dir "out.parquet" in
   let destination = ok (D.Parquet.path file) in
   reset (); gate 73 true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c -> D.Parquet.export c ~query:"SELECT 42::BIGINT" destination))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c -> D.Parquet.export c ~query:"SELECT 42::BIGINT" destination))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait 73; check "ordinary unlink retains controller" (count 49 = 0 && count 12 = 0);
-      ok (B.cancel request); gate 73 false; cancelled (join ());
+      B.cancel k; gate 73 false; cancelled (join ());
       check "ordinary unlink never interruptible and no later COMMIT" (count 4 = 0 && count 7 = 0 && count 8 = 1);
       check "ordinary admitted unlink removes only temp" (Array.length (Stdlib.Sys.readdir dir) = 1 && String.is_prefix (read_file file) ~prefix:"PAR1");
       one_controller ())))
 let control_cleanup ~commit _ = with_pair (fun owner observer ->
   let point = if commit then 68 else 66 in
   reset (); gate point true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     D.with_transaction c ~f:(fun tx -> D.execute tx "INSERT INTO cp VALUES(1)")))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request); E.await ~label:"control cleanup selected" selected_entered;
+      wait point; B.cancel k; E.await ~label:"control cleanup selected" selected_entered;
       gate 7 true; gate point false; wait 7;
       check "control internal destruction before ML join" (count 11 = 0);
       selected_gate false; E.await ~label:"control cleanup selected retired" (fun () -> count 17 = 1);

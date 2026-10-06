@@ -23,22 +23,22 @@ module type S = sig
   val connect : database -> (slot, Duckdb.Error.t) result
   val close_slot : slot -> (unit, Duckdb.Error.t) result
   val close_database : database -> (unit, Duckdb.Error.t) result
-  val execute : slot -> Duckdb.Bridge.request -> string -> (unit, Duckdb.Error.t) result
-  val transaction : slot -> Duckdb.Bridge.request -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
-  val query : slot -> Duckdb.Bridge.request -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, Duckdb.Error.t) result
-  val fold_rows : slot -> Duckdb.Bridge.request -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
+  val execute : slot -> Duckdb.Bridge.request @ unique -> string -> (unit, Duckdb.Error.t) result
+  val transaction : slot -> Duckdb.Bridge.request @ unique -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
+  val query : slot -> Duckdb.Bridge.request @ unique -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> ('row list, Duckdb.Error.t) result
+  val fold_rows : slot -> Duckdb.Bridge.request @ unique -> string -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
-  val parquet_fold_rows : slot -> Duckdb.Bridge.request -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
+  val parquet_fold_rows : slot -> Duckdb.Bridge.request @ unique -> string list -> (_, 'fn, 'row) Duckdb.Fields.t -> row:'fn -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
-  val parquet_export : slot -> Duckdb.Bridge.request -> query:string -> destination:string -> (unit, Duckdb.Error.t) result
+  val parquet_export : slot -> Duckdb.Bridge.request @ unique -> query:string -> destination:string -> (unit, Duckdb.Error.t) result
 
   (** Typed requests (each one bridged request). Bridge failures are reported
       in the request's context; row callbacks run inside the callback marker. *)
-  val request_run : slot -> Duckdb.Bridge.request -> ('row, 'out) Duckdb.Owned.shape ->
+  val request_run : slot -> Duckdb.Bridge.request @ unique -> ('row, 'out) Duckdb.Owned.shape ->
     ('p, 'row, _) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('out, Duckdb.Error.t) result
-  val request_transaction : slot -> Duckdb.Bridge.request ->
+  val request_transaction : slot -> Duckdb.Bridge.request @ unique ->
     f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
-  val table_ingest : slot -> Duckdb.Bridge.request -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
+  val table_ingest : slot -> Duckdb.Bridge.request @ unique -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
     (unit, Duckdb.Error.t) result
 
   (** Thread-local callback marker; reading it never touches a scheduler. *)

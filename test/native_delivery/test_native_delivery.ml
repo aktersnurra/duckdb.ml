@@ -30,37 +30,37 @@ let with_owner f =
     Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection owner)) ~f:(fun () -> f owner))
 let controller_lifecycle owner =
   reset ();
-  let request = B.create () in
+  let k = B.canceller () in
   check "Fresh has no controller" (count 10 = 0);
-  ok (B.run request owner ~f:(fun facade ->
+  ok (B.run (B.request k) owner ~f:(fun facade ->
     check "controller started before callback" (count 10 = 1 && count 12 = 0);
     D.execute facade "SELECT 1"));
-  one_controller (); settled request;
+  one_controller (); settled k;
   check "no idle delivery" (count 4 = 0);
   ok (D.execute owner "SELECT 1")
 exception Start_failure
-let start_failure_frame request owner =
-  let outcome = B.run request owner ~f:(fun _ -> failwith "start failure callback ran") in
+let start_failure_frame k owner =
+  let outcome = B.run (B.request k) owner ~f:(fun _ -> failwith "start failure callback ran") in
   ignore (Sys.opaque_identity outcome)
 let controller_failure owner =
   reset (); Stdlib.Callback.Safe.register_exception "delivery_start_failure" Start_failure;
-  let request = B.create () in
+  let k = B.canceller () in
   fail_start true;
   Exn.protect ~finally:release ~f:(fun () ->
-    (match E.capture (fun () -> start_failure_frame request owner) with
+    (match E.capture (fun () -> start_failure_frame k owner) with
      | E.Raised failure ->
        check "start failure identity" (phys_equal failure.exception_ Start_failure);
        check "start failure backtrace"
          (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string failure.backtrace) ~substring:"start_failure_frame")
      | _ -> failwith "expected controller creation failure");
-    settled request;
+    settled k;
     check "failed start detached without join or SQL" (count 10 = 1 && count 11 = 0 && count 13 = 1 && count 0 = 0));
   ok (D.execute owner "SELECT 1")
 let running ~transaction ~recover owner =
   reset (); gate 5 true; gate 10 true;
   if transaction then gate 11 true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
     if recover then (
       (match D.with_transaction facade ~f:(fun _ -> Error { D.Error.context = Transaction; cause = Embedded_nul }) with
        | Error { cause = Embedded_nul; _ } -> () | _ -> failwith "recoverable rollback outcome");
@@ -73,7 +73,7 @@ let running ~transaction ~recover owner =
       let fallback = Duckdb_ffi.fallback_reclaims () in
       Stdlib.Gc.full_major (); Stdlib.Gc.full_major ();
       check "live controller/worker owner graph survives GC" (Duckdb_ffi.fallback_reclaims () = fallback);
-      ok (B.cancel request); wait_count 4 1;
+      B.cancel k; wait_count 4 1;
       let before = count 4 in
       gate 5 false;
       if transaction then (
@@ -88,15 +88,15 @@ let running ~transaction ~recover owner =
          check "real native interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
        | _ -> failwith "native interrupted return was flattened");
       check "persistent delivery survives real execute reset" (count 4 > before && count 3 = 1);
-      one_controller (); settled request;
+      one_controller (); settled k;
       check "actual delivered owner discarded" (count 5 = 1);
       check "interrupted owner not reusable" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false)))
 let between_subcalls point owner =
   reset (); gate point true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade -> D.execute facade "SELECT 1"))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade -> D.execute facade "SELECT 1"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request);
+      wait point; B.cancel k;
       E.await ~label:"selected before subcall completion" selected_entered;
       gate point false;
       wait_count 11 1;
@@ -104,66 +104,66 @@ let between_subcalls point owner =
       check "no detach before selected retirement" (count 13 = 0 && count 12 = 0 && count 5 = 0);
       selected_gate false; cancelled (join ());
       check "selected delivery rechecked after disarm" (count 4 = 0 && count 16 = 1 && count 17 = 1);
-      one_controller (); settled request));
+      one_controller (); settled k));
   (* No Delivered: a fresh request can reuse the same owner, never identity A. *)
-  ok (B.run (B.create ()) owner ~f:(fun facade -> D.execute facade "SELECT 2"));
+  ok (B.run (B.request (B.canceller ())) owner ~f:(fun facade -> D.execute facade "SELECT 2"));
   check "stale A never reaches fresh B" (count 4 = 0 && count 10 = 2 && count 12 = 2)
 let cleanup_exclusion destructor owner =
   reset (); gate 6 true; gate destructor true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade -> D.execute facade "SELECT 1"))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade -> D.execute facade "SELECT 1"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 6; ok (B.cancel request);
+      wait 6; B.cancel k;
       E.await ~label:"selected after native success" selected_entered;
       gate 6 false; wait destructor;
-      pending request;
+      pending k;
       check "internal destructor precedes terminal join" (count 11 = 0 && count 13 = 0);
       selected_gate false; wait_count 17 1;
       check "post-pause delivery excluded inside destructor" (count 4 = 0 && count 16 = 1);
       gate destructor false; cancelled (join ());
-      one_controller (); settled request));
+      one_controller (); settled k));
   ok (D.execute owner "SELECT 2")
 let idle_cancel owner =
   reset ();
-  let request = B.create () in
-  cancelled (B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  cancelled (B.run (B.request k) owner ~f:(fun facade ->
     ok (D.execute facade "SELECT 1");
     let before = count 0 in
-    ok (B.cancel request); cancelled (D.execute facade "SELECT 2");
+    B.cancel k; cancelled (D.execute facade "SELECT 2");
     check "idle cancel suppresses next user call" (count 0 = before && count 4 = 0);
     Ok ()));
   one_controller (); ok (D.execute owner "SELECT 3")
 let rollback_race ~before owner =
   reset (); gate 11 true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
     (match D.with_transaction facade ~f:(fun tx ->
       ok (D.execute tx "SELECT 1");
-      if before then ok (B.cancel request);
+      if before then B.cancel k;
       Error { D.Error.context = Transaction; cause = Embedded_nul }) with Error { cause = Embedded_nul; _ } -> () | _ -> failwith "rollback primary preserved");
     cancelled (D.execute facade "SELECT 2"); Ok ()))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 11; pending request;
+      wait 11; pending k;
       if before then check "pre-cancel rollback joins first" (count 12 = 1)
       else (check "ordinary admitted rollback retains controller" (count 12 = 0);
-            ok (B.cancel request));
+            B.cancel k);
       check "rollback excludes delivery" (count 4 = 0 && count 13 = 0);
       gate 11 false; cancelled (join ());
-      one_controller (); settled request;
+      one_controller (); settled k;
       check "rollback did not commit" (count 8 = 1 && count 7 = 0)));
   ok (D.execute owner "SELECT 3")
 let snapshot_rollback_race ~before owner =
   ok (D.execute owner "CREATE TABLE snapshot_delivery (i BIGINT NOT NULL)");
   reset (); gate 11 true;
   if before then (gate 6 true; selected_gate true);
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
     ok (D.Statement.with_prepared facade "INSERT INTO snapshot_delivery VALUES (NULL) RETURNING i" ~f:(fun prepared ->
       native_error (D.Statement.execute prepared); Ok ()));
     cancelled (D.execute facade "SELECT 2"); Ok ()))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       if before then (
-        wait 6; ok (B.cancel request);
+        wait 6; B.cancel k;
         E.await ~label:"Query selected before snapshot rollback" selected_entered;
         gate 6 false; wait_count 11 1;
         (* Query execute now admits USER. Retire its deliberately paused attempt
@@ -171,35 +171,35 @@ let snapshot_rollback_race ~before owner =
         selected_gate false);
       wait 11;
       if before then check "snapshot cancellation joins before rollback" (count 12 = 1)
-      else (check "ordinary snapshot rollback retains controller" (count 12 = 0); ok (B.cancel request));
+      else (check "ordinary snapshot rollback retains controller" (count 12 = 0); B.cancel k);
       check "snapshot rollback is noninterruptible" (count 4 = 0);
-      gate 11 false; cancelled (join ()); one_controller (); settled request;
+      gate 11 false; cancelled (join ()); one_controller (); settled k;
       check "snapshot rollback no commit" (count 8 = 1 && count 7 = 0)));
   ok (D.execute owner "SELECT 3")
 let before_native point owner =
   reset (); gate point true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade -> D.execute facade "SELECT 1"))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade -> D.execute facade "SELECT 1"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; pending request; ok (B.cancel request); gate point false;
-      cancelled (join ()); settled request;
+      wait point; pending k; B.cancel k; gate point false;
+      cancelled (join ()); settled k;
       check "cancel before native admission suppresses extraction" (count 0 = 0 && count 4 = 0);
       if point = 12 then check "cancel during binding starts no controller" (count 10 = 0 && count 13 = 1)
       else one_controller ()));
-  ok (B.run (B.create ()) owner ~f:(fun facade -> D.execute facade "SELECT 2"))
+  ok (B.run (B.request (B.canceller ())) owner ~f:(fun facade -> D.execute facade "SELECT 2"))
 (* Statements are scoped: the scope's close is the child cleanup. The
    statement callback cannot capture the facade, so the cancelled operation is
    the live statement's own execution. *)
 let cancelled_child_cleanup owner =
   reset (); gate 6 true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade ->
     D.Statement.with_prepared facade "SELECT 2" ~f:(fun p ->
       let result = D.Statement.execute p in
       gate 8 true;
       result)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 6; ok (B.cancel request);
+      wait 6; B.cancel k;
       E.await ~label:"child cleanup selected ticket" selected_entered;
       gate 6 false;
       E.await ~label:"child cleanup join or destructor" (fun () -> count 11 > 0 || entered 8 > 0);
@@ -210,20 +210,20 @@ let cancelled_child_cleanup owner =
   ok (D.execute owner "SELECT 3")
 let selected_terminal owner =
   reset (); gate 6 true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun facade -> D.execute facade "SELECT 1"))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun facade -> D.execute facade "SELECT 1"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 6; ok (B.cancel request);
+      wait 6; B.cancel k;
       E.await ~label:"terminal selected ticket" selected_entered;
       gate 6 false; wait_count 11 1;
-      pending request;
+      pending k;
       check "no join completion/detach/close while selected" (count 12 = 0 && count 13 = 0 && count 5 = 0);
       check "owner Busy before retirement" (match D.Owned.close_connection owner with Error { cause = Busy; _ } -> true | _ -> false);
-      check "fresh B cannot reuse before A retirement" (match B.run (B.create ()) owner ~f:(fun _ -> Ok ()) with Error { cause = Busy; _ } -> true | _ -> false);
+      check "fresh B cannot reuse before A retirement" (match B.run (B.request (B.canceller ())) owner ~f:(fun _ -> Ok ()) with Error { cause = Busy; _ } -> true | _ -> false);
       selected_gate false; cancelled (join ());
       check "late ticket skipped" (count 4 = 0 && count 16 = 1 && count 17 = 1);
-      one_controller (); settled request));
-  ok (B.run (B.create ()) owner ~f:(fun facade -> D.execute facade "SELECT 2"));
+      one_controller (); settled k));
+  ok (B.run (B.request (B.canceller ())) owner ~f:(fun facade -> D.execute facade "SELECT 2"));
   check "fresh B receives no stale A delivery" (count 4 = 0)
 let tests = ["controller", controller_lifecycle; "start-failure", controller_failure;
   "running-reset", running ~transaction:false ~recover:false;

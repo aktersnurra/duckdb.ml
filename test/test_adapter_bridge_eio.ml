@@ -29,7 +29,7 @@ let heartbeat clock completion seam =
 let scenario clock slots seam =
   R.reset (); R.hold seam;
   if R.is_interrupted seam then R.hold Execute;
-  let request = B.create () in
+  let request = B.canceller () in
   let completion, publish = Eio.Promise.create () in
   Eio.Switch.run (fun sw ->
     Eio.Fiber.fork ~sw (fun () -> Eio.Promise.resolve publish (submit slots (fun () -> R.work seam request)));
@@ -40,7 +40,7 @@ let scenario clock slots seam =
         let first = if R.is_interrupted seam then R.Execute else seam in
         wait clock "native first entry" (fun () -> R.entered first > 0);
         heartbeat clock completion first;
-        ok (B.cancel request);
+        B.cancel request;
         if R.is_interrupted seam then (
           wait clock "independent controller before reset" (fun () -> R.interrupts () > 0);
           R.release Execute);
@@ -48,7 +48,7 @@ let scenario clock slots seam =
           wait clock "actual cleanup/file seam" (fun () -> R.entered seam > 0);
           heartbeat clock completion seam);
         (match B.settlement request with
-         | Pending -> ok (B.cancel request)
+         | Pending -> B.cancel request
          | Settled -> check "only execute or enclosing database close can follow settlement" (phys_equal seam R.Execute || phys_equal seam R.Database_close); R.check_settled request);
         if List.mem [R.Rollback; R.Disconnect; R.Database_close; R.Appender_clear; R.Appender_destroy; R.Chunk] seam ~equal:phys_equal
         then check "terminal cleanup joins before actual native seam" (R.joins () = 1);
@@ -61,7 +61,7 @@ let scenario clock slots seam =
           (R.name seam) (R.interrupts ()) (R.native_errors ()) (R.joins ()) (R.finish_calls ()) (R.locked_engine_calls ())))
 let dispatched clock slots =
   R.reset ();
-  let request = B.create () in
+  let request = B.canceller () in
   let started = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   let completion, publish = Eio.Promise.create () in
   Eio.Switch.run (fun sw ->
@@ -74,7 +74,7 @@ let dispatched clock slots =
       Eio.Cancel.protect (fun () -> ignore (S.restore (Eio.Promise.await completion))))
       ~f:(fun () ->
         wait clock "actual dispatched worker" (fun () -> Stdlib.Atomic.get started);
-        ok (B.cancel request); ok (B.cancel request);
+        B.cancel request; B.cancel request;
         check "dispatched Pending until actual Bridge.run" (match B.settlement request with Pending -> true | Settled -> false);
         Stdlib.Atomic.set release true;
         (match S.restore (Eio.Promise.await completion) with Error { Duckdb.Error.cause = Cancelled; _ } -> () | _ -> failwith "dispatched suppression");
@@ -83,8 +83,8 @@ let dispatched clock slots =
         Stdlib.print_endline "eio bridge: actual-dispatched cancelled-before-Bridge native-execute=0 controller-join=0"))
 let saturation clock slots =
   R.reset (); R.hold Execute;
-  let requests = [B.create (); B.create ()] in
-  let extra = B.create () in ok (B.cancel extra);
+  let requests = [B.canceller (); B.canceller ()] in
+  let extra = B.canceller () in B.cancel extra;
   let extra_submitted = ref false and extra_started = Stdlib.Atomic.make false in
   Eio.Switch.run (fun sw ->
     let start request extra =
@@ -105,7 +105,7 @@ let saturation clock slots =
       ~f:(fun () ->
         wait clock "two real native workers plus queued submission" (fun () -> R.entered Execute = 2 && !extra_submitted);
         check "additional database job queued at occupied quota" (not (Stdlib.Atomic.get extra_started));
-        List.iter requests ~f:(fun r -> ok (B.cancel r));
+        List.iter requests ~f:(fun r -> B.cancel r);
         wait clock "independent control under occupied database slots" (fun () -> R.interrupted_connections () = 2);
         check "controller bypasses database quota" (not (Stdlib.Atomic.get extra_started));
         R.release Execute;
@@ -119,7 +119,7 @@ let saturation clock slots =
         Stdlib.Printf.printf "eio bridge: database-quota=2 occupied=2 queued=1 distinct-interrupted=2 native-errors=%d joins=%d independent-controller=ok\n%!" (R.native_errors ()) (R.joins ())))
 let protected clock slots ~fail_cleanup =
   R.reset (); R.hold Rollback;
-  let request = B.create () in
+  let request = B.canceller () in
   let completion, publish = Eio.Promise.create () in
   let context, publish_context = Eio.Promise.create () in
   let noticed, publish_noticed = Eio.Promise.create () in
@@ -139,7 +139,7 @@ let protected clock slots ~fail_cleanup =
             failwith "waiter not cancelled"
           with Eio.Cancel.Cancelled _ as cancellation ->
             original := Some cancellation;
-            ok (B.cancel request);
+            B.cancel request;
             Eio.Promise.resolve publish_noticed ();
             let outcome = Eio.Cancel.protect (fun () -> Eio.Promise.await completion) in
             match outcome with
@@ -152,7 +152,7 @@ let protected clock slots ~fail_cleanup =
       Eio.Cancel.cancel cc Requested;
       Eio.Promise.await noticed;
       heartbeat clock completion Rollback;
-      Eio.Cancel.cancel cc Requested; ok (B.cancel request);
+      Eio.Cancel.cancel cc Requested; B.cancel request;
       check "protected settlement did not reraise early" (Option.is_none !observed);
       R.release Rollback));
   (match Option.value_exn !observed with
@@ -165,7 +165,7 @@ let protected clock slots ~fail_cleanup =
   Stdlib.Printf.printf "eio bridge: repeated-cancel protected-settlement=joined real-rollback-heartbeat=ack cleanup-failure=%b original-cancellation+source-trace=ok\n%!" fail_cleanup
 let stale_after_reuse clock slots =
   R.reset (); R.hold Execute;
-  let previous = B.create () and current = B.create () in
+  let previous = B.canceller () and current = B.canceller () in
   let completion, publish = Eio.Promise.create () in
   Eio.Switch.run (fun sw ->
     Eio.Fiber.fork ~sw (fun () -> Eio.Promise.resolve publish (submit slots (fun () -> R.reused_work previous current)));
@@ -182,7 +182,7 @@ let stale_after_reuse clock slots =
         ok (S.restore (Eio.Promise.await completion)); R.check_settled current;
         check "reused B native success without interrupt" (R.executions () = 1 && R.native_errors () = 0 && R.interrupts () = 0);
         R.check_inventory ();
-        Stdlib.print_endline "eio bridge: same-owner-reuse A=Settled B=native-held delayed-A-cancel=Closed B=Ok interrupts=0"))
+        Stdlib.print_endline "eio bridge: same-owner-reuse A=Settled B=native-held delayed-A-cancel=noop B=Ok interrupts=0"))
 let run () =
   Stdlib.Printexc.record_backtrace true;
   Eio_main.run (fun env ->

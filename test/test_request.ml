@@ -153,7 +153,7 @@ let () =
       ok (R.Session.exec c create D.Args.[]);
       ignore (ok (R.Session.collect c rows D.Args.[0L]));
       (* Manual close succeeds with cached statements (finally then repeats it). *)
-      core_ok (D.Bridge.run (D.Bridge.create ()) c ~f:(fun facade -> D.execute facade "SELECT 1"));
+      core_ok (D.Bridge.run (D.Bridge.request (D.Bridge.canceller ())) c ~f:(fun facade -> D.execute facade "SELECT 1"));
       core_ok (D.Owned.close_connection c)));
   clean ();
   Stdlib.print_endline "request: cache hit/oneshot/LRU/disabled/negative config/close and Bridge with cached statements=ok"

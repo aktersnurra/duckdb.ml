@@ -1,0 +1,5 @@
+module D = Duckdb
+let f c =
+  let r = D.Bridge.request (D.Bridge.canceller ()) in
+  let _ = D.Bridge.run r c ~f:(fun _ -> Ok ()) in
+  D.Bridge.run r c ~f:(fun _ -> Ok ())

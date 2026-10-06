@@ -29,14 +29,14 @@ let heartbeat worker seam =
 let scenario slots seam =
   R.reset (); R.hold seam;
   if R.is_interrupted seam then R.hold Execute;
-  let request = B.create () in
+  let request = B.canceller () in
   let worker = submit slots (fun () -> R.work seam request) in
   Monitor.protect ~finally:(fun () -> R.release_all (); worker >>| fun result -> ignore (S.restore result))
     (fun () ->
       let first = if R.is_interrupted seam then R.Execute else seam in
       wait "native first entry" (fun () -> R.entered first > 0) >>= fun () ->
       heartbeat worker first >>= fun () ->
-      ok (B.cancel request);
+      B.cancel request;
       (if R.is_interrupted seam then
         wait "independent controller before reset" (fun () -> R.interrupts () > 0)
        else return ()) >>= fun () ->
@@ -45,7 +45,7 @@ let scenario slots seam =
         wait "actual cleanup/file seam" (fun () -> R.entered seam > 0) >>= fun () -> heartbeat worker seam
        else return ()) >>= fun () ->
       (match B.settlement request with
-       | Pending -> ok (B.cancel request)
+       | Pending -> B.cancel request
        | Settled -> check "only execute or enclosing database close can follow settlement" (phys_equal seam R.Execute || phys_equal seam R.Database_close); R.check_settled request);
       if List.mem [R.Rollback; R.Disconnect; R.Database_close; R.Appender_clear; R.Appender_destroy; R.Chunk] seam ~equal:phys_equal
       then check "terminal cleanup joins before native seam" (R.joins () = 1);
@@ -58,7 +58,7 @@ let scenario slots seam =
         (R.name seam) (R.interrupts ()) (R.native_errors ()) (R.joins ()) (R.finish_calls ()) (R.locked_engine_calls ()))
 let dispatched slots =
   R.reset ();
-  let request = B.create () in
+  let request = B.canceller () in
   let started = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   let worker = submit slots (fun () ->
     Stdlib.Atomic.set started true;
@@ -67,7 +67,7 @@ let dispatched slots =
   Monitor.protect ~finally:(fun () -> Stdlib.Atomic.set release true; worker >>| fun outcome -> ignore (S.restore outcome))
     (fun () ->
       wait "actual dispatched worker" (fun () -> Stdlib.Atomic.get started) >>= fun () ->
-      ok (B.cancel request); ok (B.cancel request);
+      B.cancel request; B.cancel request;
       check "dispatched request pending until worker enters" (match B.settlement request with Pending -> true | Settled -> false);
       Stdlib.Atomic.set release true;
       worker >>| fun outcome ->
@@ -77,9 +77,9 @@ let dispatched slots =
       printf "async bridge: actual-dispatched cancelled-before-Bridge native-execute=0 controller-join=0\n%!")
 let saturation slots =
   R.reset (); R.hold Execute;
-  let requests = [B.create (); B.create ()] in
+  let requests = [B.canceller (); B.canceller ()] in
   let workers = List.map requests ~f:(fun request -> submit slots (fun () -> R.work Execute request)) in
-  let queued = B.create () in ok (B.cancel queued);
+  let queued = B.canceller () in B.cancel queued;
   let extra_started = Stdlib.Atomic.make false in
   let extra = submit slots (fun () -> Stdlib.Atomic.set extra_started true; R.suppressed_work queued) in
   let joined = Deferred.all (extra :: workers) in
@@ -88,7 +88,7 @@ let saturation slots =
       wait "two actual native database workers" (fun () -> R.entered Execute = 2) >>= fun () ->
       check "all database slots occupied" (Throttle.num_jobs_running slots = 2);
       check "additional database offload remains queued" (Throttle.num_jobs_waiting_to_start slots = 1 && not (Stdlib.Atomic.get extra_started));
-      List.iter requests ~f:(fun r -> ok (B.cancel r));
+      List.iter requests ~f:(fun r -> B.cancel r);
       wait "independent control under occupied database slots" (fun () -> R.interrupted_connections () = 2) >>= fun () ->
       check "control did not consume database slot" (not (Stdlib.Atomic.get extra_started));
       R.release Execute;
@@ -103,7 +103,7 @@ let saturation slots =
 exception Abandoned
 let abandoned slots ~fail_cleanup =
   R.reset (); R.hold Rollback;
-  let request = B.create () in
+  let request = B.canceller () in
   let completion = Ivar.create () and routed = Ivar.create () and failed = Ivar.create () in
   let caller = Monitor.create () in
   let deliveries = ref 0 in
@@ -125,7 +125,7 @@ let abandoned slots ~fail_cleanup =
       Ivar.read failed >>= fun () ->
       heartbeat worker Rollback >>= fun () ->
       check "already-admitted ordinary rollback retains ineligible controller" (R.joins () = 0 && R.interrupts () = 0);
-      ok (B.cancel request); ok (B.cancel request);
+      B.cancel request; B.cancel request;
       check "completion remains owned and pending" (not (Ivar.is_full completion));
       R.release Rollback;
       producer >>= fun () -> Ivar.read routed >>| fun (exception_, completed, count) ->
@@ -137,7 +137,7 @@ let abandoned slots ~fail_cleanup =
       printf "async bridge: abandoned-caller completion=once real-rollback-heartbeat=ack cleanup-failure=%b original-source-trace=ok\n%!" fail_cleanup)
 let stale_after_reuse slots =
   R.reset (); R.hold Execute;
-  let previous = B.create () and current = B.create () in
+  let previous = B.canceller () and current = B.canceller () in
   let worker = submit slots (fun () -> R.reused_work previous current) in
   Monitor.protect ~finally:(fun () -> R.release_all (); worker >>| fun outcome -> ignore (S.restore outcome))
     (fun () ->
@@ -151,7 +151,7 @@ let stale_after_reuse slots =
       ok (S.restore outcome); R.check_settled current;
       check "reused B completed native query without interrupt" (R.executions () = 1 && R.native_errors () = 0 && R.interrupts () = 0);
       R.check_inventory ();
-      printf "async bridge: same-owner-reuse A=Settled B=native-held delayed-A-cancel=Closed B=Ok interrupts=0\n%!")
+      printf "async bridge: same-owner-reuse A=Settled B=native-held delayed-A-cancel=noop B=Ok interrupts=0\n%!")
 let cases () =
   let slots = Throttle.create ~continue_on_error:true ~max_concurrent_jobs:2 in
   Deferred.List.iter R.seams ~how:`Sequential ~f:(scenario slots) >>= fun () ->

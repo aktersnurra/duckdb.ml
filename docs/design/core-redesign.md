@@ -182,7 +182,7 @@ busy periods.
 consumes the request, so a request cannot run twice (today that is a
 runtime `Closed`). One canceller may back several requests, and `cancel`
 latches all of them. Cancelling after every request has settled is a
-no-op that returns `Ok ()`, not `Closed`. `settlement` moves to the
+no-op (`cancel` returns `unit`), not `Closed`. `settlement` moves to the
 canceller.
 
 Uniqueness is not used elsewhere. Without borrowing, a unique session

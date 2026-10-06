@@ -151,19 +151,25 @@ type transaction = [ `Transaction ] session
     and process failure remain outside these settlement guarantees.
     The facade is local to the callback; owned values may escape.
     The owner is Busy throughout [run], never disconnected by it. Live children
-    cannot be imported (Busy). Requests are single-use, including failed admission: overlapping
-    [run] is Busy, later [run]/[cancel] is Closed. [cancel] latches a request,
-    not its outcome; repeated cancellation before settlement succeeds. Pending
-    includes never-run requests. Cancellation replaces only an otherwise
+    cannot be imported (Busy). A request is unique: [run] consumes it, so it
+    runs at most once (including failed admission). A canceller is shareable
+    across threads; [cancel] latches it and every request bound to it, so a
+    request created from a cancelled canceller starts cancelled. [cancel]
+    latches requests, not their outcomes; it is idempotent, and a no-op once
+    every bound request settled. [settlement] is [Pending] until at least one
+    request is bound and all bound requests (including never-run ones) have
+    finished. Cancellation replaces only an otherwise
     successful outcome, not primary errors or exceptions. Bridge failures are
     in the [Connection] context; callback errors are returned unchanged. *)
 module Bridge : sig
+  type canceller
   type request
   type settlement = Pending | Settled
-  val create : unit -> request
-  val cancel : request -> (unit, Error.t) result
-  val settlement : request -> settlement
-  val run : request -> connection @ local ->
+  val canceller : unit -> canceller
+  val request : canceller -> request @ unique
+  val cancel : canceller -> unit
+  val settlement : canceller -> settlement
+  val run : request @ unique -> connection @ local ->
     f:(connection @ local -> ('a, Error.t) result) -> ('a, Error.t) result
 end
 

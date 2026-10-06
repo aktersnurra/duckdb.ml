@@ -35,9 +35,11 @@ let entered seam = native_entered (id seam)
 let release_all () = List.iter seams ~f:release
 let check label value = if not value then failwith label
 let ok = function Ok x -> x | Error _ -> failwith "responsiveness DuckDB error"
-let check_settled r =
-  check "Bridge settlement" (match B.settlement r with Settled -> true | Pending -> false);
-  check "terminal cancellation Closed" (match B.cancel r with Error { cause = Closed; _ } -> true | _ -> false)
+(* Each helper below binds one unique request to the given canceller. *)
+let check_settled k =
+  check "Bridge settlement" (match B.settlement k with Settled -> true | Pending -> false);
+  B.cancel k;
+  check "terminal cancellation is a no-op" (match B.settlement k with Settled -> true | Pending -> false)
 let check_inventory () =
   check "ordinary cleanup no locked engine calls" (locked_engine_calls () = 0);
   check "ordinary cleanup visited finish paths" (finish_calls () > 0);
@@ -51,34 +53,34 @@ let check_outcome seam outcome =
   else match outcome with Error { D.Error.cause = Cancelled; _ } -> () | _ -> failwith "missing latched cancellation"
 let long_query = "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) t(i)"
 let with_owner f = D.with_database (ok (D.Config.create Memory)) ~f:(fun db -> D.with_connection db ~f)
-let suppressed_work request =
+let suppressed_work k =
   Exn.protect ~finally:deactivate ~f:(fun () -> with_owner (fun owner ->
     activate ();
-    B.run request owner ~f:(fun facade ->
+    B.run (B.request k) owner ~f:(fun facade ->
       (* Finite real native work makes a missing final dispatch check observable. *)
       ignore (D.execute facade "SELECT 1");
       failwith "cancelled dispatched callback entered")))
 let reused_work previous current =
   Exn.protect ~finally:deactivate ~f:(fun () -> with_owner (fun owner ->
-    ok (B.run previous owner ~f:(fun facade -> D.execute facade "SELECT 1"));
-    B.run current owner ~f:(fun facade ->
+    ok (B.run (B.request previous) owner ~f:(fun facade -> D.execute facade "SELECT 1"));
+    B.run (B.request current) owner ~f:(fun facade ->
       activate (); D.execute facade "SELECT 42")))
-let work seam request =
+let work seam k =
   Exn.protect ~finally:deactivate ~f:(fun () ->
     with_owner (fun owner ->
-      B.run request owner ~f:(fun facade ->
+      B.run (B.request k) owner ~f:(fun facade ->
         if is_interrupted seam then
           D.with_transaction facade ~f:(fun tx -> activate (); D.execute tx long_query)
         else match seam with
         | Chunk ->
           D.Statement.with_prepared facade "SELECT 42::BIGINT" ~f:(fun p ->
             D.Statement.fold_chunks p ~init:() ~f:(fun _chunk () ->
-              activate (); ok (B.cancel request); Ok (D.Stop ())))
+              activate (); B.cancel k; Ok (D.Stop ())))
         | Appender_clear | Appender_destroy ->
           ok (D.execute facade "CREATE TABLE t(x BIGINT)");
           D.Table.with_appender facade D.Table.(declare "t" Columns.[ "x", int64 ] ~row:Fn.id) ~f:(fun a ->
             ok (D.Table.append a [D.Args.[42L]]);
-            activate (); ok (B.cancel request); Ok ())
+            activate (); B.cancel k; Ok ())
         | Publication | Unlink ->
           let destination = Stdlib.Filename.temp_file "bridge-heartbeat-" ".parquet" in
           Stdlib.Sys.remove destination;
@@ -94,11 +96,11 @@ exception Worker_failure
 exception Cleanup_failure
 let callback_failure_frame () =
   raise (Sys.opaque_identity Worker_failure)
-let exceptional_work ~fail_cleanup request =
+let exceptional_work ~fail_cleanup k =
   Stdlib.Callback.Safe.register_exception "responsiveness_cleanup_failure" Cleanup_failure;
   Exn.protect ~finally:(fun () -> fail_rollback false; deactivate ()) ~f:(fun () ->
     ignore (Sys.opaque_identity (with_owner (fun owner ->
-      B.run request owner ~f:(fun facade ->
+      B.run (B.request k) owner ~f:(fun facade ->
         D.with_transaction facade ~f:(fun tx ->
           ok (D.execute tx "CREATE TABLE t(x INTEGER)");
           activate (); fail_rollback fail_cleanup; callback_failure_frame ()))))))

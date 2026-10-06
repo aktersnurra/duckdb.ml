@@ -33,24 +33,24 @@ let with_schema_prepared c f =
 let prepare_only c sql = D.Statement.with_prepared c sql ~f:(fun _ -> Ok ())
 let before_prepare owner =
   reset (); gate 14 true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result = prepare_only c "SELECT 1" in next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 14; ok (B.cancel request); gate 14 false;
+      wait 14; B.cancel k; gate 14 false;
       cancelled (join ()); check "Query prepare native admission suppresses extraction" (count 0 = 0);
       one_controller ()))
 let prepare_subcall ~schema point owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let work () = if schema then with_schema_prepared c (fun p ->
       gate point true; selected_gate true;
       D.Statement.execute p)
     else (gate point true; selected_gate true; prepare_only c "SELECT 1") in
     let result = work () in next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request);
+      wait point; B.cancel k;
       (* Either selection or premature cleanup join: baseline non-USER must fail
          the assertion, not rely on a selection timeout. *)
       E.await ~label:"Query prepare selection or cleanup" (fun () -> selected_entered () || count 11 > 0);
@@ -63,8 +63,8 @@ let prepare_subcall ~schema point owner =
       check "Query selected prepare delivery skipped" (count 4 = 0 && count 16 = 1); one_controller ()))
 let bind_case ~before kind owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let sql, work = match kind with
       | "reset" -> "SELECT ?::BIGINT", (fun p -> D.Statement.reset p)
       | "null" -> "SELECT ?::BIGINT", (fun p -> D.Statement.bind p 1 (D.Codec.Values.(nullable int64)) None)
@@ -85,7 +85,7 @@ let bind_case ~before kind owner =
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       let point = if before then (if String.equal kind "reset" then 15 else 16)
         else if String.equal kind "reset" then 24 else if String.equal kind "temporal" then 26 else 22 in
-      wait point; ok (B.cancel request); gate point false; cancelled (join ());
+      wait point; B.cancel k; gate point false; cancelled (join ());
       check "Query binding never arms interruption" (count 4 = 0 && count 14 = 0);
       if before then check "Query bind/reset native admission suppresses mutation" (count 20 = 0 && count 21 = 0 && count 22 = 0)
       else if String.equal kind "temporal" then (
@@ -94,8 +94,8 @@ let bind_case ~before kind owner =
       one_controller ()))
 let execute_case ~before owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result = D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
       gate (if before then 17 else 6) true;
       if not before then selected_gate true;
@@ -103,7 +103,7 @@ let execute_case ~before owner =
     next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       let point = if before then 17 else 6 in
-      wait point; ok (B.cancel request);
+      wait point; B.cancel k;
       if not before then E.await ~label:"Query execute selected" selected_entered;
       gate point false; wait_count 11 1;
       if before then check "Query execute native admission suppresses execution" (count 2 = 0)
@@ -113,13 +113,13 @@ let execute_case ~before owner =
       one_controller ()))
 let running owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     D.Statement.with_prepared c "SELECT sum(sin(i::DOUBLE)) FROM range(10000000000) t(i)" ~f:(fun p ->
       ok (D.Statement.reset p); gate 5 true;
       D.Statement.execute p)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 5; ok (B.cancel request); wait_count 4 1;
+      wait 5; B.cancel k; wait_count 4 1;
       let before = count 4 in gate 5 false;
       (match join () with
        | Error { cause = Native message; _ } -> check "Query actual interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
@@ -130,8 +130,8 @@ let running owner =
       one_controller ()))
 let fetch_case ?(empty = false) point owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result = D.Statement.with_prepared c (if empty then "SELECT 1 WHERE false" else "SELECT i FROM range(10000) t(i)") ~f:(fun p ->
       (* Fetch gates are not reached by the execution that precedes them. *)
       gate point true; if point = 31 then selected_gate true;
@@ -141,7 +141,7 @@ let fetch_case ?(empty = false) point owner =
       result) in
     next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request);
+      wait point; B.cancel k;
       if point = 31 then E.await ~label:"Query fetch selected" selected_entered;
       gate point false; wait_count 11 1;
       if point = 18 then check "Query fetch admission suppresses engine call" (count 24 = 0)
@@ -150,12 +150,12 @@ let fetch_case ?(empty = false) point owner =
       check "Query fetch selected delivery excluded" (count 4 = 0); one_controller ()))
 let callback ~stop owner =
   reset ();
-  let request = B.create () in
-  cancelled (B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  cancelled (B.run (B.request k) owner ~f:(fun c ->
     let result = D.Statement.with_prepared c "SELECT i FROM range(10000) t(i)" ~f:(fun p ->
       let callbacks = ref 0 in
       let result = D.Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
-        Int.incr callbacks; ok (B.cancel request);
+        Int.incr callbacks; B.cancel k;
         check "Query borrowed chunk remains live through callback cancellation" (D.Statement.chunk_length chunk > 0);
         if stop then Ok (D.Stop ()) else Ok (D.Continue ())) in
       check "Query callback batch cancellation suppresses next fetch" (!callbacks = 1 && count 24 = 1);
@@ -165,17 +165,17 @@ let callback ~stop owner =
    proves the worker reached cleanup. Every failure releases gates before join. *)
 let cleanup_join ~schema ~result owner =
   reset ();
-  let request = B.create () in
+  let k = B.canceller () in
   let point = if result then 31 else 4 in
   let destructor = if result then 32 else 8 in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let gates () = gate point true; gate destructor true; selected_gate true in
     if schema then with_schema_prepared c (fun p -> gates (); D.Statement.execute p)
     else if result then D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
       gates (); D.Statement.fold_chunks p ~init:() ~f:(fun _ () -> failwith "cancelled chunk exposed"))
     else (gates (); prepare_only c "SELECT 1")))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait point; ok (B.cancel request); E.await ~label:"Query cleanup selection" selected_entered;
+      wait point; B.cancel k; E.await ~label:"Query cleanup selection" selected_entered;
       gate point false;
       E.await ~label:"Query worker join or destructor" (fun () -> count 11 > 0 || entered destructor > 0);
       check "Query direct cleanup joins before destructor" (count 11 = 1 && entered destructor = 0);
@@ -186,10 +186,10 @@ let cleanup_join ~schema ~result owner =
       gate destructor false; cancelled (join ()); one_controller ()))
 let extracted_cleanup owner =
   reset (); gate 4 true; gate 9 true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c -> prepare_only c "SELECT 1"))
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c -> prepare_only c "SELECT 1"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 4; ok (B.cancel request); E.await ~label:"Query extracted selection" selected_entered;
+      wait 4; B.cancel k; E.await ~label:"Query extracted selection" selected_entered;
       gate 4 false; wait 9;
       check "Query native extracted cleanup precedes ML join" (count 11 = 0);
       selected_gate false; wait_count 17 1;
@@ -197,8 +197,8 @@ let extracted_cleanup owner =
       gate 9 false; cancelled (join ()); one_controller ()))
 let old_chunk owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     D.Statement.with_prepared c "SELECT i FROM range(10000) t(i)" ~f:(fun p ->
       let callbacks = ref 0 in
       let result = D.Statement.fold_chunks p ~init:() ~f:(fun chunk () ->
@@ -208,43 +208,43 @@ let old_chunk owner =
       check "Query old chunk cancellation stops next batch" (!callbacks = 1 && count 24 = 1);
       result)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 32; ok (B.cancel request); gate 32 false; cancelled (join ());
+      wait 32; B.cancel k; gate 32 false; cancelled (join ());
       check "Query old chunk cleanup remains noninterruptible" (count 4 = 0 && count 14 = 0);
       one_controller ()))
 let returned_prepare ~schema owner =
   reset ();
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     let result =
       if schema then with_schema_prepared c (fun p -> gate 19 true; D.Statement.execute p)
       else (gate 19 true; prepare_only c "SELECT 1") in
     next_suppressed c; result))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 19; ok (B.cancel request); gate 19 false; cancelled (join ());
+      wait 19; B.cancel k; gate 19 false; cancelled (join ());
       check "Query post-prepare cancellation suppresses execution" (count 2 = (if schema then 1 else 0) && count 4 = 0);
       one_controller ()))
 let prepare_error owner =
   reset (); gate 4 true; selected_gate true;
-  let request = B.create () in
-  E.with_worker (fun () -> B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     prepare_only c "SELECT missing_query_column"))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 4; ok (B.cancel request); E.await ~label:"Query error selection" selected_entered;
+      wait 4; B.cancel k; E.await ~label:"Query error selection" selected_entered;
       gate 4 false; wait_count 11 1; selected_gate false;
       (match join () with
        | Error { cause = Native message; _ } -> check "Query prepare native error retained" (String.is_substring message ~substring:"missing_query_column")
        | _ -> failwith "Query prepare error flattened by cancellation");
       one_controller ()))
 exception Query_callback_failure
-let query_callback_failure_frame chunk request =
+let query_callback_failure_frame chunk k =
   check "Query exception callback has live chunk" (D.Statement.chunk_length chunk > 0);
-  ok (B.cancel request); raise Query_callback_failure
+  B.cancel k; raise Query_callback_failure
 let caught_callback owner =
   reset ();
-  let request = B.create () in
-  cancelled (B.run request owner ~f:(fun c ->
+  let k = B.canceller () in
+  cancelled (B.run (B.request k) owner ~f:(fun c ->
     let result = D.Statement.with_prepared c "SELECT 1" ~f:(fun p ->
-      (match E.capture (fun () -> D.Statement.fold_chunks p ~init:() ~f:(fun chunk () -> query_callback_failure_frame chunk request)) with
+      (match E.capture (fun () -> D.Statement.fold_chunks p ~init:() ~f:(fun chunk () -> query_callback_failure_frame chunk k)) with
        | E.Raised failure ->
          check "Query caught exception identity" (phys_equal failure.exception_ Query_callback_failure);
          check "Query caught exception backtrace" (String.is_substring (Stdlib.Printexc.raw_backtrace_to_string failure.backtrace) ~substring:"query_callback_failure_frame")

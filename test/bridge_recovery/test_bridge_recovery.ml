@@ -16,9 +16,9 @@ let rows connection =
            | Error e -> failure := Some e)
       done;
       match !failure with None -> Ok (D.Continue !values) | Some e -> Error e))
-let still_admitted request owner =
+let still_admitted k owner =
   check "ordinary rollback leaves the same request Pending"
-    (match B.settlement request with Pending -> true | Settled -> false);
+    (match B.settlement k with Pending -> true | Settled -> false);
   check "ordinary rollback retains the single native installation"
     (count 5 = 1 && count 6 = 0 && count 7 = 0 && count 4 = 0);
   check "owner alias stays Busy after recoverable rollback"
@@ -31,9 +31,9 @@ type failure = Result_error | Native_error | Callback_exception
 exception Recoverable_callback
 let raise_recoverable_callback () = raise Recoverable_callback
 let transaction_recovery failure owner observer =
-  let request = B.create () in
+  let k = B.canceller () in
   reset_counts ();
-  ok (B.run request owner ~f:(fun facade ->
+  ok (B.run (B.request k) owner ~f:(fun facade ->
     let outcome =
       try `Result (D.with_transaction facade ~f:(fun transaction ->
         ok (D.execute transaction "INSERT INTO recovery_rows VALUES (1)");
@@ -54,24 +54,24 @@ let transaction_recovery failure owner observer =
      | _ -> failwith "ordinary transaction error changed");
     check "ordinary transaction error rolls back before returning"
       (count 1 = 1 && count 2 = 0 && count 3 = 1);
-    still_admitted request owner;
+    still_admitted k owner;
     ok (D.execute facade "INSERT INTO recovery_rows VALUES (2)");
     ok (D.with_transaction facade ~f:(fun transaction ->
       D.execute transaction "INSERT INTO recovery_rows VALUES (3)"));
     check "later user work and transaction commit after rollback"
       (count 1 = 2 && count 2 = 1 && count 3 = 1);
-    still_admitted request owner;
+    still_admitted k owner;
     Ok ()));
   check "one request detaches only at Bridge settlement"
     (count 5 = 1 && count 6 = 1 && count 7 = 1 && count 4 = 0);
-  check "request settled" (match B.settlement request with Settled -> true | Pending -> false);
+  check "request settled" (match B.settlement k with Settled -> true | Pending -> false);
   check "observer sees only post-rollback writes"
     (List.equal Int64.equal (ok (rows observer)) [3L; 2L]);
   ok (D.execute owner "SELECT 1")
 let snapshot_recovery owner observer =
-  let request = B.create () in
+  let k = B.canceller () in
   reset_counts ();
-  ok (B.run request owner ~f:(fun facade ->
+  ok (B.run (B.request k) owner ~f:(fun facade ->
     (* Preparation succeeds; the NOT NULL violation occurs at native execute
        inside the real Query.execute_prepared (under Statement.fold_chunks) ->
        Resource.with_child_snapshot. *)
@@ -80,18 +80,18 @@ let snapshot_recovery owner observer =
         expect_native_error (D.Statement.execute prepared);
         check "snapshot error rolls back before returning"
           (count 0 = 1 && count 1 = 1 && count 2 = 0 && count 3 = 1);
-        still_admitted request owner;
+        still_admitted k owner;
         Ok ()));
     ok (D.execute facade "INSERT INTO recovery_rows VALUES (2)");
     ok (D.Statement.with_prepared facade "INSERT INTO recovery_rows VALUES (3) RETURNING i"
       ~f:D.Statement.execute);
     check "later raw execute and fresh snapshot commit after rollback"
       (count 0 = 3 && count 1 = 2 && count 2 = 1 && count 3 = 1);
-    still_admitted request owner;
+    still_admitted k owner;
     Ok ()));
   check "snapshot recovery uses one native request through terminal detach"
     (count 5 = 1 && count 6 = 1 && count 7 = 1 && count 4 = 0);
-  check "snapshot request settled" (match B.settlement request with Settled -> true | Pending -> false);
+  check "snapshot request settled" (match B.settlement k with Settled -> true | Pending -> false);
   check "observer sees successful writes after snapshot rollback"
     (List.equal Int64.equal (ok (rows observer)) [3L; 2L]);
   ok (D.execute owner "SELECT 1")
