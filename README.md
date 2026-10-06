@@ -2,16 +2,93 @@
 
 [![Ubuntu CI](https://github.com/aktersnurra/duckdb.ml/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/aktersnurra/duckdb.ml/actions/workflows/ubuntu.yml)
 
-`duckdb.ml` is an OxCaml binding for DuckDB.  It provides a safe synchronous
-API plus separately installable `duckdb-async` and `duckdb-eio` adapters.
+`duckdb.ml` is an OxCaml binding for DuckDB in which the type checker does the
+bookkeeping. Parameters, rows and table columns are typed by GADTs. Handles
+are `@ local` to their scope, so use-after-close cannot be written. Separately
+installable `duckdb-async` and `duckdb-eio` adapters provide the same typed API
+over connection pools.
+
+It is full OxCaml, not upstream OCaml: it uses modes (`local`, `unique`,
+`global`), modalities and `int8`/`int16`/`float32`.
+
+## Example
 
 ```ocaml
-Duckdb.with_database config ~f:(fun database ->
-  Duckdb.with_connection database ~f:(fun connection ->
-    Duckdb.execute connection "select 42"))
+open! Base
+module D = Duckdb
+module R = D.Request
+
+type user = { id : int64; name : string; age : int32 option }
+
+(* Tables and requests are plain values: declared once, checked against the
+   catalog when first used, and cached per connection. *)
+let users = D.Table.(declare "users"
+  Columns.["id", int64; "name", string; "age", nullable int32]
+  ~row:(fun id name age -> { id; name; age }))
+let create = R.exec D.Fields.[] "CREATE TABLE users(id BIGINT, name VARCHAR, age INTEGER)"
+let adults = R.many D.Fields.[int32] D.Fields.[int64; string] ~row:(fun id name -> (id, name))
+  "SELECT id, name FROM users WHERE age >= ? ORDER BY id"
+
+(* [c] is local to its scope: it cannot be stored, returned or captured. *)
+let run (c @ local) =
+  match R.Session.exec c create D.Args.[] with
+  | Error e -> Error e
+  | Ok () ->
+    match D.Table.with_appender c users ~f:(fun a ->
+      D.Table.append a [ D.Args.[1L; "ada"; Some 36l]; D.Args.[2L; "bob"; None] ]) with
+    | Error e -> Error e
+    | Ok () -> R.Session.collect c adults D.Args.[18l]
+
+let () =
+  let result =
+    Result.bind (D.Config.create Memory) ~f:(fun config ->
+      D.with_database config ~f:(fun db -> D.with_connection db ~f:run)) in
+  match result with
+  | Ok rows -> List.iter rows ~f:(fun (id, name) -> Stdio.printf "%Ld %s\n" id name)
+  | Error { D.Error.cause = Type_mismatch { expected; actual; _ }; _ } ->
+    Stdio.eprintf "expected %s, got %s\n" expected actual
+  | Error _ -> Stdio.eprintf "query failed\n"
 ```
 
-Start with [architecture](docs/architecture.md), [native dependencies](docs/native-dependency.md), and the public examples in [`examples/`](examples/).
+This prints `1 ada`. More in [`examples/`](examples/), including the low-level
+`Statement` API (positional binding, borrowed chunks) and both adapters.
+
+## What the compiler rejects
+
+Each line below is a compile error, pinned by a fixture in
+[`test/scope_compile`](test/scope_compile) or
+[`test/request_compile`](test/request_compile):
+
+```ocaml
+D.with_connection db ~f:(fun c -> Ok c)                          (* handle escapes its scope *)
+D.with_transaction c ~f:(fun _ -> D.execute c "...")             (* busy connection captured *)
+D.with_transaction c ~f:(fun tx -> D.with_transaction tx ~f:g)   (* nested transaction *)
+R.Session.find c (R.many ...) args                               (* [find] needs exactly one row *)
+R.Session.exec c insert D.Args.[1L]                              (* wrong parameter arity or type *)
+D.Args.[200s]                                                    (* out of range for int8 *)
+let r = D.Bridge.request k in D.Bridge.run r c ...; D.Bridge.run r c ...   (* request runs once *)
+```
+
+What stays a runtime check is reported as a flat `Error.t`
+(`{ context; cause }`): native failures, cancellation, NULL in a non-null
+column, a schema that does not match its declaration, and `Busy`/`Closed`
+when you opt into manually managed handles through `Owned`.
+
+## Sequencing with local handles
+
+A `let*` continuation must be a global closure, so it cannot use a local
+handle. Use `match` for several steps, `Result.bind … [@nontail]` for one, or
+`ppx_let`'s `let%bindl_fun` (Base `Result.Let_syntax`) if you use ppx. A
+helper that takes a handle is inferred `@ local`; when the compiler reports an
+escape at a call site, annotate the parameter `(c @ local)`.
+
+## Documentation
+
+- [Architecture](docs/architecture.md): the layers, modes, errors and adapters.
+- [Core redesign](docs/design/core-redesign.md): design decisions, verified compiler facts and the roadmap.
+- [Native dependencies](docs/native-dependency.md) and [development](docs/development.md).
+
+## Building
 
 For a provisioned checkout:
 
@@ -24,5 +101,10 @@ For a provisioned checkout:
 bash test/install_adapters_smoke.sh
 ```
 
-The library supports local DuckDB databases and typed local Parquet reads and
-exports. Remote storage and credentials are out of scope.
+## Scope and roadmap
+
+Local DuckDB databases and typed local Parquet reads and exports are
+supported. Remote storage and credentials are out of scope. Planned, in order:
+performance (columnar bulk reads, unboxed numbers, allocation-free decoding),
+a typed SQL layer built from GADT expressions, and schema declarations with
+migrations. See the [core redesign](docs/design/core-redesign.md) note.
