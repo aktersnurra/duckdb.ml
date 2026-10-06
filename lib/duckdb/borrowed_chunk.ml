@@ -25,14 +25,17 @@ let column : type a n. t @ local -> column:int -> row:int -> (a, n) Codec.t -> (
         | Ok () -> if F.chunk_valid chunk.native column row then Ok (Some (read chunk column row typ)) else Ok None in
       let decoded decode b = Result.map_error (decode b) ~f:(fun reason ->
         Decode_rejected { column; row; reason }) in
+      let decode_plan : type b. b Codec.plan -> (b option, Resource.error) result = function
+        | Codec.Identity scalar -> get scalar
+        | Codec.Plan plan ->
+          (match get plan.scalar with
+           | Error e -> Error e
+           | Ok None -> Ok None
+           | Ok (Some b) -> Result.map (decoded plan.decode b) ~f:Option.some) in
       match codec with
-      | Codec.Nullable (Codec.Plan plan) ->
-        (match get plan.scalar with
-         | Error e -> Error e
-         | Ok None -> Ok None
-         | Ok (Some b) -> Result.map (decoded plan.decode b) ~f:Option.some)
-      | Codec.Non_null (Codec.Plan plan) ->
-        (match get plan.scalar with
+      | Codec.Nullable plan -> (decode_plan plan) [@nontail]
+      | Codec.Non_null plan ->
+        (match decode_plan plan with
          | Error e -> Error e
          | Ok None -> Error (Null { column; row })
-         | Ok (Some b) -> decoded plan.decode b)
+         | Ok (Some a) -> Ok a)

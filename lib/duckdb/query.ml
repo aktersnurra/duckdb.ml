@@ -103,13 +103,16 @@ let bind_scalar : type b. prepared -> int -> b S.t -> b option -> (unit, error) 
 let bind : type a n. prepared -> int -> (a, n) Codec.t -> a -> (unit, error) result = fun p index codec value ->
   let encoded encode value = Result.map_error (encode value) ~f:(fun reason ->
     Encode_rejected { index; reason }) in
+  let bind_plan : type b. b Codec.plan -> b -> (unit, error) result = fun plan v ->
+    match plan with
+    | Codec.Identity scalar -> bind_scalar p index scalar (Some v)
+    | Codec.Plan plan -> let* b = encoded plan.encode v in bind_scalar p index plan.scalar (Some b) in
   match codec with
-  | Codec.Non_null (Codec.Plan plan) ->
-    let* b = encoded plan.encode value in bind_scalar p index plan.scalar (Some b)
-  | Codec.Nullable (Codec.Plan plan) ->
+  | Codec.Non_null plan -> bind_plan plan value
+  | Codec.Nullable plan ->
     match value with
-    | None -> bind_scalar p index plan.scalar None
-    | Some v -> let* b = encoded plan.encode v in bind_scalar p index plan.scalar (Some b)
+    | None -> let (Codec.Packed_scalar s) = Codec.plan_scalar plan in bind_scalar p index s None
+    | Some v -> bind_plan plan v
 
 let check_parameter_schema p =
   let fresh = F.prepared_owner (native_connection p.connection) in

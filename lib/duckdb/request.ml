@@ -52,13 +52,17 @@ end
 
 (* Encoding: each value becomes one bindable scalar, checked by its codec. *)
 type bound = Bound : 'b Scalar.t * 'b option -> bound
+let encode_plan : type a. a Codec.plan -> a -> bound Or_error.t = fun plan value ->
+  match plan with
+  | Codec.Identity scalar -> Ok (Bound (scalar, Some value))
+  | Codec.Plan plan -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (plan.scalar, Some b))
 let encode_value : type a n. (a, n) Codec.t -> a -> bound Or_error.t = fun codec value ->
   match codec with
-  | Codec.Non_null (Codec.Plan plan) -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (plan.scalar, Some b))
-  | Codec.Nullable (Codec.Plan plan) ->
+  | Codec.Non_null plan -> encode_plan plan value
+  | Codec.Nullable plan ->
     match value with
-    | None -> Ok (Bound (plan.scalar, None))
-    | Some value -> Or_error.map (plan.encode value) ~f:(fun b -> Bound (plan.scalar, Some b))
+    | None -> let (Codec.Packed_scalar s) = Codec.plan_scalar plan in Ok (Bound (s, None))
+    | Some value -> encode_plan plan value
 let rec encode_args : type l f r. (l, f, r) Fields.t -> l Args.t -> index:int ->
   (bound list, cause) Result.t = fun fields args ~index ->
   match fields, args with
@@ -69,9 +73,11 @@ let rec encode_args : type l f r. (l, f, r) Fields.t -> l Args.t -> index:int ->
     | Ok bound -> Result.map (encode_args fields args ~index:(index + 1)) ~f:(fun rest -> bound :: rest)
 
 (* The base scalar each declared position crosses the boundary as. *)
-let scalar_id : type a n. (a, n) Codec.t -> int * string = function
-  | Codec.Non_null (Codec.Plan plan) -> Scalar.native_id plan.scalar, Scalar.name plan.scalar
-  | Codec.Nullable (Codec.Plan plan) -> Scalar.native_id plan.scalar, Scalar.name plan.scalar
+let scalar_id : type a n. (a, n) Codec.t -> int * string = fun codec ->
+  let (Codec.Packed_scalar s) = match codec with
+    | Codec.Non_null plan -> Codec.plan_scalar plan
+    | Codec.Nullable plan -> Codec.plan_scalar plan in
+  Scalar.native_id s, Scalar.name s
 let rec scalar_ids : type l f r. (l, f, r) Fields.t -> (int * string) list = function
   | Fields.[] -> []
   | Fields.(codec :: fields) -> scalar_id codec :: scalar_ids fields

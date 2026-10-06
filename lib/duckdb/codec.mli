@@ -3,9 +3,18 @@ open! Base
 type non_null = private Non_null_codec
 type nullable = private Nullable_codec
 
-(** A non-null value crosses the native boundary as one base scalar; [decode]
-    and [encode] convert between it and the user type. *)
-type 'a plan = Plan : { scalar : 'b Scalar.t; decode : 'b -> 'a Or_error.t; encode : 'a -> 'b Or_error.t } -> 'a plan
+(** A non-null value crosses the native boundary as one base scalar.
+    [Identity]: the user type is the base scalar itself, so no conversion
+    happens. [Plan]: [decode] and [encode] convert between the base scalar and
+    the user type. *)
+type 'a plan =
+  | Identity : 'a Scalar.t -> 'a plan
+  | Plan : { scalar : 'b Scalar.t; decode : 'b -> 'a Or_error.t; encode : 'a -> 'b Or_error.t } -> 'a plan
+
+(** The base scalar a plan crosses the native boundary as. *)
+type packed_scalar = Packed_scalar : 'b Scalar.t -> packed_scalar
+val plan_scalar : 'a plan -> packed_scalar
+
 type ('a, 'nullability) t =
   | Non_null : 'a plan -> ('a, non_null) t
   | Nullable : 'a plan -> ('a option, nullable) t
