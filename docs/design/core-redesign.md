@@ -523,6 +523,9 @@ execution, cache, validation and adapters are unchanged.
 
 ## Notes for sub-project 1b
 
+Superseded by the [performance design](performance.md); kept as the
+original list.
+
 Hot spots to address:
 
 - Boxed `int64`/`float` via `Scalar.repr` per cell (`borrowed_chunk.ml`).
