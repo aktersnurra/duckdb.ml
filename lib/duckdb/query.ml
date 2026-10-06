@@ -68,11 +68,6 @@ let prepare_transaction tx sql = prepare_on (transaction_connection tx) (Some tx
 
 let without_result ?(cleanup = false) p work = child_operation ~cleanup p.child ~allow_result:true (fun () ->
   if Option.is_some p.result then Error Busy else work ())
-let close_prepared p =
-  if child_is_closed p.child then Ok ()
-  else without_result ~cleanup:true p (fun () ->
-    Exn.protect ~finally:(fun () -> unregister_child p.child)
-      ~f:(fun () -> native_close p.connection p.native; Ok ()))
 let parameter_count p = child_operation p.child ~allow_result:true (fun () -> Ok (Array.length p.bound))
 let reset p = without_result p (fun () ->
   (* A failed/interrupted reset leaves no binding marked usable. *)
@@ -243,7 +238,6 @@ let select_schema p = without_result p (fun () ->
 
 let child p = p.child
 let sql p = p.sql
-let result_sql r = r.prepared.sql
 let chunk_sql (chunk @ local) = chunk.Borrowed_chunk.sql
 let parameter_types p = p.parameter_types
 let column_types p = child_operation p.child ~allow_result:true (fun () ->

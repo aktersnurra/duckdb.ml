@@ -54,7 +54,7 @@ end
 
 (** One flat error for every operation: where it happened and why. *)
 module Error : sig
-  (** Where: [Transaction] is BEGIN/COMMIT/ROLLBACK of a transaction scope;
+  (** Where: [Transaction] is BEGIN/COMMIT/ROLLBACK of a scope, or admission of an adapter transaction;
       [Query] carries the statement's SQL (prepared statements, typed requests,
       raw queries); [Table] a declared table's appender or catalog check;
       [Parquet] the file path involved ([path]'s argument; for a fold, the
@@ -160,7 +160,9 @@ type transaction = [ `Transaction ] session
     request is bound and all bound requests (including never-run ones) have
     finished. Cancellation replaces only an otherwise
     successful outcome, not primary errors or exceptions. Bridge failures are
-    in the [Connection] context; callback errors are returned unchanged. *)
+    in the [Connection] context; callback errors are returned unchanged.
+    A request that is created but never run keeps its canceller [Pending]
+    (the state stays bound), so run or drop cancellers accordingly. *)
 module Bridge : sig
   type canceller
   type request
@@ -426,7 +428,7 @@ module Owned : sig
     | Fold : { init : 'a; f : 'row -> 'a -> ('a step, Error.t) result } -> ('row, 'a) shape
 
   (** One execution entry point per shape, used by the adapters. Prefer the named operations, which carry the
-      row-count guards: [run] accepts any multiplicity with every shape but [Exec]. *)
+      row-count guards: [run] accepts any multiplicity. *)
   val run : _ session @ local -> ('row, 'out) shape -> ('params, 'row, _) Request.t -> 'params Args.t ->
     ('out, Error.t) result
 end

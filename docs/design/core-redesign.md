@@ -324,8 +324,8 @@ exception Cleanup_exception of Error.t * exn
   - `Range`: values are exact `int8`/`int16`/`float32` (P3).
 - **Kept but narrowed:** `Closed` and `Busy` are reachable only through
   `Owned`/the adapters, overlapping `Bridge` use, and the capture cases that
-  the global-callback rule does not cover. Each function documents which
-  causes it can return.
+  the global-callback rule does not cover. Per-function cause
+  documentation is deferred (see Implementation notes).
 - `Unbound_parameter` and `Index` are kept, reachable only through
   `Statement` (positional `bind`, chunk `column` access). Typed requests
   cannot produce them.
@@ -443,6 +443,14 @@ Where sub-project 1 as built differs from this note, by plan task:
   public API now that handles are local. It is kept as defence in depth: it is
   still partly reachable through `Owned` misuse, and it backs future internal
   callers. Its tests were the ones deleted in Task 11.
+- **`duckdb.worker`'s `S` did not shrink as design §4 said.** It keeps
+  `execute`, `query`, `fold_rows` (ported to `Fields` plus `~row` in Task 5),
+  both `transaction` and `request_transaction`, and `table_ingest`
+  (duplicating `Request.Session.ingest` plus the probe call). Collapsing them
+  is a follow-up.
+- **Per-function cause documentation is deferred.** Design §3 promised that
+  each function documents the causes it can return. Only `Statement.bind`,
+  `Index`/`Unbound_parameter` and `Busy` are documented per function.
 - **Documentation.** `docs/architecture.md` already states that a typed SQL
   layer is planned, replacing the "no SQL DSL" non-goal, before sub-project
   2's design. `typed-requests.md` is unchanged.
@@ -505,3 +513,20 @@ execution, cache, validation and adapters are unchanged.
 - Scope leaks (an expression used outside its query) are not checked
   statically. DuckDB rejects them at first prepare, and validation reports
   it.
+- `Spine.Make (E : sig type ('a,'n) t end)` has no list-wide index, and `(::)`
+  makes each element's second index existential, so a select list of
+  `('a,'n,'k) Expr.t` with a uniform grouping kind `'k` cannot be an instance
+  as-is. Sub-project 2 needs a context index on `Spine` (for example
+  `('ctx,'list,'fn,'result) t`), which also touches how `duckdb.mli`
+  re-declares `Fields`/`Columns`. The Exprs-to-Fields re-indexing will be
+  hand-written (`Spine.Map` fell back).
+
+## Notes for sub-project 1b
+
+Hot spots to address:
+
+- Boxed `int64`/`float` via `Scalar.repr` per cell (`borrowed_chunk.ml`).
+- Per-access `check_type`/`column_count` after schema validation.
+- Identity codecs allocate `Or_error.return` (needs an `Identity` case in
+  `Codec.plan`).
+- Per-row `result_checkpoint`.

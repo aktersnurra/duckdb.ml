@@ -43,8 +43,8 @@ Use Base's `Result.bind` (its `~f` is local) for one step, with
 
 ```ocaml
 let count_and_sum (session @ local) =
-  Result.bind (Request.Session.find session count Args.[]) ~f:(fun n ->
-    Result.map (sum_above session 0L) ~f:(fun sum -> n, sum)) [@nontail]
+  Result.bind (Request.Session.find session count_example Args.[]) ~f:(fun count ->
+    Result.map (sum_above session 0L) ~f:(fun sum -> count, sum)) [@nontail]
 ```
 
 For several steps, use `match … with Error e -> Error e | Ok v -> …`

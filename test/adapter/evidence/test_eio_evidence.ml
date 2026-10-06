@@ -175,5 +175,5 @@ let run () =
     effects ());
   assert (Duckdb_ffi.live_resources () = 0);
   assert (Duckdb_ffi.fallback_reclaims () = 0);
-  Stdlib.print_endline "eio: waiter-cancel-before-release protected-join+repeat-cancel cleanup-composite=ok transaction=owned token=Closed effect=denied rollback=ok dispatch=simulated"
+  Stdlib.print_endline "eio: waiter-cancel-before-release protected-join+repeat-cancel cleanup-composite=ok transaction=owned effect=denied rollback=ok dispatch=simulated"
 let () = run ()

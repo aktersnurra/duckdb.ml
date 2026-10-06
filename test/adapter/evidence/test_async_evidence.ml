@@ -153,7 +153,7 @@ let run () =
     | Ok () ->
       assert (Duckdb_ffi.live_resources () = 0);
       assert (Duckdb_ffi.fallback_reclaims () = 0);
-      Stdlib.print_endline "async: raw=pending owned-completion=once abandoned-caller=settled primary+cleanup+backtrace=preserved dispatch=simulated heartbeat=ok transaction=owned token=Closed";
+      Stdlib.print_endline "async: raw=pending owned-completion=once abandoned-caller=settled primary+cleanup+backtrace=preserved dispatch=simulated heartbeat=ok transaction=owned";
       Shutdown.exit 0
     | Error exn -> Stdlib.prerr_endline (Exn.to_string exn); Shutdown.exit 1);
   never_returns (Scheduler.go ())

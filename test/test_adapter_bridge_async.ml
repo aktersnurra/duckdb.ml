@@ -29,14 +29,14 @@ let heartbeat worker seam =
 let scenario slots seam =
   R.reset (); R.hold seam;
   if R.is_interrupted seam then R.hold Execute;
-  let request = B.canceller () in
-  let worker = submit slots (fun () -> R.work seam request) in
+  let canceller = B.canceller () in
+  let worker = submit slots (fun () -> R.work seam canceller) in
   Monitor.protect ~finally:(fun () -> R.release_all (); worker >>| fun result -> ignore (S.restore result))
     (fun () ->
       let first = if R.is_interrupted seam then R.Execute else seam in
       wait "native first entry" (fun () -> R.entered first > 0) >>= fun () ->
       heartbeat worker first >>= fun () ->
-      B.cancel request;
+      B.cancel canceller;
       (if R.is_interrupted seam then
         wait "independent controller before reset" (fun () -> R.interrupts () > 0)
        else return ()) >>= fun () ->
@@ -44,36 +44,36 @@ let scenario slots seam =
       (if not (phys_equal seam R.Execute) then
         wait "actual cleanup/file seam" (fun () -> R.entered seam > 0) >>= fun () -> heartbeat worker seam
        else return ()) >>= fun () ->
-      (match B.settlement request with
-       | Pending -> B.cancel request
-       | Settled -> check "only execute or enclosing database close can follow settlement" (phys_equal seam R.Execute || phys_equal seam R.Database_close); R.check_settled request);
+      (match B.settlement canceller with
+       | Pending -> B.cancel canceller
+       | Settled -> check "only execute or enclosing database close can follow settlement" (phys_equal seam R.Execute || phys_equal seam R.Database_close); R.check_settled canceller);
       if List.mem [R.Rollback; R.Disconnect; R.Database_close; R.Appender_clear; R.Appender_destroy; R.Chunk] seam ~equal:phys_equal
       then check "terminal cleanup joins before native seam" (R.joins () = 1);
       R.release_all ();
       worker >>| fun result ->
-      R.check_outcome seam (S.restore result); R.check_settled request;
+      R.check_outcome seam (S.restore result); R.check_settled canceller;
       if R.is_interrupted seam then check "native interrupted completion" (R.native_errors () = 1);
       R.check_inventory ();
       printf "async bridge: seam=%s native-heartbeat=ack interrupts=%d native-errors=%d joins=%d finish=%d locked-engine=%d\n%!"
         (R.name seam) (R.interrupts ()) (R.native_errors ()) (R.joins ()) (R.finish_calls ()) (R.locked_engine_calls ()))
 let dispatched slots =
   R.reset ();
-  let request = B.canceller () in
+  let canceller = B.canceller () in
   let started = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   let worker = submit slots (fun () ->
     Stdlib.Atomic.set started true;
     S.await ~label:"dispatched worker release" (fun () -> Stdlib.Atomic.get release);
-    R.suppressed_work request) in
+    R.suppressed_work canceller) in
   Monitor.protect ~finally:(fun () -> Stdlib.Atomic.set release true; worker >>| fun outcome -> ignore (S.restore outcome))
     (fun () ->
       wait "actual dispatched worker" (fun () -> Stdlib.Atomic.get started) >>= fun () ->
-      B.cancel request; B.cancel request;
-      check "dispatched request pending until worker enters" (match B.settlement request with Pending -> true | Settled -> false);
+      B.cancel canceller; B.cancel canceller;
+      check "dispatched request pending until worker enters" (match B.settlement canceller with Pending -> true | Settled -> false);
       Stdlib.Atomic.set release true;
       worker >>| fun outcome ->
       (match S.restore outcome with Error { Duckdb.Error.cause = Cancelled; _ } -> () | _ -> failwith "dispatched suppression");
       check "dispatched zero native calls and controllers" (R.executions () = 0 && R.interrupts () = 0 && R.joins () = 0);
-      R.check_settled request; R.check_inventory ();
+      R.check_settled canceller; R.check_inventory ();
       printf "async bridge: actual-dispatched cancelled-before-Bridge native-execute=0 controller-join=0\n%!")
 let saturation slots =
   R.reset (); R.hold Execute;
@@ -103,7 +103,7 @@ let saturation slots =
 exception Abandoned
 let abandoned slots ~fail_cleanup =
   R.reset (); R.hold Rollback;
-  let request = B.canceller () in
+  let canceller = B.canceller () in
   let completion = Ivar.create () and routed = Ivar.create () and failed = Ivar.create () in
   let caller = Monitor.create () in
   let deliveries = ref 0 in
@@ -112,7 +112,7 @@ let abandoned slots ~fail_cleanup =
     | Abandoned -> Ivar.fill_exn failed ()
     | other -> Ivar.fill_exn routed (other, Ivar.is_full completion, !deliveries));
   ignore (Scheduler.within_v ~monitor:caller (fun () -> Deferred.never ()));
-  let worker = submit slots (fun () -> R.exceptional_work ~fail_cleanup request) in
+  let worker = submit slots (fun () -> R.exceptional_work ~fail_cleanup canceller) in
   let producer = worker >>| fun outcome ->
     incr deliveries; Ivar.fill_exn completion outcome;
     match outcome with
@@ -125,7 +125,7 @@ let abandoned slots ~fail_cleanup =
       Ivar.read failed >>= fun () ->
       heartbeat worker Rollback >>= fun () ->
       check "already-admitted ordinary rollback retains ineligible controller" (R.joins () = 0 && R.interrupts () = 0);
-      B.cancel request; B.cancel request;
+      B.cancel canceller; B.cancel canceller;
       check "completion remains owned and pending" (not (Ivar.is_full completion));
       R.release Rollback;
       producer >>= fun () -> Ivar.read routed >>| fun (exception_, completed, count) ->
@@ -133,7 +133,7 @@ let abandoned slots ~fail_cleanup =
       let outcome = Option.value_exn (Ivar.peek completion) in
       R.check_exception ~fail_cleanup outcome;
       (match outcome with S.Raised failure -> check "monitor exception identity" (phys_equal exception_ failure.exception_) | _ -> assert false);
-      R.check_settled request; R.check_inventory ();
+      R.check_settled canceller; R.check_inventory ();
       printf "async bridge: abandoned-caller completion=once real-rollback-heartbeat=ack cleanup-failure=%b original-source-trace=ok\n%!" fail_cleanup)
 let stale_after_reuse slots =
   R.reset (); R.hold Execute;

@@ -10,7 +10,6 @@ type chunk
 type 'a step = Continue of 'a | Stop of 'a
 val prepare : connection -> string -> (prepared, error) result
 val prepare_transaction : transaction -> string -> (prepared, error) result
-val close_prepared : prepared -> (unit, error) result
 val parameter_count : prepared -> (int, error) result
 
 (** One-based parameter indices; known engine parameter types must match exactly.
@@ -40,8 +39,6 @@ val with_prepared_transaction : lifting:'e lifting -> transaction -> string ->
     and guarded against outward effects. No owner transition is exposed through
     a chunk. Aliases attempting mutation/fetch/close during a callback get Busy.
     Non-null codecs reject NULL on access, not on empty-result schema validation. *)
-val fold_chunks : lifting:'e lifting -> query_result -> init:'a ->
-  f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
 (* Executes with the current bindings and folds the result inside its lease;
    no result handle escapes. Execution failures are lifted as the fold's. *)
 val fold_prepared : lifting:'e lifting -> prepared -> init:'a ->
@@ -64,7 +61,6 @@ val child : prepared -> child
 
 (* The statement's SQL, for error context. *)
 val sql : prepared -> string
-val result_sql : query_result -> string
 val chunk_sql : chunk @ local -> string
 val parameter_types : prepared -> int array
 

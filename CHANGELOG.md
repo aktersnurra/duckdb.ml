@@ -28,6 +28,12 @@ Core redesign, sub-project 1 ([design](docs/design/core-redesign.md)).
   `prepare`, `prepare_transaction`, `close_prepared`, `execute_prepared`,
   `close_result`, `fold_rows` and `with_prepared_transaction` are removed
   (use `Statement.with_prepared`, `fold_chunks`, `execute`).
+- Published `duckdb.worker` library: `request_exec`/`find`/`find_opt`/
+  `collect`/`fold` collapse into `request_run`, which takes `Owned.shape`;
+  the cell-based `S.ingest` is removed; every operation takes
+  `Bridge.request @ unique`; raw `query`/`fold_rows`/`parquet_fold_rows` take
+  `Fields` plus `~row`; transaction callbacks take
+  `Duckdb.transaction @ local`.
 - `execute_transaction` is removed: `execute` takes `_ session`.
 - `open_database`, `close_database`, `connect` and `close_connection` move to
   `Owned`. `connection` and `transaction` are now ``[ `Connection ] session``

@@ -166,7 +166,7 @@ let () =
         Statement.fold_chunks p ~init:() ~f:(fun _ () ->
           busy (prepare c "select 1"); Ok (Stop ())))));
     Ok ());
-  clean (); Stdlib.print_endline "query: stop/error/exception/Break/effect/transaction-revocation=ok"
+  clean (); Stdlib.print_endline "query: stop/error/exception/Break/effect=ok"
 let () =
   let db = ok (Owned.open_database config) in
   Exn.protect ~finally:(fun () -> ok (Owned.close_database db)) ~f:(fun () ->

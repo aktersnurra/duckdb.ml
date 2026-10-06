@@ -27,11 +27,11 @@ expect() {
     if [[ $text != *"$needle"* ]]; then echo "$name: missing \"$needle\""; exit 1; fi
   done
 }
-expect escape_return 'local'
+expect escape_return 'is "local" to the parent region'
 expect escape_ref 'is "local" to the parent region'
 expect escape_closure 'is "local" to the parent region'
-expect prepared_escape 'local'
-expect appender_escape 'local'
+expect prepared_escape 'is "local" to the parent region'
+expect appender_escape 'is "local" to the parent region'
 expect busy_fold 'is "local" to the parent region'
 expect busy_transaction 'is "local" to the parent region'
 expect busy_appender 'is "local" to the parent region'

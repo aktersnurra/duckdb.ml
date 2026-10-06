@@ -75,8 +75,7 @@ val with_owned_transaction : connection -> f:(transaction -> ('a, Failure.t) res
 
 (* One operation set over both session kinds. [run] is the one execution entry
    point per shape, used by the adapters through [Duckdb.Owned]; the named
-   operations carry the row-count guards ([run] accepts any multiplicity with
-   [Find], [Find_opt], [Collect] and [Fold]). *)
+   operations carry the row-count guards ([run] accepts any multiplicity). *)
 module Session : sig
   include CONNECTION
     with type 'k owner = 'k Session.t and type error = Failure.t and type 'a future = 'a
