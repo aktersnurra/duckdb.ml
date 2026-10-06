@@ -73,6 +73,15 @@ let example () =
       | Error (A.Request.Adapter failure) -> failwith ("ingest: " ^ failure_name failure)
       | Error (A.Request.Request e) -> failwith ("ingest: " ^ core_error_name e))
     >>= fun () ->
+    (* The transaction token is local to this synchronous worker callback. *)
+    let count = Duckdb.Request.one Duckdb.Fields.[] Duckdb.Fields.[int64] ~row:Fn.id "SELECT count(*) FROM example" in
+    A.Request.with_transaction pool ~f:(fun transaction ->
+      Duckdb.Request.Session.find transaction count Duckdb.Args.[]) >>| (function
+      | Ok 2L -> ()
+      | Ok _ -> failwith "transaction count returned an unexpected value"
+      | Error (A.Request.Adapter failure) -> failwith ("transaction: " ^ failure_name failure)
+      | Error (A.Request.Request e) -> failwith ("transaction: " ^ core_error_name e))
+    >>= fun () ->
     let row = Duckdb.Fields.[int64] in
     await (A.query pool "SELECT i FROM example ORDER BY i" row ~row:Fn.id) >>= fun values ->
     (* This worker fold is synchronous; do not call or suspend Async here. *)

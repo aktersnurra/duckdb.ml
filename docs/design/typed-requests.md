@@ -3,6 +3,9 @@
 Status: approved and implemented (Phase 2, on top of `refactor/composable-core`
 at `7d8eafbe`). [Implementation notes](#implementation-notes) lists where the
 implementation differs from this proposal.
+The core redesign ([core-redesign.md](core-redesign.md)) later removed `Row.t`,
+`cell`, the L0 appender and result API, and `request_error`; this note records
+the API as it was at that time.
 
 A throwaway prototype of `Codec`/`Fields`/`Args`/`Request`/`Table.Columns`
 (stub bodies, the signatures below) was compiled with the project-local OxCaml

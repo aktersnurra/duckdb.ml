@@ -59,6 +59,14 @@ let run () =
            | Ok () -> ()
            | Error (E.Request.Adapter error) -> failwith ("ingest owned rows: " ^ error_name error)
            | Error (E.Request.Request e) -> failwith ("ingest owned rows: " ^ core_error_name e));
+          (* The transaction token is local to this synchronous worker callback. *)
+          let count = Duckdb.Request.one Duckdb.Fields.[] Duckdb.Fields.[int64] ~row:Fn.id "SELECT count(*) FROM example" in
+          (match E.Request.with_transaction pool ~f:(fun transaction ->
+             Duckdb.Request.Session.find transaction count Duckdb.Args.[]) with
+           | Ok 2L -> ()
+           | Ok _ -> failwith "transaction count returned an unexpected value"
+           | Error (E.Request.Adapter error) -> failwith ("transaction: " ^ error_name error)
+           | Error (E.Request.Request e) -> failwith ("transaction: " ^ core_error_name e));
           let rows = Duckdb.Fields.[int64] in
           (match E.query pool "SELECT i FROM example ORDER BY i" rows ~row:Fn.id with
            | Ok values when List.length values = 2 -> ()

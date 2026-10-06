@@ -1,6 +1,6 @@
 # Core redesign (design note)
 
-Status: proposed. Sub-project 1 of 3. It builds on the typed request and
+Status: approved and implemented (sub-project 1). Sub-project 1 of 3. It builds on the typed request and
 table layers ([typed-requests.md](typed-requests.md)) at `4a0712df`.
 
 ## Goal
@@ -381,6 +381,71 @@ worker thread. `duckdb.worker`'s `S` shrinks to its lifecycle,
 - **Docs and examples:** `docs/architecture.md`,
   `examples/synchronous.ml` and `CHANGELOG.md` are rewritten for the new
   API.
+
+## Implementation notes
+
+Where sub-project 1 as built differs from this note, by plan task:
+
+- **Task 3 (exact numerics).** The `duckdb` library depends on
+  `stdlib_stable` for `int8`/`int16`/`float32`, so its installed META names it.
+- **Task 4 (codecs).** A user encoder runs before connection admission; the
+  encoded base value is then bound through an internal `bind_scalar`. An
+  `Encode_rejected` therefore takes precedence over index, `Busy`, `Closed`
+  and type errors.
+- **Task 5 (`Row.t` removed).** Requests without rows use an internal
+  `No_rows` constructor, so zero-column decoders stay column-checked.
+  Per-row cancellation checkpoints in the row decoder were restored. The
+  adapters' raw `query`/`fold_rows` on SQL with a parameter (`SELECT ?`) now
+  report `Parameter_count` instead of an unbound-parameter error.
+- **Task 6 (tables only).** The `append_cells` test fixture was retired with
+  the public `cell`. Native-delivery hooks defer their gates past the catalog
+  query that `Table.with_appender` runs first.
+- **Task 7 (`Spine`).** `Spine.Make` provides the list type, `fold` and
+  `length`. The planned re-indexing functor (`Spine.Map`) took the plan's
+  fallback (applicative-functor typing of `module type of Make (A)`):
+  `fields_of_columns` stays a hand-written recursion in `request.ml`.
+- **Task 9 (errors).** The private module is `Failure`, because Base shadows
+  `Error` inside the library. Lifting a component error into a context is a
+  GADT, `'e lifting = Cause ctx | Flat ctx`. Request-level `Null` and
+  `Decode_rejected` rows are absolute within the result (`Statement.column`
+  stays chunk-relative). Contexts include `Parquet path`, per file for a
+  fold.
+- **Task 10 (session GADT, `Statement`, `Owned`).** `Statement.prepared` and
+  `Table.appender` are wrappers with `@@ global` payloads, like the session
+  (P5). `Statement.execute` was added (fold and discard). Execute is fused
+  with the fold, so the benchmark's `execute_ns` is about 0 on both paths and
+  `process_ns` includes execution.
+- **Task 11 (local handles).** Adapter transaction callbacks became
+  `transaction @ local` here rather than in Task 13. There are 11 scope
+  fixtures in `test/scope_compile` (escape into a result, a ref and a
+  closure; prepared and appender escape; busy fold, transaction, appender and
+  statement captures; `effect_escape`; `close_scoped`) plus `bridge_twice`
+  from Task 12. `effect_escape` confirms P8: an effect handler inside the
+  callback cannot capture the local token, but the runtime barrier is still
+  needed for one installed outside the scope. The adapters' pool record is
+  `t = { pool : pool @@ global }` so a local `t` still reaches the pool.
+  Runtime tests whose scenarios can no longer be written were deleted:
+  transaction drain, rollback draining foreign work, parent close with live
+  children, GC-and-drain, scoped-revoke ownership, and scoped prepared and
+  transaction drain. Each needed a handle that escaped its scope or was used
+  from another thread during the scope.
+- **Task 12 (Bridge).** Internally `handle = request`. A canceller prunes
+  finished requests and records whether any was bound (`bound_any`), which
+  `settlement` uses. `cancel` returns `unit`.
+- **Task 13 (adapters).** The Async interface check
+  (`test/async/check_interfaces.sh`) is wired into `runtest`.
+- **Eio foundation suite.** Its limit was raised from 60 s to 180 s: two
+  protected `SUM(range(1e10))` runs take about 52 s and flaked under parallel
+  `runtest` load.
+- **Revocation and drain machinery kept.** The runtime machinery in
+  `Resource`, `Query` and `Appender` (scoped close revoking escaped aliases,
+  draining admitted work from other threads) is unreachable through the safe
+  public API now that handles are local. It is kept as defence in depth: it is
+  still partly reachable through `Owned` misuse, and it backs future internal
+  callers. Its tests were the ones deleted in Task 11.
+- **Documentation.** `docs/architecture.md` already states that a typed SQL
+  layer is planned, replacing the "no SQL DSL" non-goal, before sub-project
+  2's design. `typed-requests.md` is unchanged.
 
 ## Appendix A: typed SQL end-state sketch
 

@@ -1,5 +1,13 @@
 # NON-PRODUCTION packaging prerequisite
 
+**Pre-redesign API, intentionally.** This fixture models the Bridge as it was
+before the core redesign (`docs/design/core-redesign.md`): a reusable
+`Bridge.create` request that is also the canceller, `cancel` returning
+`Closed` after settlement, and dynamically revoked facades. The production
+Bridge now has a shareable `canceller`, unique `request`s bound to it and a
+local facade. The fixture checks packaging (private modules, installed-only
+consumers), not Bridge semantics, so it is not migrated and is not run by CI.
+
 Two disposable Dune packages, **not Duckdb or an adapter**. `Packaging_core`
 wraps a private `Resource`; `packaging-consumer` builds and runs against only its
 installation. All tracked OCaml files are templates, so root Dune never builds
