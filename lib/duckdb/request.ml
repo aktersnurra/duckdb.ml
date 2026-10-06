@@ -128,25 +128,42 @@ let rec decode_row : type l f r. (l, f, r) Fields.t -> f -> Query.chunk @ local 
     | Ok value -> decode_row fields (fn value) chunk ~column:(column + 1) ~row ~seen
 
 (* Folds decoded rows. The accumulator carries a request failure as an early
-   Stop so the core fold still closes the result on every exit. *)
+   Stop so the core fold still closes the result on every exit. Cancellation
+   is checked before every row; it is free outside Bridge requests. Rows
+   below [Decode.limit] decode on the fast path; from there on the per-cell
+   path reports exactly the error it always did (NULL in a non-null column, a
+   mistyped column). On the fast path all columns of a row are decoded before
+   the row function is applied, so effects between curried arguments do not
+   run for a row with a later rejected column. *)
 let fold_decoded context fields fn ~validate result ~init ~f =
   let+ outcome, _ = within context (Query.fold_validated ~context result ~validate ~init:(Ok init, 0)
     ~f:(fun (chunk @ local) (acc, seen) ->
-      let length = Query.chunk_length chunk in
-      let rec loop row acc =
-        if row = length then Ok (Query.Continue (Ok acc, seen + length))
-        else match Query.result_checkpoint result with
-        | Error cause -> Ok (Query.Stop (Error { context; cause }, seen + row))
-        | Ok () -> match decode_row fields fn chunk ~column:0 ~row ~seen with
-          | Error cause -> Ok (Query.Stop (Error { context; cause }, seen + row))
-          | Ok value ->
-            match f value acc with
-            | Error e -> Ok (Query.Stop (Error e, seen + row))
-            | Ok (Query.Stop acc) -> Ok (Query.Stop (Ok acc, seen + row + 1))
-            | Ok (Query.Continue acc) -> loop (row + 1) acc in
       match acc with
       | Error _ -> Ok (Query.Stop (acc, seen))
-      | Ok acc -> loop 0 acc [@nontail])) in
+      | Ok acc ->
+        let length = Query.chunk_length chunk in
+        let limit = Decode.limit fields chunk ~length in
+        let stop e row = Ok (Query.Stop (Error e, seen + row)) in
+        let continue_with row acc value loop =
+          match f value acc with
+          | Error e -> stop e row
+          | Ok (Query.Stop acc) -> Ok (Query.Stop (Ok acc, seen + row + 1))
+          | Ok (Query.Continue acc) -> loop (row + 1) acc in
+        let rec loop row acc =
+          if row = length then Ok (Query.Continue (Ok acc, seen + length))
+          else match Query.result_checkpoint result with
+          | Error cause -> stop { context; cause } row
+          | Ok () ->
+          if row < limit then
+            match Decode.row fields fn chunk row with
+            | exception Decode.Rejected { column; reason } ->
+              stop { context; cause = Decode_rejected { column; row = seen + row; reason } } row
+            | value -> continue_with row acc value loop
+          else
+            match decode_row fields fn chunk ~column:0 ~row ~seen with
+            | Error cause -> stop { context; cause } row
+            | Ok value -> continue_with row acc value loop in
+        loop 0 acc [@nontail])) in
   outcome
 let fold_result : type row a. context -> row rows -> Query.query_result -> init:a ->
   f:(row -> a -> (a Query.step, Failure.t) result) -> (a, Failure.t) result =

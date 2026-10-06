@@ -296,3 +296,85 @@ let () =
       assert (List.length n = 1); Ok ()));
     assert (List.length (ok (R.Session.collect c rows D.Args.[0L])) = 1));
   Stdlib.print_endline "request: Session ops over connection and transaction=ok"
+
+module C = R.Session
+
+(* Arity 1, 8 (largest saturated) and 9 (curried fallback) decode identically. *)
+let () =
+  connected (fun c ->
+    let one = R.many D.Fields.[] D.Fields.[int64] ~row:Fn.id "SELECT i::BIGINT FROM range(3000) t(i) ORDER BY i" in
+    assert (List.length (ok (C.collect c one D.Args.[])) = 3000);
+    let eight = R.many D.Fields.[] D.Fields.[int64; int64; int64; int64; int64; int64; int64; int64]
+      ~row:(fun a b c d e f g h -> Int64.(a + b + c + d + e + f + g + h))
+      "SELECT i, i, i, i, i, i, i, i FROM (SELECT i::BIGINT i FROM range(3000) t(i)) ORDER BY i" in
+    let nine = R.many D.Fields.[] D.Fields.[int64; int64; int64; int64; int64; int64; int64; int64; nullable int64]
+      ~row:(fun a b c d e f g h k -> Int64.(a + b + c + d + e + f + g + h + Option.value k ~default:0L))
+      "SELECT i, i, i, i, i, i, i, i, CASE WHEN i % 2 = 0 THEN NULL ELSE i END FROM (SELECT i::BIGINT i FROM range(3000) t(i)) ORDER BY i" in
+    let sum rows = List.fold rows ~init:0L ~f:Int64.( + ) in
+    assert (Int64.equal (sum (ok (C.collect c eight D.Args.[]))) Int64.(8L * 4_498_500L));
+    assert (Int64.equal (sum (ok (C.collect c nine D.Args.[]))) Int64.(8L * 4_498_500L + 2_250_000L)));
+  Stdlib.print_endline "request: arities 1, 8 and 9 decode identically=ok"
+
+(* A NULL after a Stop is never read; a NULL before it is reported with its absolute row. *)
+let () =
+  connected (fun c ->
+    let q = R.many D.Fields.[] D.Fields.[int64] ~row:Fn.id
+      "SELECT CASE WHEN i = 2100 THEN NULL ELSE i::BIGINT END FROM range(3000) t(i) ORDER BY i" in
+    assert (Int64.equal (ok (C.fold c q D.Args.[] ~init:0L ~f:(fun x _ -> Ok (if Int64.(x = 5L) then D.Stop x else D.Continue x)))) 5L);
+    ignore (failed "null row" (fun e -> match e.cause with Null { column = 0; row = 2100 } -> true | _ -> false)
+      (C.collect c q D.Args.[]) : D.Error.t));
+  Stdlib.print_endline "request: NULL reported at its absolute row, never after Stop=ok"
+
+(* Within one row, the leftmost failing column is reported. *)
+let () =
+  connected (fun c ->
+    let bad = D.Codec.Values.custom ~encode:Or_error.return
+      ~decode:(fun (n : int64) -> if Int64.(n = 2049L) then Or_error.error_string "bad" else Ok n) D.Codec.Values.int64 in
+    let q = R.many D.Fields.[] D.Fields.[bad; int64] ~row:(fun a b -> Int64.(a + b))
+      "SELECT i::BIGINT, CASE WHEN i = 2049 THEN NULL ELSE i::BIGINT END FROM range(3000) t(i) ORDER BY i" in
+    ignore (failed "leftmost" (fun e -> match e.cause with Decode_rejected { column = 0; row = 2049; _ } -> true | _ -> false)
+      (C.collect c q D.Args.[]) : D.Error.t));
+  Stdlib.print_endline "request: leftmost column failure wins within a row=ok"
+
+(* Fast path: leftmost rejection within a row, saturated (arity 2) and across
+   the curried boundary (columns 7 and 8 of 9). *)
+let () =
+  connected (fun c ->
+    let bad = D.Codec.Values.custom ~encode:Or_error.return
+      ~decode:(fun (n : int64) -> if Int64.(n = 2049L) then Or_error.error_string "bad" else Ok n) D.Codec.Values.int64 in
+    let rejected column (e : D.Error.t) = match e.cause with
+      | Decode_rejected { column = c; row = 2049; _ } -> c = column | _ -> false in
+    let two = R.many D.Fields.[] D.Fields.[bad; bad] ~row:(fun a b -> Int64.(a + b))
+      "SELECT i::BIGINT, i::BIGINT FROM range(3000) t(i) ORDER BY i" in
+    ignore (failed "fast leftmost" (rejected 0) (C.collect c two D.Args.[]) : D.Error.t);
+    let nine = R.many D.Fields.[] D.Fields.[int64; int64; int64; int64; int64; int64; int64; bad; bad]
+      ~row:(fun a b c d e f g h k -> Int64.(a + b + c + d + e + f + g + h + k))
+      "SELECT i, i, i, i, i, i, i, i, i FROM (SELECT i::BIGINT i FROM range(3000) t(i)) ORDER BY i" in
+    ignore (failed "curried leftmost" (rejected 7) (C.collect c nine D.Args.[]) : D.Error.t));
+  Stdlib.print_endline "request: fast-path leftmost rejection, saturated and curried=ok"
+
+(* A result type that validation accepted as unresolved but that differs from
+   the declaration is reported, never reinterpreted. *)
+let () =
+  connected (fun c ->
+    let q = R.many D.Fields.[int64] D.Fields.[float64] ~row:Fn.id "SELECT ?" in
+    ignore (failed "unresolved result type" (fun e -> match e.cause with
+      | Type_mismatch { index = 0; expected = "DOUBLE"; actual = "BIGINT" } -> true | _ -> false)
+      (C.collect c q D.Args.[1L]) : D.Error.t));
+  Stdlib.print_endline "request: unresolved result type mismatch reported, not reinterpreted=ok"
+
+(* Fast path over a nullable custom codec and timestamp scalars. *)
+let () =
+  connected (fun c ->
+    let doubled = D.Codec.Values.custom ~encode:(fun n -> Ok Int64.(n / 2L))
+      ~decode:(fun n -> Ok Int64.(n * 2L)) D.Codec.Values.int64 in
+    let q = R.many D.Fields.[] D.Fields.[nullable doubled; timestamp_s; timestamp_ms] ~row:(fun a s ms -> a, s, ms)
+      "SELECT CASE WHEN i = 7 THEN NULL ELSE i::BIGINT END, make_timestamp(i * 1000000)::TIMESTAMP_S, \
+       make_timestamp(i * 1000)::TIMESTAMP_MS FROM range(3000) t(i) ORDER BY i" in
+    let rows = ok (C.collect c q D.Args.[]) in
+    assert (List.length rows = 3000);
+    List.iteri rows ~f:(fun i (a, s, ms) ->
+      let i = Int64.of_int i in
+      assert (Option.equal Int64.equal a (if Int64.(i = 7L) then None else Some Int64.(i * 2L)));
+      assert (Int64.equal s i && Int64.equal ms i)));
+  Stdlib.print_endline "request: fast path nullable custom and timestamps round-trip=ok"
