@@ -12,7 +12,7 @@ compile() {
 }
 compile -o "$out/owned.cmi" "$root/test/eio/compile/owned.mli"
 compile -o "$out/owned.cmo" "$root/test/eio/compile/owned.ml"
-for name in borrowed_escape borrowed_domain forge_pool private_worker private_resource request_promise; do
+for name in adapter_tx_escape borrowed_escape borrowed_domain forge_pool private_worker private_resource request_promise; do
   cp "$root/test/eio/compile/$name.ml.fail" "$out/$name.ml"
   if compile -o "$out/$name.cmo" "$out/$name.ml" >"$out/$name.log" 2>&1; then
     echo "unexpected Eio mode acceptance: $name" >&2
@@ -21,6 +21,7 @@ for name in borrowed_escape borrowed_domain forge_pool private_worker private_re
   cat "$out/$name.log"
   grep -Fq "$name.ml" "$out/$name.log"
   case "$name" in
+  adapter_tx_escape) grep -Fq 'is "local" to the parent region' "$out/$name.log" ;;
   borrowed_escape)
     grep -Fq 'chunk' "$out/$name.log"
     grep -Fq '"local"' "$out/$name.log"
@@ -40,4 +41,4 @@ for name in borrowed_escape borrowed_domain forge_pool private_worker private_re
     ;;
   esac
 done
-echo "Eio modes: owned transaction result compiles; borrowed callback escape/domain handoff, private/opaque forgeries and typed results awaited as promises reject"
+echo "Eio modes: owned transaction result compiles; adapter transaction token escape, borrowed callback escape/domain handoff, private/opaque forgeries and typed results awaited as promises reject"

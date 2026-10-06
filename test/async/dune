@@ -39,3 +39,8 @@
  (action (run bash %{dep:run_negative_controls.sh} ./%{exe:test_duckdb_async.exe})))
 (test (name typed_request_async) (modules typed_request_async)
  (libraries core core_unix async duckdb duckdb-async duckdb-ffi))
+(rule (alias runtest)
+ (deps check_interfaces.sh (package duckdb) (package duckdb-async)
+       ../../lib/async/duckdb_async.mli
+       (glob_files compile/*))
+ (action (run bash %{dep:check_interfaces.sh})))

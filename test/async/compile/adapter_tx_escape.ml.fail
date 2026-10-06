@@ -1,0 +1,2 @@
+let leak = ref None
+let f pool = Duckdb_async.transaction pool ~f:(fun tx -> leak := Some tx; Ok ())

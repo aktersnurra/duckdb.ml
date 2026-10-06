@@ -35,7 +35,7 @@
 (rule (alias runtest)
  (deps check_modes.sh
        compile/owned.mli compile/owned.ml
-       compile/borrowed_escape.ml.fail compile/borrowed_domain.ml.fail
+       compile/adapter_tx_escape.ml.fail compile/borrowed_escape.ml.fail compile/borrowed_domain.ml.fail
        compile/forge_pool.ml.fail compile/private_worker.ml.fail compile/private_resource.ml.fail
        compile/request_promise.ml.fail)
  (action (run bash %{dep:check_modes.sh})))

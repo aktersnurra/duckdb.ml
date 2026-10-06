@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-root=$(cd "$(dirname "$0")/../.." && pwd)
-out=$(mktemp -d "$root/.local/stage4c/interfaces.XXXXXX")
+root=${DUNE_SOURCEROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
 export OCAMLPATH="$root/_build/install/default/lib:$root/_opam/lib"
 compile() {
   "$root/_opam/bin/ocamlfind" ocamlc -thread -extension-universe beta -package async,duckdb -I "$out" -c "$@"
@@ -11,7 +12,7 @@ for name in public_consumer owned; do
   compile -o "$out/$name.cmi" "$root/test/async/compile/$name.mli"
   compile -o "$out/$name.cmo" "$root/test/async/compile/$name.ml"
 done
-for name in borrowed deferred_callback domain forge_request private_worker private_resource request_raw_connection; do
+for name in adapter_tx_escape borrowed deferred_callback domain forge_request private_worker private_resource request_raw_connection; do
   cp "$root/test/async/compile/$name.ml.fail" "$out/$name.ml"
   if compile -o "$out/$name.cmo" "$out/$name.ml" >"$out/$name.log" 2>&1; then
     echo "unexpected acceptance: $name" >&2
@@ -20,6 +21,7 @@ for name in borrowed deferred_callback domain forge_request private_worker priva
   cat "$out/$name.log"
   grep -Fq "$name.ml" "$out/$name.log"
   case "$name" in
+  adapter_tx_escape) grep -Fq 'is "local" to the parent region' "$out/$name.log" ;;
   borrowed)
     grep -Fq 'chunk' "$out/$name.log"
     grep -Fq '"local"' "$out/$name.log"
@@ -46,4 +48,4 @@ for name in borrowed deferred_callback domain forge_request private_worker priva
     ;;
   esac
 done
-echo "async interfaces: seven source-specific negatives (incl. typed request on a raw connection); paired public consumers and Ok(existing Deferred) limitation compile; $out"
+echo "async interfaces: eight source-specific negatives (incl. typed request on a raw connection, adapter transaction token escape); paired public consumers and Ok(existing Deferred) limitation compile; $out"
