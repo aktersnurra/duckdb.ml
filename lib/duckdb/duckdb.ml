@@ -57,6 +57,7 @@ module Statement = struct
   let chunk_length = Q.chunk_length
   let column (chunk @ local) ~column ~row codec =
     within (Query (Q.chunk_sql chunk)) (Q.column chunk ~column ~row codec)
+  module Column = Column
 end
 
 module Fields = Fields

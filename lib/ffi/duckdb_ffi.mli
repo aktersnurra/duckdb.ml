@@ -162,6 +162,24 @@ val chunk_int64 : prepared @ local -> int -> int -> int64#
 val box_int64 : int64# -> int64
 val chunk_float : prepared @ local -> int -> int -> float
 val chunk_string : prepared @ local -> int -> int -> string
+external view_int64 : prepared @ local -> int -> int -> int64#
+  = "ml_duckdb_view_int64_byte" "ml_duckdb_view_int64" [@@noalloc]
+external view_int32 : prepared @ local -> int -> int -> int32#
+  = "ml_duckdb_view_int32_byte" "ml_duckdb_view_int32" [@@noalloc]
+external view_double : prepared @ local -> int -> int -> float#
+  = "ml_duckdb_view_double_byte" "ml_duckdb_view_double" [@@noalloc]
+external view_float : prepared @ local -> int -> int -> float32#
+  = "ml_duckdb_view_float_byte" "ml_duckdb_view_float" [@@noalloc]
+external view_int16 : prepared @ local -> int -> int -> int = "ml_duckdb_view_int16" [@@noalloc]
+external view_int8 : prepared @ local -> int -> int -> int = "ml_duckdb_view_int8" [@@noalloc]
+external view_bool : prepared @ local -> int -> int -> bool = "ml_duckdb_view_bool" [@@noalloc]
+external view_valid : prepared @ local -> int -> int -> bool = "ml_duckdb_view_valid" [@@noalloc]
+external view_first_null : prepared @ local -> int -> int -> int = "ml_duckdb_view_first_null" [@@noalloc]
+external view_blit : prepared @ local -> int -> int -> ('a, 'b, Bigarray.c_layout) Bigarray.Array1.t @ local -> int -> unit
+  = "ml_duckdb_view_blit" [@@noalloc]
+external view_blit_validity : prepared @ local -> int -> int ->
+  (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t @ local -> int -> unit
+  = "ml_duckdb_view_blit_validity" [@@noalloc]
 
 (** Unsafe transaction-owned appender. Input cells are (type id, is-null,
     integer bits, floating value, bytes). Whole batches are copied before unlock.

@@ -44,6 +44,27 @@ int duckdb_ml_allowed_statement(duckdb_statement_type type);
 bool duckdb_ml_changes_schema(duckdb_prepared_statement prepared);
 bool duckdb_ml_schema_enter(connection_owner *owner, duckdb_prepared_statement prepared);
 void duckdb_ml_schema_leave(bool changing);
+/* Per-chunk cache of each column's vector. The array is allocated at a
+   result's first fetch with each column's [type] and element [width] (0 when
+   the type is not fixed-width), which never change for a result; [data] and
+   [validity] are refreshed at every fetch and are valid only while
+   [chunk] lives. The array outlives each chunk (it is freed with the result),
+   so its pointers dangle between chunks: readers must refuse when [chunk] is
+   NULL or a row is not below [chunk_rows], which is 0 whenever no chunk is
+   cached. [validity] is NULL when every row is valid. */
+typedef struct { void *data; uint64_t *validity; duckdb_type type; uint8_t width; } duckdb_ml_vector;
+/* Bytes per element of a fixed-width engine type the views read; 0 otherwise. */
+static inline uint8_t duckdb_ml_type_width(duckdb_type t) {
+    switch (t) {
+    case DUCKDB_TYPE_BOOLEAN: case DUCKDB_TYPE_TINYINT: return 1;
+    case DUCKDB_TYPE_SMALLINT: return 2;
+    case DUCKDB_TYPE_INTEGER: case DUCKDB_TYPE_DATE: case DUCKDB_TYPE_FLOAT: return 4;
+    case DUCKDB_TYPE_BIGINT: case DUCKDB_TYPE_DOUBLE: case DUCKDB_TYPE_TIMESTAMP:
+    case DUCKDB_TYPE_TIMESTAMP_S: case DUCKDB_TYPE_TIMESTAMP_MS: case DUCKDB_TYPE_TIMESTAMP_NS:
+    case DUCKDB_TYPE_TIMESTAMP_TZ: return 8;
+    default: return 0;
+    }
+}
 typedef struct prepared_owner {
     connection_owner *parent;
     duckdb_prepared_statement prepared;
@@ -53,6 +74,9 @@ typedef struct prepared_owner {
     char *input;
     int has_result, status;
     char message[DUCKDB_ML_MESSAGE_SIZE];
+    duckdb_ml_vector *vectors;
+    idx_t vector_count;
+    idx_t chunk_rows; /* rows of [chunk] behind the cache; 0 without one */
 } prepared_owner;
 prepared_owner *duckdb_ml_prepared(value v);
 #endif

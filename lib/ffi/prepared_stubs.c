@@ -19,7 +19,9 @@ static void clear_input(prepared_owner *p) {
 static void clear_result(prepared_owner *p, duckdb_ml_runtime runtime) {
     if (!p) return;
     duckdb_ml_native_cleanup_begin(p->parent, runtime);
+    p->chunk_rows = 0;
     if (p->chunk) { duckdb_destroy_data_chunk(&p->chunk); duckdb_ml_released(); }
+    if (p->vectors) { free(p->vectors); p->vectors = NULL; p->vector_count = 0; duckdb_ml_released(); }
     if (p->has_result) { duckdb_destroy_result(&p->result); p->has_result = 0; duckdb_ml_released(); }
     duckdb_ml_native_cleanup_end(p->parent, runtime);
 }
@@ -103,11 +105,33 @@ CAMLprim value ml_duckdb_execute_prepared(value v) {
     duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
+/* Fills the vector cache for the fetched chunk. The cache is sized, and each
+   column's type and width recorded, once per result (neither changes); it is
+   freed with the result. */
+static void cache_vectors(prepared_owner *p) {
+    idx_t n = duckdb_data_chunk_get_column_count(p->chunk);
+    if (!p->vectors && n) {
+        p->vectors = calloc(n, sizeof(duckdb_ml_vector));
+        if (!p->vectors) { set_error(p, "Cannot allocate the vector cache"); return; }
+        duckdb_ml_acquired(); p->vector_count = n;
+        for (idx_t c = 0; c < n; ++c) {
+            p->vectors[c].type = duckdb_column_type(&p->result, c);
+            p->vectors[c].width = duckdb_ml_type_width(p->vectors[c].type);
+        }
+    }
+    for (idx_t c = 0; c < n && c < p->vector_count; ++c) {
+        duckdb_vector vector = duckdb_data_chunk_get_vector(p->chunk, c);
+        p->vectors[c].data = duckdb_vector_get_data(vector);
+        p->vectors[c].validity = duckdb_vector_get_validity(vector);
+    }
+    if (p->vectors) p->chunk_rows = duckdb_data_chunk_get_size(p->chunk);
+}
 CAMLprim value ml_duckdb_fetch(value v) {
     CAMLparam1(v); prepared_owner *p = Prepared(v);
     caml_enter_blocking_section();
     duckdb_ml_native_work_begin(p->parent);
     duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+    p->chunk_rows = 0;
     if (p->chunk) { duckdb_destroy_data_chunk(&p->chunk); duckdb_ml_released(); }
     duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
     p->status = DUCKDB_ML_STATUS_OK;
@@ -115,7 +139,7 @@ CAMLprim value ml_duckdb_fetch(value v) {
     else {
         p->chunk = duckdb_fetch_chunk(p->result);
         duckdb_ml_native_user_call_end(p->parent);
-        if (p->chunk) duckdb_ml_acquired();
+        if (p->chunk) { duckdb_ml_acquired(); cache_vectors(p); }
         else { const char *error = duckdb_result_error(&p->result); if (error && *error) set_error(p, error); }
     }
     duckdb_ml_native_work_end(p->parent);

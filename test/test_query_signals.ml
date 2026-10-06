@@ -71,11 +71,14 @@ let () =
      | exception exn when contains_break exn -> ()
      | exception exn -> raise exn
      | () -> failwith "missing Break");
+    (* The per-result vector cache is one native allocation from the first
+       fetched chunk until the result closes, so it outlives the last chunk. *)
     let expected = match mode with
-      | "bind-enter" | "execute-leave" | "fetch-enter" | "result-close-enter" -> 7
+      | "bind-enter" | "execute-leave" | "fetch-enter" -> 7
+      | "result-close-enter" -> 8
       | "prepare-enter" | "prepare-leave" | "bind-leave" | "reset-enter" | "reset-leave" | "execute-enter" | "prepared-close-enter" | "result-close-leave" -> 6
       | "prepared-close-leave" -> 5
-      | "fetch-leave" | "next-fetch-enter" | "next-fetch-leave" | "callback" | "chunk-close-enter" -> 8
+      | "fetch-leave" | "next-fetch-enter" | "next-fetch-leave" | "callback" | "chunk-close-enter" -> 9
       | "chunk-close-leave" | "bind-int-enter" | "bind-int-leave" | "bind-float-enter" | "bind-float-leave"
       | "bind-null-enter" | "bind-null-leave" -> 6
       | _ -> failwith "unknown test mode" in

@@ -1,0 +1,7 @@
+module D = Duckdb
+module C = D.Statement.Column
+let leak (p @ local) =
+  D.Statement.fold_chunks p ~init:None ~f:(fun chunk _ ->
+    match C.view chunk 0 D.Scalar.Int64 C.Non_null with
+    | C.Opened v -> Ok (D.Stop (Some v))
+    | C.Rejected e -> Error e)

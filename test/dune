@@ -225,3 +225,5 @@
  (deps check_scope_types.sh ../lib/duckdb/duckdb.mli (glob_files scope_compile/*))
  (action (run bash %{dep:check_scope_types.sh} %{ocamlc})))
 (test (name test_table) (modules test_table) (libraries base duckdb duckdb-ffi))
+(test (name test_column) (modules test_column)
+ (libraries base duckdb duckdb-ffi stdlib_stable stdlib_upstream_compatible))

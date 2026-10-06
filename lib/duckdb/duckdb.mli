@@ -251,6 +251,45 @@ module Statement : sig
       validates the exact engine type; returned strings/blobs/scalars are owned.
       [Null] and [Decode_rejected] rows are chunk-relative here. *)
   val column : chunk @ local -> column:int -> row:int -> ('a, _) Codec.t -> ('a, Error.t) result
+
+  (** Typed views of one column of a chunk, type-checked once per chunk. A
+      view is local to the chunk callback. Plain accessors exist only on
+      non-null views; nullable views offer [is_null] and accessors with an
+      explicit [default]. Numeric accessors never allocate ([@zero_alloc],
+      checked by the build). A row index outside [0, length) raises
+      [Invalid_argument]. Strings are owned copies. [view] rejects with
+      [Type_mismatch] unless the column's engine type equals the scalar's
+      exactly (e.g. [Int64] on an INTEGER column is rejected), and with
+      [Index] for a column outside the result. Dates read through [int32]
+      (days) and timestamps through [int64] (ticks). *)
+  module Column : sig
+    type ('a, 'n) t
+    type _ nulls =
+      | Non_null : Codec.non_null nulls
+      (** The view is rejected with [Null] (chunk-relative row) if the
+          column has a NULL in this chunk. *)
+      | Nullable : Codec.nullable nulls
+    type ('a, 'n) opened = Opened of ('a, 'n) t | Rejected of Error.t @@ global
+    val view : chunk @ local -> int -> 'a Scalar.t -> 'n nulls -> ('a, 'n) opened @ local
+    val length : _ t @ local -> int
+    val int64 : (int64, Codec.non_null) t @ local -> int -> int64# [@@zero_alloc]
+    val float : (float, Codec.non_null) t @ local -> int -> float# [@@zero_alloc]
+    val int32 : (int32, Codec.non_null) t @ local -> int -> int32# [@@zero_alloc]
+    val float32 : (float32, Codec.non_null) t @ local -> int -> float32# [@@zero_alloc]
+    val int16 : (int16, Codec.non_null) t @ local -> int -> int16 [@@zero_alloc]
+    val int8 : (int8, Codec.non_null) t @ local -> int -> int8 [@@zero_alloc]
+    val bool : (bool, Codec.non_null) t @ local -> int -> bool [@@zero_alloc]
+    val string : (string, Codec.non_null) t @ local -> int -> string
+    val is_null : (_, Codec.nullable) t @ local -> int -> bool [@@zero_alloc]
+    val int64_or : (int64, Codec.nullable) t @ local -> default:int64# -> int -> int64# [@@zero_alloc]
+    val float_or : (float, Codec.nullable) t @ local -> default:float# -> int -> float# [@@zero_alloc]
+    val int32_or : (int32, Codec.nullable) t @ local -> default:int32# -> int -> int32# [@@zero_alloc]
+    val float32_or : (float32, Codec.nullable) t @ local -> default:float32# -> int -> float32# [@@zero_alloc]
+    val int16_or : (int16, Codec.nullable) t @ local -> default:int16 -> int -> int16 [@@zero_alloc]
+    val int8_or : (int8, Codec.nullable) t @ local -> default:int8 -> int -> int8 [@@zero_alloc]
+    val bool_or : (bool, Codec.nullable) t @ local -> default:bool -> int -> bool [@@zero_alloc]
+    val string_opt : (string, Codec.nullable) t @ local -> int -> string option
+  end
 end
 
 (** Declared parameters or result columns, e.g. [Fields.[int64; nullable string]].

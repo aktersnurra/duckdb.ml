@@ -6,7 +6,7 @@ open Resource
     prepared through a transaction is revoked/closed before its settlement. *)
 type prepared
 type query_result
-type chunk
+type chunk = Borrowed_chunk.t
 type 'a step = Continue of 'a | Stop of 'a
 val prepare : connection -> string -> (prepared, error) result
 val prepare_transaction : transaction -> string -> (prepared, error) result

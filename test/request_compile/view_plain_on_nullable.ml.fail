@@ -1,0 +1,3 @@
+module D = Duckdb
+module C = D.Statement.Column
+let f (v : (int64, D.Codec.nullable) C.t @ local) = C.int64 v 0
