@@ -60,6 +60,78 @@ module Statement = struct
   module Column = Column
 end
 
+module Bulk = struct
+  include Bulk
+  module A1 = Bigarray.Array1
+  module C = Statement.Column
+  (* Grows by doubling; the result is a [sub] of the final buffer (shared, no copy). *)
+  let grow make a ~used ~need =
+    if A1.dim a >= need then a
+    else let b = make (Int.max need (2 * A1.dim a)) in
+      A1.blit (A1.sub a 0 used) (A1.sub b 0 used); b
+  let absolute ~used (e : Error.t) = match e.cause with
+    | Null { column; row } -> { e with cause = Null { column; row = used + row } }
+    | _ -> e
+  (* Checks the column against the result's types before any chunk, so an
+     empty result (whose chunks are never folded) is checked too. The views
+     repeat the check per chunk. *)
+  let check_column ~column scalar types =
+    let length = Array.length types in
+    if column < 0 || column >= length then Error (Error.Index { index = column; length })
+    else if types.(column) <> Scalar.native_id scalar then
+      Error (Error.Type_mismatch { index = column; expected = Scalar.name scalar;
+                                   actual = Error.type_name types.(column) })
+    else Ok ()
+  let fold_column ({ Statement.prepared = q } @ local) ~column scalar ~init ~f =
+    Q.fold_prepared_validated ~lifting:(Flat (Query (Q.sql q))) q ~validate:(check_column ~column scalar) ~init ~f
+  let collect (type a k e n) (p : Statement.prepared @ local) ~column (kind : (a, k, e) kind)
+      (nulls : n C.nulls) : ((k, e, n) t, Error.t) result =
+    let make n = A1.create (bigarray_kind kind) Bigarray.c_layout n in
+    let make_mask n = A1.create Bigarray.int8_unsigned Bigarray.c_layout n in
+    let initial = 2048 in
+    let mask_initial = match nulls with C.Non_null -> 0 | C.Nullable -> initial in
+    let folded = fold_column p ~column (scalar kind) ~init:(make initial, make_mask mask_initial, 0)
+      ~f:(fun chunk (data, mask, used) ->
+        match C.view chunk column (scalar kind) nulls with
+        | C.Rejected e -> Error (absolute ~used e)
+        | C.Opened v ->
+          let n = C.length v in
+          let data = grow make data ~used ~need:(used + n) in
+          blit v kind ~into:data ~pos:used;
+          let mask = match nulls with
+            | C.Non_null -> mask
+            | C.Nullable -> let mask = grow make_mask mask ~used ~need:(used + n) in
+              blit_validity v ~into:mask ~pos:used; mask in
+          Ok (Continue (data, mask, used + n))) in
+    Stdlib.Result.map (fun (data, mask, used) ->
+      let validity : n validity = match nulls with
+        | C.Non_null -> All_valid
+        | C.Nullable -> Mask (A1.sub mask 0 used) in
+      { data = A1.sub data 0 used; validity }) folded
+  (* One array per chunk, filled by [fill] from the chunk's view. *)
+  let fold_strings (type m b) (p : Statement.prepared @ local) ~column scalar (nulls : m C.nulls)
+      ~(empty : b) ~(fill : (string, m) C.t @ local -> b array -> unit) : (b array, Error.t) result =
+    let folded = fold_column p ~column scalar ~init:([], 0) ~f:(fun chunk (parts, used) ->
+      match C.view chunk column scalar nulls with
+      | C.Rejected e -> Error (absolute ~used e)
+      | C.Opened v ->
+        let values = Array.make (C.length v) empty in
+        fill v values;
+        Ok (Continue (values :: parts, used + Array.length values))) in
+    Stdlib.Result.map (fun (parts, _) -> Array.concat (List.rev parts)) folded
+  let collect_strings (type n) (p : Statement.prepared @ local) ~column scalar (nulls : n C.nulls)
+      : (n strings, Error.t) result =
+    match nulls with
+    | C.Non_null ->
+      Stdlib.Result.map (fun all : n strings -> Strings all)
+        (fold_strings p ~column scalar nulls ~empty:"" ~fill:(fun v values ->
+          for i = 0 to Array.length values - 1 do values.(i) <- C.string v i done))
+    | C.Nullable ->
+      Stdlib.Result.map (fun all : n strings -> Strings_opt all)
+        (fold_strings p ~column scalar nulls ~empty:None ~fill:(fun v values ->
+          for i = 0 to Array.length values - 1 do values.(i) <- C.string_opt v i done))
+end
+
 module Fields = Fields
 module Args = Args
 module Request = Request

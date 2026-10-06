@@ -43,6 +43,10 @@ val with_prepared_transaction : lifting:'e lifting -> transaction -> string ->
    no result handle escapes. Execution failures are lifted as the fold's. *)
 val fold_prepared : lifting:'e lifting -> prepared -> init:'a ->
   f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
+(* [fold_prepared] after [validate] accepts the executed result's column
+   types, so an empty result is checked too. *)
+val fold_prepared_validated : lifting:'e lifting -> prepared -> validate:(int array -> (unit, error) result) ->
+  init:'a -> f:(chunk @ local -> 'a -> ('a step, 'e) result) -> ('a, 'e) result
 val chunk_length : chunk @ local -> int
 
 (** Zero-based column and row indices, checked before reading. Each access

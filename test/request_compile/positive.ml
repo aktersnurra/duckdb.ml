@@ -55,3 +55,8 @@ module Count (B : R.CONNECTION) = struct
 end
 module Sync_count = Count (R.Session)
 let (_ : D.connection -> (int64 list, D.Error.t) result) = Sync_count.all
+(* The nullability phantoms are distinct, so single-case matches on Bulk
+   indices are exhaustive. *)
+let _all_valid (t : (int64, Bigarray.int64_elt, D.Codec.non_null) D.Bulk.t) = match t.D.Bulk.validity with D.Bulk.All_valid -> ()
+let _mask (t : (float, Bigarray.float64_elt, D.Codec.nullable) D.Bulk.t) = match t.D.Bulk.validity with D.Bulk.Mask m -> m
+let _strings_opt : D.Codec.nullable D.Bulk.strings -> string option array = function D.Bulk.Strings_opt v -> v

@@ -19,8 +19,8 @@ end
     to a user type. The nullability index rules out [nullable (nullable _)]
     and keeps NULL away from custom conversions. *)
 module Codec : sig
-  type non_null
-  type nullable
+  type non_null = private Non_null_codec
+  type nullable = private Nullable_codec
   type ('a, 'nullability) t
 
   (** Shorthands; included by [Fields] and [Table.Columns] for list literals. *)
@@ -290,6 +290,48 @@ module Statement : sig
     val bool_or : (bool, Codec.nullable) t @ local -> default:bool -> int -> bool [@@zero_alloc]
     val string_opt : (string, Codec.nullable) t @ local -> int -> string option
   end
+end
+
+(** Whole columns as Bigarrays: one native copy per chunk, nothing on the
+    OCaml heap per value. *)
+module Bulk : sig
+  (** ['a] is the view's type, ['k]/['e] the Bigarray element. Dates and
+      timestamps share int32/int64 and carry their scalar. *)
+  type ('a, 'k, 'e) kind =
+    | Int64 : int64 Scalar.t -> (int64, int64, Bigarray.int64_elt) kind
+    | Int32 : int32 Scalar.t -> (int32, int32, Bigarray.int32_elt) kind
+    | Int16 : (int16, int, Bigarray.int16_signed_elt) kind
+    | Int8 : (int8, int, Bigarray.int8_signed_elt) kind
+    | Bool : (bool, int, Bigarray.int8_unsigned_elt) kind
+    (** DuckDB's bytes: 0 or 1 for engine-produced values. *)
+    | Float64 : (float, float, Bigarray.float64_elt) kind
+    | Float32 : (float32, float, Bigarray.float32_elt) kind
+  (** One byte per row: 1 valid, 0 NULL. *)
+  type mask = (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+  type 'n validity = All_valid : Codec.non_null validity | Mask : mask -> Codec.nullable validity
+  (** NULL rows hold 0. *)
+  type ('k, 'e, 'n) t = { data : ('k, 'e, Bigarray.c_layout) Bigarray.Array1.t; validity : 'n validity }
+  type _ strings =
+    | Strings : string array -> Codec.non_null strings
+    | Strings_opt : string option array -> Codec.nullable strings
+
+  (** Copy one chunk's column into [into] at [pos]; raises [Invalid_argument]
+      if [into] is too short. *)
+  val blit : ('a, _) Statement.Column.t @ local -> ('a, 'k, 'e) kind ->
+    into:('k, 'e, Bigarray.c_layout) Bigarray.Array1.t @ local -> pos:int -> unit [@@zero_alloc]
+  val blit_validity : ('a, Codec.nullable) Statement.Column.t @ local -> into:mask @ local -> pos:int -> unit [@@zero_alloc]
+
+  (** Executes the statement and collects one column. The column index and
+      its exact engine type are checked against the result before any chunk,
+      so an empty result is rejected with [Index] or [Type_mismatch] too. A
+      NULL in a [Non_null] collect is [Null] with the row absolute within the
+      result. [data] is a [sub] of a buffer grown by doubling, so it may keep
+      up to about twice its length of backing storage. [collect_strings]
+      takes [Scalar.String] or [Scalar.Blob]. *)
+  val collect : Statement.prepared @ local -> column:int -> ('a, 'k, 'e) kind ->
+    'n Statement.Column.nulls -> (('k, 'e, 'n) t, Error.t) result
+  val collect_strings : Statement.prepared @ local -> column:int -> string Scalar.t ->
+    'n Statement.Column.nulls -> ('n strings, Error.t) result
 end
 
 (** Declared parameters or result columns, e.g. [Fields.[int64; nullable string]].

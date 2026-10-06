@@ -227,3 +227,4 @@
 (test (name test_table) (modules test_table) (libraries base duckdb duckdb-ffi))
 (test (name test_column) (modules test_column)
  (libraries base duckdb duckdb-ffi stdlib_stable stdlib_upstream_compatible))
+(test (name test_bulk) (modules test_bulk) (libraries base duckdb duckdb-ffi))

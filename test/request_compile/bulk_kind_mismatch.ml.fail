@@ -1,0 +1,3 @@
+module D = Duckdb
+let f (v : (float, D.Codec.non_null) D.Statement.Column.t @ local) into =
+  D.Bulk.blit v (D.Bulk.Int64 D.Scalar.Int64) ~into ~pos:0

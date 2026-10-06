@@ -1,7 +1,7 @@
 open! Base
 
-type non_null = Non_null_codec
-type nullable = Nullable_codec
+type non_null = private Non_null_codec
+type nullable = private Nullable_codec
 
 (** A non-null value crosses the native boundary as one base scalar; [decode]
     and [encode] convert between it and the user type. *)

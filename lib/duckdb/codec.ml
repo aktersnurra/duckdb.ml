@@ -1,7 +1,7 @@
 open! Base
 
-type non_null = Non_null_codec
-type nullable = Nullable_codec
+type non_null = private Non_null_codec
+type nullable = private Nullable_codec
 type 'a plan = Plan : { scalar : 'b Scalar.t; decode : 'b -> 'a Or_error.t; encode : 'a -> 'b Or_error.t } -> 'a plan
 type ('a, 'nullability) t =
   | Non_null : 'a plan -> ('a, non_null) t
