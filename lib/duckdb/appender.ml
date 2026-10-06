@@ -4,7 +4,6 @@ open Failure
 open Syntax
 module F = Duckdb_ffi
 module S = Scalar
-type cell = Cell : 'a S.t * 'a option -> cell
 type appender = { native : F.appender; child : child; tx : transaction;
                   mutable types : int array; mutable nullable : bool array; mutable failure : error option }
 let status native = native_status (F.appender_status native) ~message:(fun () -> F.appender_message native)
@@ -60,30 +59,6 @@ let open_appender tx ?(schema = "main") table =
         poison_transaction tx interrupted;
         Stdlib.Printexc.raise_with_backtrace exn backtrace)
 
-let encode : type a. a S.t -> a option -> F.append_cell = fun typ value ->
-  let id = S.native_id typ in
-  match value with
-  | None -> id, true, 0L, 0., ""
-  | Some value ->
-    match S.repr typ with
-    | S.Integer { encode; _ } -> id, false, encode value, 0., ""
-    | S.Floating { encode; _ } -> id, false, 0L, encode value, ""
-    | S.Bytes -> id, false, 0L, 0., value
-let validate_cell a row column (Cell (typ, value)) =
-  let apply : type b. b S.t -> b option -> (F.append_cell, error) result = fun typ value ->
-    let actual = a.types.(column) in
-    if actual <> S.native_id typ then
-      Error (Type_mismatch { index = column; expected = S.name typ; actual = type_name actual })
-    else if Option.is_none value && not a.nullable.(column) then Error (Null { column; row })
-    else Ok (encode typ value) in
-  apply typ value
-let validate_row a row cells =
-  let expected = Array.length a.types and actual = List.length cells in
-  if actual <> expected then Error (Column_count { expected; actual })
-  else
-    let+ cells = Result.all (List.mapi cells ~f:(validate_cell a row)) in
-    Array.of_list cells
-
 let operation a f = child_operation a.child ~allow_result:true (fun () ->
   match a.failure with
   | Some e -> Error e
@@ -91,13 +66,17 @@ let operation a f = child_operation a.child ~allow_result:true (fun () ->
     match Stdlib.Sys.with_async_exns f with
     | result -> or_poison a (let* () = result in checkpoint (connection a))
     | exception exn -> ignore (poison a interrupted); raise exn)
-let append_rows a rows = operation a (fun () ->
-  let* rows = Result.all (List.mapi rows ~f:(validate_row a)) in
-  Exn.protect ~finally:(fun () -> F.clear_appender_input a.native)
-    ~f:(fun () -> Stdlib.Sys.with_async_exns (fun () ->
-      let* () = checkpoint (connection a) in
-      F.append_rows a.native (Array.of_list rows);
-      status a.native)))
+let native a = a.native
+let nullable a column = a.nullable.(column)
+let append_staged a ~null =
+  Exn.protect ~finally:(fun () -> F.clear_stage a.native) ~f:(fun () ->
+    operation a (fun () ->
+      match null with
+      | Some (column, row) -> Error (Null { column; row })
+      | None ->
+        let* () = checkpoint (connection a) in
+        F.append_staged a.native;
+        status a.native))
 let flush_appender a = operation a (fun () -> F.flush_appender a.native; status a.native)
 let close_appender a =
   if child_is_closed a.child then Ok ()

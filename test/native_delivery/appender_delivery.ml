@@ -65,25 +65,26 @@ let metadata ?(view = false) point ~user ~native_error owner =
        | result -> cancelled result);
       check "Appender metadata delivery skipped" (count 4 = 0); one_controller ()));
   no_flush owner
+(* Two staged chunks: the first fills one 2048-row vector. *)
+let two_chunks = List.init 2049 ~f:(fun _ -> row)
 let mutation point owner =
   setup owner; reset ();
   let k = B.canceller () in
+  let user = point <> 35 in
   E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
     T.with_appender c app ~f:(fun a ->
-      gate point true; if point = 45 then selected_gate true;
-      let result = T.append a [row; row] in
+      gate point true; if user then selected_gate true;
+      let result = T.append a two_chunks in
       cancelled (T.append a [row]); cancelled (T.flush a);
       result)))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
       wait point; B.cancel k;
-      if point = 45 then E.await ~label:"Appender end-row selected" selected_entered;
+      if user then E.await ~label:"Appender chunk append selected" selected_entered;
       gate point false; wait_count 11 1; selected_gate false; cancelled (join ());
-      if point = 35 then check "Appender batch admission suppresses begin-row" (count 29 = 0);
-      if point = 43 then check "Appender cell admission suppresses append-value" (count 30 = 0);
-      if point = 47 || point = 29 then check "Appender end-row admission suppressed" (count 31 = 0);
-      if point = 45 then check "Appender next row suppressed" (count 29 = 1 && count 31 = 1);
+      if point = 35 then check "Appender batch admission suppresses chunk append" (count 31 = 0 && count 4 = 0);
+      if user then check "Appender next chunk suppressed" (count 31 = 1);
       check "Appender cancelled append never explicit flushes" (count 32 = 0 && count 33 = 0);
-      check "Appender cell/value memory destroyed" (count 26 = count 30);
+      check "Appender stages without per-cell native values" (count 26 = 0);
       one_controller ()));
   no_flush owner
 let flush ~close ~before owner =
@@ -158,7 +159,8 @@ let close_cleanup destructor owner =
 let automatic ~running owner =
   if running then ok (D.execute owner "CREATE TABLE app(i BIGINT CHECK(length(sha256(repeat(i::VARCHAR, 100))) > 0))")
   else setup owner;
-  reset (); auto_gate 204800;
+  (* DuckDB flushes automatically once 204800 rows are buffered: chunk 100. *)
+  reset (); auto_gate 100;
   let k = B.canceller () in
   let point = if running then 59 else 61 in
   E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c ->
@@ -174,7 +176,7 @@ let automatic ~running owner =
       (match join () with
        | Error { cause = Native message; _ } when running -> check "Appender real automatic flush interrupted diagnostic" (String.is_substring (String.lowercase message) ~substring:"interrupt")
        | result -> if running then failwith "Appender interrupted diagnostic flattened" else cancelled result);
-      check "Appender automatic flush suppresses later rows" (count 29 = 204800 && count 31 = 204800);
+      check "Appender automatic flush suppresses later chunks" (count 31 = 100);
       if running then (
         check "Appender automatic repeat delivery survives INSERT reset" (count 4 > before && count 39 = 1 && count 5 = 1);
         check "Appender interrupted owner discarded" (match D.execute owner "SELECT 1" with Error { cause = Closed; _ } -> true | _ -> false))
@@ -260,15 +262,17 @@ let cleanup_admitted destructor owner =
       B.cancel k; gate destructor false; cancelled (join ());
       check "Appender cleanup cancellation never delivers" (count 4 = 0 && count 14 = 0);
       one_controller ()))
+(* A temporal value is staged in place (no temporary DuckDB value); a
+   cancellation before the native append suppresses it without USER delivery. *)
 let temporal_value owner =
   ok (D.execute owner "CREATE TABLE app(i TIMESTAMP_S)"); reset ();
   let k = B.canceller () in
   let app = T.(declare "app" Columns.[ "i", of_scalar D.Scalar.Timestamp_s ] ~row:Fn.id) in
   E.with_worker (fun () -> B.run (B.request k) owner ~f:(fun c -> T.with_appender c app ~f:(fun a ->
-    gate 26 true; T.append a [D.Args.[1L]])))
+    gate 35 true; T.append a [D.Args.[1L]])))
     ~f:(fun join -> Exn.protect ~finally:release ~f:(fun () ->
-      wait 26; B.cancel k; gate 26 false; cancelled (join ());
-      check "Appender temporary value second admission suppresses append" (count 30 = 0 && count 26 = 1);
+      wait 35; B.cancel k; gate 35 false; cancelled (join ());
+      check "Appender temporal value admission suppresses append" (count 31 = 0 && count 22 = 0 && count 26 = 0);
       check "Appender temporary value never USER" (count 4 = 0 && count 14 = 0);
       one_controller ()))
 let running_flush ~close owner =
@@ -320,6 +324,6 @@ let tests =
    "appender-create-cleanup", cleanup ~destructor:48 ~internal:false]
   @ List.map [33; 2; 4; 41; 6; 31; 39; 34] ~f:(fun point ->
     "appender-metadata-" ^ Int.to_string point, metadata point ~user:(List.mem [2; 4; 6; 31] point ~equal:Int.equal) ~native_error:false)
-  @ List.map [35; 43; 47; 29; 45] ~f:(fun point -> "appender-mutation-" ^ Int.to_string point, mutation point)
+  @ List.map [35; 44; 45] ~f:(fun point -> "appender-mutation-" ^ Int.to_string point, mutation point)
   @ List.concat_map [true; false] ~f:(fun close -> List.map [true; false] ~f:(fun before ->
     "appender-" ^ (if close then "close" else "flush") ^ (if before then "-before" else "-return"), flush ~close ~before))

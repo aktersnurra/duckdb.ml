@@ -34,7 +34,7 @@ val dispatch_count : unit -> int
 type seam = Open | Connect | Execute | Execute_return | Rollback | Result
   | Prepared | Extracted | Chunk | Appender_clear | Appender_destroy
   | Disconnect | Database_close | Fetch | Commit | Commit_return | Prepared_return
-  | Appender_end_row | Appender_flush
+  | Appender_chunk | Appender_flush
 val hold_publication : bool -> unit
 val publication_entries : unit -> int
 val temporary_unlinks : unit -> int
@@ -49,9 +49,9 @@ external native_errors : unit -> int = "stage4c_native_errors" [@@noalloc]
 external joins : unit -> int = "stage4c_joins" [@@noalloc]
 external locked_calls : unit -> int = "stage4c_locked_calls" [@@noalloc]
 external commits : unit -> int = "stage4c_commits" [@@noalloc]
-external appender_end_rows : unit -> int = "stage4c_appender_end_rows" [@@noalloc]
-external appender_end_row_errors : unit -> int = "stage4c_appender_end_row_errors" [@@noalloc]
-external select_appender_end_row : int -> unit = "stage4c_select_appender_end_row" [@@noalloc]
+external appender_chunks : unit -> int = "stage4c_appender_chunks" [@@noalloc]
+external appender_chunk_errors : unit -> int = "stage4c_appender_chunk_errors" [@@noalloc]
+external select_appender_chunk : int -> unit = "stage4c_select_appender_chunk" [@@noalloc]
 external appender_flushes : unit -> int = "stage4c_appender_flushes" [@@noalloc]
 external metadata_changes : unit -> int = "stage4c_metadata_changes" [@@noalloc]
 external select_parquet_first : bool -> unit = "stage4c_select_parquet_first" [@@noalloc]

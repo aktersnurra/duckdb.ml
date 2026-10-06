@@ -29,7 +29,7 @@ static _Atomic(uintptr_t) selected_result, selected_chunk;
 static atomic_int open_entered, connect_entered, opens;
 /* Typed-request-only observers. They are deliberately independent of the
    lifecycle counters above and never expose an owner or a production hook. */
-static atomic_int typed_ingest_entries, typed_appender_end_rows, typed_appender_flushes;
+static atomic_int typed_ingest_entries, typed_appender_chunks, typed_appender_flushes;
 static atomic_bool typed_ingest_held;
 static atomic_bool open_held, connect_held;
 static atomic_int held_entries[21];
@@ -73,7 +73,7 @@ static _Thread_local unsigned disconnect_serial, database_serial;
 CAMLprim value eio_foundation_reset(value fail_at) {
   for (int i = 0; i < 21; ++i) atomic_store(&held_entries[i], 0);
   atomic_store(&opens, 0); atomic_store(&open_entered, 0); atomic_store(&connect_entered, 0);
-  atomic_store(&typed_ingest_entries, 0); atomic_store(&typed_appender_end_rows, 0);
+  atomic_store(&typed_ingest_entries, 0); atomic_store(&typed_appender_chunks, 0);
   atomic_store(&typed_appender_flushes, 0); atomic_store(&typed_ingest_held, false);
   atomic_store(&open_held, false); atomic_store(&connect_held, false);
   atomic_store(&connects, 0); atomic_store(&disconnects, 0);
@@ -136,13 +136,13 @@ CAMLprim value eio_typed_reset(value unit) { (void)unit;
   atomic_store(&typed_kind, 0); atomic_store(&typed_hold, false); atomic_store(&typed_ack, 0);
   atomic_store(&typed_errors, 0); atomic_store(&typed_commits, 0); atomic_store(&typed_fetches, 0);
   atomic_store(&typed_appender, 0); atomic_store(&typed_result, 0);
-  atomic_store(&typed_ingest_entries, 0); atomic_store(&typed_appender_end_rows, 0);
+  atomic_store(&typed_ingest_entries, 0); atomic_store(&typed_appender_chunks, 0);
   atomic_store(&typed_appender_flushes, 0); atomic_store(&typed_ingest_held, false);
   return Val_unit;
 }
 CAMLprim value eio_typed_hold_ingest(value enable) { atomic_store(&typed_ingest_held, Bool_val(enable)); return Val_unit; }
 CAMLprim value eio_typed_ingest_entries(value unit) { (void)unit; return Val_int(atomic_load(&typed_ingest_entries)); }
-CAMLprim value eio_typed_appender_end_rows(value unit) { (void)unit; return Val_int(atomic_load(&typed_appender_end_rows)); }
+CAMLprim value eio_typed_appender_chunks(value unit) { (void)unit; return Val_int(atomic_load(&typed_appender_chunks)); }
 CAMLprim value eio_typed_appender_flushes(value unit) { (void)unit; return Val_int(atomic_load(&typed_appender_flushes)); }
 CAMLprim value eio_foundation_hold_database(value enable) {
   atomic_store(&close_held, Bool_val(enable)); return Val_unit;
@@ -288,12 +288,13 @@ duckdb_state __wrap_duckdb_appender_clear(duckdb_appender appender) {
   gate(&typed_ingest_held, NULL, 0);
   return __real_duckdb_appender_clear(appender);
 }
-extern duckdb_state __real_duckdb_appender_end_row(duckdb_appender);
-duckdb_state __wrap_duckdb_appender_end_row(duckdb_appender appender) {
-  int row = atomic_fetch_add(&typed_appender_end_rows, 1) + 1;
+/* Kind 3 selects one staged chunk append (typed_row numbers chunks). */
+extern duckdb_state __real_duckdb_append_data_chunk(duckdb_appender, duckdb_data_chunk);
+duckdb_state __wrap_duckdb_append_data_chunk(duckdb_appender appender, duckdb_data_chunk data) {
+  int chunk = atomic_fetch_add(&typed_appender_chunks, 1) + 1;
   typed_gate(3, (uintptr_t)appender == atomic_load(&typed_appender) &&
-    (atomic_load(&typed_row) == 0 || row == atomic_load(&typed_row)));
-  duckdb_state state = __real_duckdb_appender_end_row(appender);
+    (atomic_load(&typed_row) == 0 || chunk == atomic_load(&typed_row)));
+  duckdb_state state = __real_duckdb_append_data_chunk(appender, data);
   if (state != DuckDBSuccess) atomic_fetch_add(&typed_errors, 1);
   return state;
 }

@@ -71,7 +71,7 @@ let dispatch_count () = !dispatched
 type seam = Open | Connect | Execute | Execute_return | Rollback | Result
   | Prepared | Extracted | Chunk | Appender_clear | Appender_destroy
   | Disconnect | Database_close | Fetch | Commit | Commit_return | Prepared_return
-  | Appender_end_row | Appender_flush
+  | Appender_chunk | Appender_flush
 external hold_publication : bool -> unit = "stage4c_hold_publication" [@@noalloc]
 external publication_entries : unit -> int = "stage4c_publication_entries" [@@noalloc]
 external temporary_unlinks : unit -> int = "stage4c_temporary_unlinks" [@@noalloc]
@@ -79,7 +79,7 @@ let seam_id = function Open -> 0 | Connect -> 1 | Execute -> 2 | Execute_return 
   | Rollback -> 4 | Result -> 5 | Prepared -> 6 | Extracted -> 7 | Chunk -> 8
   | Appender_clear -> 9 | Appender_destroy -> 10 | Disconnect -> 11 | Database_close -> 12
   | Fetch -> 13 | Commit -> 14 | Commit_return -> 15 | Prepared_return -> 16
-  | Appender_end_row -> 17 | Appender_flush -> 18
+  | Appender_chunk -> 17 | Appender_flush -> 18
 external set_native_gate : int -> bool -> unit = "stage4c_gate" [@@noalloc]
 external entered_native : int -> int = "stage4c_entered" [@@noalloc]
 let native_hold seam = set_native_gate (seam_id seam) true
@@ -91,9 +91,9 @@ external native_errors : unit -> int = "stage4c_native_errors" [@@noalloc]
 external joins : unit -> int = "stage4c_joins" [@@noalloc]
 external locked_calls : unit -> int = "stage4c_locked_calls" [@@noalloc]
 external commits : unit -> int = "stage4c_commits" [@@noalloc]
-external appender_end_rows : unit -> int = "stage4c_appender_end_rows" [@@noalloc]
-external appender_end_row_errors : unit -> int = "stage4c_appender_end_row_errors" [@@noalloc]
-external select_appender_end_row : int -> unit = "stage4c_select_appender_end_row" [@@noalloc]
+external appender_chunks : unit -> int = "stage4c_appender_chunks" [@@noalloc]
+external appender_chunk_errors : unit -> int = "stage4c_appender_chunk_errors" [@@noalloc]
+external select_appender_chunk : int -> unit = "stage4c_select_appender_chunk" [@@noalloc]
 external appender_flushes : unit -> int = "stage4c_appender_flushes" [@@noalloc]
 external metadata_changes : unit -> int = "stage4c_metadata_changes" [@@noalloc]
 external select_parquet_first : bool -> unit = "stage4c_select_parquet_first" [@@noalloc]
@@ -102,7 +102,7 @@ external hold_selected : bool -> unit = "stage4c_hold_selected" [@@noalloc]
 external selected_seen : unit -> bool = "stage4c_selected_seen" [@@noalloc]
 let native_release_all () =
   for i = 0 to 18 do set_native_gate i false done;
-  select_appender_end_row (-1); hold_selected false
+  select_appender_chunk (-1); hold_selected false
 external distinct_interrupted : unit -> int = "stage4c_distinct_interrupted" [@@noalloc]
 exception Cleanup_failure
 exception Cleanup_failure_index of int

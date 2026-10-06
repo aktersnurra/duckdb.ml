@@ -24,9 +24,10 @@ duckdb_state wrapped_create(duckdb_connection,const char *,const char *,const ch
 duckdb_state wrapped_create(duckdb_connection c,const char *catalog,const char *schema,const char *table,duckdb_appender *a) {
     pause_at(1);return real_create(c,catalog,schema,table,a);
 }
-duckdb_state real_append(duckdb_appender,duckdb_value) __asm__("__real_duckdb_append_value");
-duckdb_state wrapped_append(duckdb_appender,duckdb_value) __asm__("__wrap_duckdb_append_value");
-duckdb_state wrapped_append(duckdb_appender a,duckdb_value v) { pause_at(2);return real_append(a,v); }
+/* Point 2 pauses inside native append: every staged chunk goes through here. */
+duckdb_state real_append(duckdb_appender,duckdb_data_chunk) __asm__("__real_duckdb_append_data_chunk");
+duckdb_state wrapped_append(duckdb_appender,duckdb_data_chunk) __asm__("__wrap_duckdb_append_data_chunk");
+duckdb_state wrapped_append(duckdb_appender a,duckdb_data_chunk c) { pause_at(2);return real_append(a,c); }
 duckdb_state real_flush(duckdb_appender) __asm__("__real_duckdb_appender_flush");
 duckdb_state wrapped_flush(duckdb_appender) __asm__("__wrap_duckdb_appender_flush");
 /* Safe normal close now flushes explicitly before clear/destroy. The caller

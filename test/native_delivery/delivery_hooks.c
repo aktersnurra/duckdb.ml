@@ -24,7 +24,7 @@ static _Atomic bool deferred[96];
 static _Atomic bool selected_gate, selected_entered, fail_start;
 static _Thread_local bool request_worker, controller_expected;
 static _Atomic bool query_only;
-static _Atomic int appender_auto_row, control_failure, unlink_failure;
+static _Atomic int appender_auto_chunk, control_failure, unlink_failure;
 static _Thread_local bool copy_work;
 static _Atomic bool snapshot_exception;
 static void wait_gate(_Atomic int *gate) {
@@ -59,7 +59,7 @@ CAMLprim value delivery_reset(value unit) {
   for (int i = 0; i < 96; ++i) atomic_store(&counts[i], 0);
   for (int i = 0; i < 96; ++i) atomic_store(&deferred[i], false);
   atomic_store(&selected_gate, false); atomic_store(&selected_entered, false);
-  atomic_store(&appender_auto_row, 0);
+  atomic_store(&appender_auto_chunk, 0);
   atomic_store(&control_failure, 0); atomic_store(&unlink_failure, 0);
   atomic_store(&snapshot_exception, false); copy_work = false;
   atomic_store(&fail_start, false); atomic_store(&query_only, false);
@@ -299,7 +299,7 @@ value __wrap_ml_duckdb_create_appender(value v, value schema, value table) {
   value result = __real_ml_duckdb_create_appender(v, schema, table);
   query_entry(34); CAMLreturn(result);
 }
-ENTRY2(ml_duckdb_append_rows, 35)
+ENTRY1(ml_duckdb_append_staged, 35)
 ENTRY1(ml_duckdb_flush_appender, 36)
 ENTRY2(ml_duckdb_close_appender, 37)
 duckdb_state __real_duckdb_prepare(duckdb_connection, const char *, duckdb_prepared_statement *);
@@ -321,19 +321,19 @@ duckdb_state __wrap_duckdb_appender_create_ext(duckdb_connection c, const char *
  duckdb_state __wrap_##name parameters { \
    atomic_fetch_add(&counts[counter], 1); boundary(before); \
    duckdb_state result = __real_##name arguments; boundary(after); return result; }
-APPENDER(duckdb_appender_begin_row, 29, 42, 43, (duckdb_appender a), (a))
-APPENDER(duckdb_append_value, 30, 46, 47, (duckdb_appender a, duckdb_value v), (a, v))
-CAMLprim value delivery_appender_auto_gate(value row) {
-  atomic_store(&appender_auto_row, Int_val(row)); return Val_unit;
+/* Every staged chunk is one user call: counter 31, boundaries 44/45 around
+   it, 59/61 around the selected (automatic-flush) chunk, 60 on failure. */
+CAMLprim value delivery_appender_auto_gate(value chunk) {
+  atomic_store(&appender_auto_chunk, Int_val(chunk)); return Val_unit;
 }
-duckdb_state __real_duckdb_appender_end_row(duckdb_appender);
-duckdb_state __wrap_duckdb_appender_end_row(duckdb_appender a) {
-  int row = atomic_fetch_add(&counts[31], 1) + 1;
+duckdb_state __real_duckdb_append_data_chunk(duckdb_appender, duckdb_data_chunk);
+duckdb_state __wrap_duckdb_append_data_chunk(duckdb_appender a, duckdb_data_chunk c) {
+  int chunk = atomic_fetch_add(&counts[31], 1) + 1;
   boundary(44);
-  if (row == atomic_load(&appender_auto_row)) boundary(59);
-  duckdb_state result = __real_duckdb_appender_end_row(a);
+  if (chunk == atomic_load(&appender_auto_chunk)) boundary(59);
+  duckdb_state result = __real_duckdb_append_data_chunk(a, c);
   if (result != DuckDBSuccess) { atomic_fetch_add(&counts[39], 1); boundary(60); }
-  if (row == atomic_load(&appender_auto_row)) boundary(61);
+  if (chunk == atomic_load(&appender_auto_chunk)) boundary(61);
   boundary(45); return result;
 }
 APPENDER(duckdb_appender_flush, 32, 53, 54, (duckdb_appender a), (a))

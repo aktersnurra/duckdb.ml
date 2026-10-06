@@ -8,5 +8,5 @@ val hold_execute : bool -> unit
 val execute_entries : int -> int
 val hold_ingest : bool -> unit
 val ingest_entries : unit -> int
-val appender_end_rows : unit -> int
+val appender_chunks : unit -> int
 val appender_flushes : unit -> int

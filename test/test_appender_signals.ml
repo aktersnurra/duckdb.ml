@@ -68,11 +68,13 @@ let () =
       else (assert (Int64.equal (count c) 0L); ok (execute c "SELECT 1"));
       if String.equal mode "export-publish-leave" || String.is_prefix mode ~prefix:"export-remove" then assert (Stdlib.Sys.file_exists file)
       else assert (not (Stdlib.Sys.file_exists file))));
+    (* After the first batch the appender keeps its staging (types array,
+       chunk array, one data chunk: 3) until clear/destroy. *)
     let expected = match mode with
       | "create-enter" -> 7 | "create-leave" -> 10
-      | "append-enter" -> 12 | "append-leave" -> 10
+      | "append-enter" | "append-leave"
       | "flush-enter" | "flush-leave" | "close-flush-enter" | "close-flush-leave"
-      | "close-enter" | "discard-enter" | "callback" -> 10
+      | "close-enter" | "discard-enter" | "callback" -> 13
       | "close-leave" | "discard-leave" -> 9
       (* Named COMMIT uses an immutable C literal, not an owned SQL copy. *)
       | "commit-enter" -> 4 | "commit-leave" -> 4

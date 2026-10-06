@@ -137,61 +137,62 @@ let ingest_rollback_and_auto_flush () =
     require "explicit flush cancellation suppresses COMMIT" (commits () = commits_before_explicit);
     complete (ok (A.query pool "SELECT i FROM batches" rows ~row:Fn.id)) >>= fun result ->
     require "explicit flush cancellation leaves no committed rows" (List.is_empty (ok result));
-    (* Pinned appender.cpp:393-418,760-781 follows FlushChunk -> ShouldFlush ->
+    (* Pinned appender.cpp follows AppendDataChunk -> ShouldFlush ->
        FlushInternal. The duplicate-primary-key control independently observes
-       its first automatic-flush error at end-row 204,800 before close-time
-       cleanup. Select that observed boundary, not an inferred default threshold
-       or the 2,048-row vector boundary. *)
-    let automatic_flush_end_row = 100 * 2048 in
+       its first automatic-flush error at chunk 100 (204,800 rows of 2,048-row
+       staged chunks) before close-time cleanup. Select that observed chunk,
+       not an inferred default threshold. *)
+    let automatic_flush_chunk = 100 in
+    let automatic_flush_rows = automatic_flush_chunk * 2048 in
     let automatic_flush_control_rows = 220000 in
     complete (ok (A.execute pool "CREATE TABLE automatic_flush(i BIGINT PRIMARY KEY)")) >>= fun result -> ok result;
     let automatic_flush = bigints "automatic_flush" in
     let rows_of value = [List.init automatic_flush_control_rows ~f:(fun _ -> Duckdb.Args.[value])] in
-    let control_rows_before = appender_end_rows () in
-    let control_errors_before = appender_end_row_errors () in
+    let control_chunks_before = appender_chunks () in
+    let control_errors_before = appender_chunk_errors () in
     let control_commits_before = commits () in
     complete (ingest pool automatic_flush (rows_of 0L) ~flush:false) >>= fun result ->
-    require "automatic flush constraint is reported by end-row" (failed result);
-    let control_rows = appender_end_rows () - control_rows_before in
-    let control_errors = appender_end_row_errors () - control_errors_before in
-    printf "AUTO_CONTROL vector=2048 observed_end_row=%d end_row_errors=%d commits=%d\n%!"
-      control_rows control_errors (commits () - control_commits_before);
-    require "automatic flush first collection boundary" (control_rows = automatic_flush_end_row);
-    require "automatic flush constraint returned from end-row" (control_errors = 1);
+    require "automatic flush constraint is reported by chunk append" (failed result);
+    let control_chunks = appender_chunks () - control_chunks_before in
+    let control_errors = appender_chunk_errors () - control_errors_before in
+    printf "AUTO_CONTROL vector=2048 observed_chunk=%d chunk_errors=%d commits=%d\n%!"
+      control_chunks control_errors (commits () - control_commits_before);
+    require "automatic flush first collection boundary" (control_chunks = automatic_flush_chunk);
+    require "automatic flush constraint returned from chunk append" (control_errors = 1);
     require "automatic flush control suppresses COMMIT" (commits () = control_commits_before);
     complete (ok (A.query pool "SELECT i FROM automatic_flush" rows ~row:Fn.id)) >>= fun result ->
     require "automatic flush control has no committed rows" (List.is_empty (ok result));
-    let cancellation_rows_before = appender_end_rows () in
+    let cancellation_chunks_before = appender_chunks () in
     let disconnects_before_automatic = disconnects () in
     let commits_before_automatic = commits () in
-    select_appender_end_row (cancellation_rows_before + automatic_flush_end_row);
-    native_hold Appender_end_row;
+    select_appender_chunk (cancellation_chunks_before + automatic_flush_chunk);
+    native_hold Appender_chunk;
     let automatic_cancel = ingest pool automatic_flush
-      [List.init automatic_flush_end_row ~f:(fun i -> Duckdb.Args.[Int64.of_int i])] ~flush:false in
-    wait_scheduler (fun () -> native_entered Appender_end_row > 0) >>= fun () ->
-    ignore (ok (A.cancel automatic_cancel)); native_release Appender_end_row;
+      [List.init automatic_flush_rows ~f:(fun i -> Duckdb.Args.[Int64.of_int i])] ~flush:false in
+    wait_scheduler (fun () -> native_entered Appender_chunk > 0) >>= fun () ->
+    ignore (ok (A.cancel automatic_cancel)); native_release Appender_chunk;
     complete automatic_cancel >>= fun result ->
-    select_appender_end_row (-1);
+    select_appender_chunk (-1);
     require "automatic flush cancellation settled" (match result with Error (A.Expected A.Cancelled) | Error (A.During_cancellation _) -> true | _ -> false);
-    require "automatic flush cancellation selected actual flush end-row" (appender_end_rows () = cancellation_rows_before + automatic_flush_end_row);
+    require "automatic flush cancellation selected actual flush chunk" (appender_chunks () = cancellation_chunks_before + automatic_flush_chunk);
     require "automatic flush cancellation suppresses COMMIT" (commits () = commits_before_automatic);
     require "automatic flush cancellation retires owner" (disconnects () > disconnects_before_automatic);
-    printf "AUTO_CANCEL selected_end_row=%d end_rows=%d commits=%d disconnect_delta=%d\n%!"
-      automatic_flush_end_row (appender_end_rows () - cancellation_rows_before)
+    printf "AUTO_CANCEL selected_chunk=%d chunks=%d commits=%d disconnect_delta=%d\n%!"
+      automatic_flush_chunk (appender_chunks () - cancellation_chunks_before)
       (commits () - commits_before_automatic) (disconnects () - disconnects_before_automatic);
     complete (ok (A.query pool "SELECT i FROM automatic_flush" rows ~row:Fn.id)) >>= fun result ->
     require "automatic flush cancellation leaves no committed rows" (List.is_empty (ok result));
     (* Independent pool slot changes metadata while the first transaction is paused
-       before its end-row native call; the ingestion must roll back rather than commit. *)
-    native_hold Appender_end_row;
+       before its chunk-append native call; the ingestion must roll back rather than commit. *)
+    native_hold Appender_chunk;
     let commits_before_concurrent = commits () in
     let concurrent = ingest pool batches good ~flush:false in
-    wait_scheduler (fun () -> native_entered Appender_end_row > 1) >>= fun () ->
+    wait_scheduler (fun () -> native_entered Appender_chunk > 1) >>= fun () ->
     let alter = ok (A.execute pool "ALTER TABLE batches ADD COLUMN changed BIGINT") in
     complete alter >>= fun result -> ok result;
     (* Completion on the second leased connection establishes the metadata-before-
-       append order while the first is held at its real end-row boundary. *)
-    native_release Appender_end_row;
+       append order while the first is held at its real chunk-append boundary. *)
+    native_release Appender_chunk;
     complete concurrent >>= fun result ->
     require "concurrent metadata invalidates appender transaction" (failed result);
     require "concurrent metadata ingestion suppresses COMMIT" (commits () = commits_before_concurrent);
@@ -200,8 +201,9 @@ let ingest_rollback_and_auto_flush () =
       ~row:(fun i changed -> i, changed)) in
     let many = List.init 2048 ~f:(fun i -> [ Duckdb.Args.[Some (Int64.of_int i); None] ]) in
     let admissions = dispatch_count () in
+    let chunks_before_success = appender_chunks () in
     complete (ingest pool changed many ~flush:false) >>= fun result -> ok (ok result);
-    require "automatic end-row reached sufficient rows" (appender_end_rows () >= 2050);
+    require "every one-row batch appended one chunk" (appender_chunks () - chunks_before_success = 2048);
     require "automatic-flush ingestion commits" (commits () = commits_before_success + 1);
     if Array.mem (Sys.get_argv ()) "--instrumented" ~equal:String.equal then
       require "ingest has one whole-request offload plus bounded maintenance" (dispatch_count () = admissions + 3);

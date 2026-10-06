@@ -98,8 +98,9 @@ let ingest_semantics () =
     unwrap (E.execute p "CREATE TABLE typed_auto(i BIGINT PRIMARY KEY)");
     H.reset ();
     check "automatic flush reports duplicate before close" (Result.is_error (E.Request.ingest p (bigints "typed_auto") [duplicates] ~flush:false));
-    Stdlib.Printf.printf "AUTO_CONTROL end_rows=%d errors=%d commits=%d\n%!" (H.appender_end_rows ()) (H.counter 1) (H.counter 2);
-    check "automatic flush actual first end-row error at 204800" (H.appender_end_rows () = 204800 && H.counter 1 = 1);
+    Stdlib.Printf.printf "AUTO_CONTROL chunks=%d errors=%d commits=%d\n%!" (H.appender_chunks ()) (H.counter 1) (H.counter 2);
+    (* 204,800 buffered rows flush automatically: the 100th 2,048-row chunk. *)
+    check "automatic flush actual first chunk error at 100" (H.appender_chunks () = 100 && H.counter 1 = 1);
     check "automatic flush no COMMIT" (H.counter 2 = 0);
     check "automatic flush control did not commit duplicates" (match E.query p "SELECT i FROM typed_auto" rows ~row:Fn.id with Ok [] -> true | _ -> false);
     unwrap (E.shutdown p))
@@ -143,10 +144,10 @@ let native_cancellation clock =
       check (name ^ " selected owner retired") (H.execute_entries 1 = disconnects + 1);
       if kind = 1 || kind = 2 then check (name ^ " cancelled before callbacks") (Stdlib.Atomic.get callbacks = 0);
       (match expect_rows with None -> () | Some count ->
-        check (name ^ " no subsequent end-row work") (H.appender_end_rows () = count);
+        check (name ^ " no subsequent chunk work") (H.appender_chunks () = count);
         check (name ^ " COMMIT suppressed") (H.counter 2 = 0));
-      Stdlib.Printf.printf "CANCEL %s kind=%d ack=%d end_rows=%d flushes=%d commits=%d fetches=%d operations=%d retirement=%d callbacks=%d\n%!"
-        name kind (H.counter 0) (H.appender_end_rows ()) (H.appender_flushes ()) (H.counter 2) (H.counter 3)
+      Stdlib.Printf.printf "CANCEL %s kind=%d ack=%d chunks=%d flushes=%d commits=%d fetches=%d operations=%d retirement=%d callbacks=%d\n%!"
+        name kind (H.counter 0) (H.appender_chunks ()) (H.appender_flushes ()) (H.counter 2) (H.counter 3)
         (P.operations () - ops) (H.execute_entries 1 - disconnects) (Stdlib.Atomic.get callbacks);
       check (name ^ " reusable capacity after retirement") (Result.is_ok (E.execute p "SELECT 1"));
       if Option.is_some expect_rows then check (name ^ " no committed rows") (match E.query p "SELECT i FROM typed_cancel" rows ~row:Fn.id with Ok [] -> true | _ -> false) in
@@ -156,13 +157,15 @@ let native_cancellation clock =
       run ("fold_" ^ boundary) kind 0
         (fun calls -> E.fold_rows p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id ~init:()
           ~f:(fun _ () -> ignore (Stdlib.Atomic.fetch_and_add calls 1); Ok (Duckdb.Continue ()))) None);
-    List.iter [3, "end_row"; 4, "flush"; 5, "appender_destroy"] ~f:(fun (kind, boundary) ->
+    List.iter [3, "chunk"; 4, "flush"; 5, "appender_destroy"] ~f:(fun (kind, boundary) ->
       run ("ingest_" ^ boundary) kind 1
         (fun _ -> E.Request.ingest p (bigints "typed_cancel") [[row 1L]; [row 2L]] ~flush:true)
         (Some (if kind = 3 then 1 else 2)));
-    run "ingest_auto_204800" 3 204800
+    (* Chunk 100 is the automatic flush at 204,800 rows; one more row would
+       need chunk 101. *)
+    run "ingest_auto_chunk_100" 3 100
       (fun _ -> E.Request.ingest p (bigints "typed_cancel")
-        [List.init 204801 ~f:(fun i -> row (Int64.of_int i))] ~flush:false) (Some 204800);
+        [List.init 204801 ~f:(fun i -> row (Int64.of_int i))] ~flush:false) (Some 100);
     unwrap (E.shutdown p))
 let native_success clock =
   Eio.Switch.run (fun sw ->
@@ -172,8 +175,8 @@ let native_success clock =
       H.reset ();
       let result = whole name (fun () -> held_request clock sw name kind 1 operation (fun _ _ -> ())) in
       check (name ^ " held successful result") (match result with `Returned (Ok ()) -> true | _ -> false);
-      Stdlib.Printf.printf "SUCCESS %s kind=%d ack=%d end_rows=%d flushes=%d commits=%d\n%!"
-        name kind (H.counter 0) (H.appender_end_rows ()) (H.appender_flushes ()) (H.counter 2) in
+      Stdlib.Printf.printf "SUCCESS %s kind=%d ack=%d chunks=%d flushes=%d commits=%d\n%!"
+        name kind (H.counter 0) (H.appender_chunks ()) (H.appender_flushes ()) (H.counter 2) in
     List.iter [1; 2; 6] ~f:(fun kind ->
       run ("query_success_" ^ Int.to_string kind) kind (fun () ->
         Result.map (E.query p "SELECT i::BIGINT FROM range(3000) t(i)" rows ~row:Fn.id) ~f:(fun result ->
@@ -197,7 +200,7 @@ let metadata_race clock =
         check "metadata committed while original ingestion held" (not (Eio.Promise.is_resolved request))) in
     check "metadata invalidates ingestion" (match result with `Returned (Error _) -> true | _ -> false);
     check "metadata race suppresses ingestion COMMIT" (H.counter 2 = 0);
-    Stdlib.Printf.printf "METADATA ack=%d end_rows=%d ingestion_commits=%d\n%!" (H.counter 0) (H.appender_end_rows ()) (H.counter 2);
+    Stdlib.Printf.printf "METADATA ack=%d chunks=%d ingestion_commits=%d\n%!" (H.counter 0) (H.appender_chunks ()) (H.counter 2);
     check "metadata race rolled back" (match E.query p "SELECT i FROM typed_metadata" rows ~row:Fn.id with Ok [] -> true | _ -> false);
     unwrap (E.shutdown p))
 let selectors env =

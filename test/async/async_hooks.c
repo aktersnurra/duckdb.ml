@@ -19,8 +19,8 @@ static atomic_int interrupt_calls, execution_calls, error_calls, join_calls, loc
 static atomic_int publication_entries_count, temporary_unlink_count;
 static atomic_bool gates[19], selected_gate, selected_entry, publication_gate;
 static atomic_int entries[19];
-static atomic_int appender_end_rows, appender_end_row_errors, appender_flushes, metadata_changes;
-static atomic_int selected_appender_end_row;
+static atomic_int appender_chunks, appender_chunk_errors, appender_flushes, metadata_changes;
+static atomic_int selected_appender_chunk;
 static atomic_bool close_failure, force_locked, indexed_failure, parquet_selection;
 static atomic_int rollback_failure, parquet_second_exec;
 static _Atomic(void *) parquet_first_prepared;
@@ -53,9 +53,9 @@ CAMLprim value stage4c_reset(value at) {
   atomic_store(&error_calls, 0); atomic_store(&join_calls, 0);
   atomic_store(&locked_engine_calls, 0); atomic_store(&commit_calls, 0);
   atomic_store(&publication_entries_count, 0); atomic_store(&temporary_unlink_count, 0);
-  atomic_store(&appender_end_rows, 0); atomic_store(&appender_end_row_errors, 0);
+  atomic_store(&appender_chunks, 0); atomic_store(&appender_chunk_errors, 0);
   atomic_store(&appender_flushes, 0); atomic_store(&metadata_changes, 0);
-  atomic_store(&selected_appender_end_row, -1);
+  atomic_store(&selected_appender_chunk, -1);
   for (int i = 0; i < 19; i++) { atomic_store(&gates[i], false); atomic_store(&entries[i], 0); }
   atomic_store(&selected_gate, false); atomic_store(&selected_entry, false);
   atomic_store(&publication_gate, false);
@@ -79,8 +79,8 @@ COUNTER(commits, commit_calls)
 COUNTER(parquet_second_exec, parquet_second_exec)
 COUNTER(publication_entries, publication_entries_count)
 COUNTER(temporary_unlinks, temporary_unlink_count)
-COUNTER(appender_end_rows, appender_end_rows)
-COUNTER(appender_end_row_errors, appender_end_row_errors)
+COUNTER(appender_chunks, appender_chunks)
+COUNTER(appender_chunk_errors, appender_chunk_errors)
 COUNTER(appender_flushes, appender_flushes)
 COUNTER(metadata_changes, metadata_changes)
 CAMLprim value stage4c_select_parquet_first(value enabled) {
@@ -91,9 +91,9 @@ CAMLprim value stage4c_gate(value id, value enabled) { atomic_store(&gates[Int_v
 CAMLprim value stage4c_entered(value id) { return Val_int(atomic_load(&entries[Int_val(id)])); }
 CAMLprim value stage4c_hold_selected(value enabled) { atomic_store(&selected_gate, Bool_val(enabled)); return Val_unit; }
 CAMLprim value stage4c_hold_publication(value enabled) { atomic_store(&publication_gate, Bool_val(enabled)); return Val_unit; }
-/* Test-only bounded selector: gate exactly one real end-row call. */
-CAMLprim value stage4c_select_appender_end_row(value row) {
-  atomic_store(&selected_appender_end_row, Int_val(row)); return Val_unit;
+/* Test-only bounded selector: gate exactly one real chunk append. */
+CAMLprim value stage4c_select_appender_chunk(value chunk) {
+  atomic_store(&selected_appender_chunk, Int_val(chunk)); return Val_unit;
 }
 CAMLprim value stage4c_selected_seen(value unit) { (void)unit; return Val_bool(atomic_load(&selected_entry)); }
 CAMLprim value stage4c_fail_close(value enabled) { atomic_store(&close_failure, Bool_val(enabled)); return Val_unit; }
@@ -176,13 +176,14 @@ extern duckdb_state __real_duckdb_appender_clear(duckdb_appender);
 duckdb_state __wrap_duckdb_appender_clear(duckdb_appender a) { boundary(9); return __real_duckdb_appender_clear(a); }
 extern duckdb_state __real_duckdb_appender_destroy(duckdb_appender *);
 duckdb_state __wrap_duckdb_appender_destroy(duckdb_appender *a) { boundary(10); return __real_duckdb_appender_destroy(a); }
-extern duckdb_state __real_duckdb_appender_end_row(duckdb_appender);
-duckdb_state __wrap_duckdb_appender_end_row(duckdb_appender a) {
-  int row = atomic_fetch_add(&appender_end_rows, 1) + 1;
-  int selected = atomic_load(&selected_appender_end_row);
-  if (selected < 0 || selected == row) boundary(17);
-  duckdb_state result = __real_duckdb_appender_end_row(a);
-  if (result != DuckDBSuccess) atomic_fetch_add(&appender_end_row_errors, 1);
+/* Every staged chunk is one native append (which may flush automatically). */
+extern duckdb_state __real_duckdb_append_data_chunk(duckdb_appender, duckdb_data_chunk);
+duckdb_state __wrap_duckdb_append_data_chunk(duckdb_appender a, duckdb_data_chunk c) {
+  int chunk = atomic_fetch_add(&appender_chunks, 1) + 1;
+  int selected = atomic_load(&selected_appender_chunk);
+  if (selected < 0 || selected == chunk) boundary(17);
+  duckdb_state result = __real_duckdb_append_data_chunk(a, c);
+  if (result != DuckDBSuccess) atomic_fetch_add(&appender_chunk_errors, 1);
   return result;
 }
 extern duckdb_state __real_duckdb_appender_flush(duckdb_appender);

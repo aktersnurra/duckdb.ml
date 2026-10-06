@@ -328,14 +328,78 @@ let with_appender_transaction tx table ~f =
     match !primary with
     | Some e -> Stdlib.Printexc.raise_with_backtrace (Cleanup_exception (e, exn)) backtrace
     | None -> Stdlib.Printexc.raise_with_backtrace exn backtrace
-(* A codec rejection rejects the whole batch before any native row. *)
+(* Staging. Values are written straight into the appender's staging chunks;
+   a custom encoder's rejection aborts the batch before any native append. *)
+exception Stage_rejected of { index : int; reason : Base.Error.t }
+module I64u = Stdlib_upstream_compatible.Int64_u
+module F64u = Stdlib_upstream_compatible.Float_u
+let stage_base : type b. Duckdb_ffi.appender -> b Scalar.t -> column:int -> row:int -> b -> unit =
+  fun native scalar ~column ~row value ->
+  match scalar with
+  | Scalar.Int64 -> Duckdb_ffi.stage_int64 native column row (I64u.of_int64 value)
+  | Scalar.Timestamp_s -> Duckdb_ffi.stage_int64 native column row (I64u.of_int64 value)
+  | Scalar.Timestamp_ms -> Duckdb_ffi.stage_int64 native column row (I64u.of_int64 value)
+  | Scalar.Timestamp_us -> Duckdb_ffi.stage_int64 native column row (I64u.of_int64 value)
+  | Scalar.Timestamp_ns -> Duckdb_ffi.stage_int64 native column row (I64u.of_int64 value)
+  | Scalar.Timestamp_tz -> Duckdb_ffi.stage_int64 native column row (I64u.of_int64 value)
+  | Scalar.Int32 -> Duckdb_ffi.stage_int64 native column row (I64u.of_int32 value)
+  | Scalar.Date -> Duckdb_ffi.stage_int64 native column row (I64u.of_int32 value)
+  | Scalar.Int16 -> Duckdb_ffi.stage_int64 native column row (I64u.of_int (Stdlib_stable.Int16.to_int value))
+  | Scalar.Int8 -> Duckdb_ffi.stage_int64 native column row (I64u.of_int (Stdlib_stable.Int8.to_int value))
+  | Scalar.Bool -> Duckdb_ffi.stage_int64 native column row (I64u.of_int (if value then 1 else 0))
+  | Scalar.Float64 -> Duckdb_ffi.stage_float native column row (F64u.of_float value)
+  | Scalar.Float32 -> Duckdb_ffi.stage_float native column row (F64u.of_float (Stdlib_stable.Float32.to_float value))
+  | Scalar.String -> Duckdb_ffi.stage_string native column row value
+  | Scalar.Blob -> Duckdb_ffi.stage_string native column row value
+let stage_plan : type a. Duckdb_ffi.appender -> a Codec.plan -> column:int -> row:int -> index:int -> a -> unit =
+  fun native plan ~column ~row ~index value ->
+  match plan with
+  | Codec.Identity scalar -> stage_base native scalar ~column ~row value
+  | Codec.Plan p ->
+    match p.encode value with
+    | Ok b -> stage_base native p.scalar ~column ~row b
+    | Error reason -> Stdlib.raise_notrace (Stage_rejected { index; reason })
+(* Stages one row; returns the first column of it holding a NULL the catalog
+   forbids. Encoding continues past such a NULL so that a later codec
+   rejection still wins. *)
+let rec stage_row : type l f r. Appender.appender -> Duckdb_ffi.appender -> (l, f, r) Fields.t -> l Args.t ->
+  column:int -> row:int -> int option = fun a native fields args ~column ~row ->
+  match fields, args with
+  | Fields.[], Args.[] -> None
+  | Fields.(codec :: fields), Args.(value :: args) ->
+    let index = column + 1 in
+    let here = match codec, value with
+      | Codec.Non_null plan, value -> stage_plan native plan ~column ~row ~index value; None
+      | Codec.Nullable _, None ->
+        Duckdb_ffi.stage_null native column row;
+        if Appender.nullable a column then None else Some column
+      | Codec.Nullable plan, Some value -> stage_plan native plan ~column ~row ~index value; None in
+    let rest = stage_row a native fields args ~column:(column + 1) ~row in
+    match here with Some _ -> here | None -> rest
+(* A codec rejection rejects the whole batch before any native append. *)
 let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
   let (Table_def t) = a.table in
   let context = table_context a.table in
   let fields = fields_of_columns t.columns in
-  let* rows = within context (Result.all (List.map rows ~f:(fun args -> encode_args fields args ~index:1))) in
-  let cells = List.map rows ~f:(List.map ~f:(fun (Bound (typ, value)) -> Appender.Cell (typ, value))) in
-  within context (Appender.append_rows a.core cells)
+  let native = Appender.native a.core in
+  Duckdb_ffi.stage_begin native (List.length rows);
+  let rec stage rows ~row ~first = match rows with
+    | [] -> first
+    | args :: rows ->
+      let here = stage_row a.core native fields args ~column:0 ~row in
+      let first = match first, here with
+        | None, Some column -> Some (column, row)
+        | _ -> first in
+      stage rows ~row:(row + 1) ~first in
+  match stage rows ~row:0 ~first:None with
+  | exception Stage_rejected { index; reason } ->
+    Duckdb_ffi.clear_stage native;
+    Error { context; cause = Encode_rejected { index; reason } }
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Duckdb_ffi.clear_stage native;
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+  | null -> within context (Appender.append_staged a.core ~null)
 let flush a = within (table_context a.table) (Appender.flush_appender a.core)
 
 (* A transaction owned by the calling scope; errors pass through flat. *)

@@ -109,7 +109,9 @@ let appender_boundaries () = fixture (fun connection ->
     Exn.protect ~finally:(fun () -> F.close_appender a false; F.finish_appender_close a; release_fixture ()) ~f:(fun () ->
       F.create_appender a "main" "native_appender";
       check "appender fixture created" (F.appender_status a = 0);
-      F.append_rows a [|[|(5, false, 1L, 0., "")|]|];
+      F.stage_begin a 1;
+      F.stage_int64 a 0 0 (Stdlib_upstream_compatible.Int64_u.of_int64 1L);
+      F.append_staged a;
       pending connection id (fun () -> if id = 7 then F.flush_appender a else F.close_appender a (id = 8)))))
 let run () =
   (match Array.to_list Stdlib.Sys.argv with

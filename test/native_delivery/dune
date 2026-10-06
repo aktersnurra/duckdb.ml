@@ -33,15 +33,13 @@
   -cclib -Wl,--wrap=duckdb_destroy_data_chunk
   -cclib -Wl,--wrap=ml_duckdb_create_appender
   -cclib -Wl,--wrap=ml_duckdb_appender_nullable
-  -cclib -Wl,--wrap=ml_duckdb_append_rows
+  -cclib -Wl,--wrap=ml_duckdb_append_staged
   -cclib -Wl,--wrap=ml_duckdb_flush_appender
   -cclib -Wl,--wrap=ml_duckdb_close_appender
   -cclib -Wl,--wrap=duckdb_prepare
   -cclib -Wl,--wrap=duckdb_bind_varchar
   -cclib -Wl,--wrap=duckdb_appender_create_ext
-  -cclib -Wl,--wrap=duckdb_appender_begin_row
-  -cclib -Wl,--wrap=duckdb_append_value
-  -cclib -Wl,--wrap=duckdb_appender_end_row
+  -cclib -Wl,--wrap=duckdb_append_data_chunk
   -cclib -Wl,--wrap=duckdb_appender_flush
   -cclib -Wl,--wrap=duckdb_appender_close
   -cclib -Wl,--wrap=duckdb_appender_clear

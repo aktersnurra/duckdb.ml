@@ -181,11 +181,10 @@ external view_blit_validity : prepared @ local -> int -> int ->
   (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t @ local -> int -> unit
   = "ml_duckdb_view_blit_validity" [@@noalloc]
 
-(** Unsafe transaction-owned appender. Input cells are (type id, is-null,
-    integer bits, floating value, bytes). Whole batches are copied before unlock.
-    Caller validates shape, types, NULL and ranges and owns transaction rollback. *)
+(** Unsafe transaction-owned appender. Batches are staged into the appender's
+    own reusable data chunks, then appended chunk by chunk. Caller validates
+    shape, types, NULL and ranges and owns transaction rollback. *)
 type appender
-type append_cell = int * bool * int64 * float * string
 val appender_owner : connection -> appender
 val create_appender : appender -> string -> string -> unit
 val appender_status : appender -> int
@@ -196,8 +195,22 @@ val appender_nullable : appender -> bool array
 (** Restricts the appender to the named catalog columns, given with their
     physical indices; omitted columns take defaults. Status reports failure. *)
 val appender_select_columns : appender -> string array -> int array -> unit
-val append_rows : appender -> append_cell array array -> unit
-val clear_appender_input : appender -> unit
+
+(** Staging. [stage_begin a rows] prepares (and resets) chunks for [rows] rows;
+    the [stage_*] writers then set (column, row) in the active column order,
+    converting to the column's physical type. Writes outside the staged range,
+    of the wrong kind for the column, or to a closed appender are ignored.
+    [append_staged] appends every staged chunk in one native work section and
+    clears the staging; [clear_stage] drops it without appending. *)
+external stage_begin : appender -> int -> unit = "ml_duckdb_stage_begin" [@@noalloc]
+external stage_int64 : appender -> int -> int -> int64# -> unit
+  = "ml_duckdb_stage_int64_byte" "ml_duckdb_stage_int64" [@@noalloc]
+external stage_float : appender -> int -> int -> float# -> unit
+  = "ml_duckdb_stage_float_byte" "ml_duckdb_stage_float" [@@noalloc]
+external stage_string : appender -> int -> int -> string -> unit = "ml_duckdb_stage_string" [@@noalloc]
+external stage_null : appender -> int -> int -> unit = "ml_duckdb_stage_null" [@@noalloc]
+external clear_stage : appender -> unit = "ml_duckdb_clear_stage" [@@noalloc]
+val append_staged : appender -> unit
 val flush_appender : appender -> unit
 val close_appender : appender -> bool -> unit
 val finish_appender_close : appender -> unit

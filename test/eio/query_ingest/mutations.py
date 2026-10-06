@@ -36,24 +36,21 @@ CONTROLS = {
         "Finished (offload Operation (fun () -> run owner (Duckdb.Bridge.request request.canceller)))",
         "let _ = offload Operation (fun () -> Ok ()) in Finished (offload Operation (fun () -> run owner (Duckdb.Bridge.request request.canceller)))",
     ),
-    "bypass_selected_end_row": (
+    "bypass_selected_chunk": (
         "native_cancellation",
-        "ingest_end_row selected released native entry",
+        "ingest_chunk selected released native entry",
         None,
         "typed_gate(3, (uintptr_t)appender == atomic_load(&typed_appender) &&",
         "typed_gate(3, false && (uintptr_t)appender == atomic_load(&typed_appender) &&",
     ),
-    "extra_native_row_after_cancel": (
+    "extra_native_chunk_after_cancel": (
         "native_cancellation",
-        "ingest_end_row no subsequent end-row work",
+        "ingest_chunk no subsequent chunk work",
         None,
-        "duckdb_state state = __real_duckdb_appender_end_row(appender);",
-        """duckdb_state state = __real_duckdb_appender_end_row(appender);
-  if (row == 1 && atomic_load(&typed_kind) == 3 && atomic_load(&typed_ack) == 1) {
-    (void)duckdb_appender_begin_row(appender);
-    (void)duckdb_append_int64(appender, 999);
-    (void)__wrap_duckdb_appender_end_row(appender);
-  }""",
+        "duckdb_state state = __real_duckdb_append_data_chunk(appender, data);",
+        """duckdb_state state = __real_duckdb_append_data_chunk(appender, data);
+  if (chunk == 1 && atomic_load(&typed_kind) == 3 && atomic_load(&typed_ack) == 1)
+    (void)__wrap_duckdb_append_data_chunk(appender, data);""",
     ),
 }
 

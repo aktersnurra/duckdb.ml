@@ -1,7 +1,7 @@
 (executable
  (name test_native_close)
  (modules test_native_close)
- (libraries base threads duckdb-ffi evidence_support)
+ (libraries base threads stdlib_upstream_compatible duckdb-ffi evidence_support)
  (foreign_stubs (language c) (names lifecycle_hooks)
   (extra_deps ../adapter_bridge_hooks.c ../../lib/ffi/query_native.h)
   (include_dirs ../../lib/ffi %{env:DUCKDB_INCLUDE_DIR=../../.deps/duckdb})

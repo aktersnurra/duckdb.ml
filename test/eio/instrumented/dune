@@ -26,7 +26,7 @@
   -cclib -Wl,--wrap=duckdb_destroy_result
   -cclib -Wl,--wrap=duckdb_destroy_prepare
   -cclib -Wl,--wrap=duckdb_appender_clear
-  -cclib -Wl,--wrap=duckdb_appender_end_row
+  -cclib -Wl,--wrap=duckdb_append_data_chunk
   -cclib -Wl,--wrap=duckdb_appender_flush
   -cclib -Wl,--wrap=duckdb_appender_create_ext
   -cclib -Wl,--wrap=duckdb_appender_destroy

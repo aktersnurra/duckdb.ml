@@ -129,7 +129,6 @@ external view_blit_validity : prepared @ local -> int -> int ->
   = "ml_duckdb_view_blit_validity" [@@noalloc]
 
 type appender
-type append_cell = int * bool * int64 * float * string
 external appender_owner : connection -> appender = "ml_duckdb_appender_owner"
 external create_appender : appender -> string -> string -> unit = "ml_duckdb_create_appender"
 external appender_status : appender -> int = "ml_duckdb_appender_status" [@@noalloc]
@@ -137,8 +136,15 @@ external appender_message : appender -> string = "ml_duckdb_appender_message"
 external appender_types : appender -> int array = "ml_duckdb_appender_types"
 external appender_nullable : appender -> bool array = "ml_duckdb_appender_nullable"
 external appender_select_columns : appender -> string array -> int array -> unit = "ml_duckdb_appender_select_columns"
-external append_rows : appender -> append_cell array array -> unit = "ml_duckdb_append_rows"
-external clear_appender_input : appender -> unit = "ml_duckdb_clear_appender_input" [@@noalloc]
+external stage_begin : appender -> int -> unit = "ml_duckdb_stage_begin" [@@noalloc]
+external stage_int64 : appender -> int -> int -> int64# -> unit
+  = "ml_duckdb_stage_int64_byte" "ml_duckdb_stage_int64" [@@noalloc]
+external stage_float : appender -> int -> int -> float# -> unit
+  = "ml_duckdb_stage_float_byte" "ml_duckdb_stage_float" [@@noalloc]
+external stage_string : appender -> int -> int -> string -> unit = "ml_duckdb_stage_string" [@@noalloc]
+external stage_null : appender -> int -> int -> unit = "ml_duckdb_stage_null" [@@noalloc]
+external clear_stage : appender -> unit = "ml_duckdb_clear_stage" [@@noalloc]
+external append_staged : appender -> unit = "ml_duckdb_append_staged"
 external flush_appender : appender -> unit = "ml_duckdb_flush_appender"
 external close_appender : appender -> bool -> unit = "ml_duckdb_close_appender"
 external finish_appender_close : appender -> unit = "ml_duckdb_finish_appender_close" [@@noalloc]

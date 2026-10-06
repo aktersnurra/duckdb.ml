@@ -10,13 +10,6 @@
 #include <string.h>
 
 typedef struct {
-    int type, null;
-    int64_t integer;
-    double floating;
-    size_t length;
-    char *bytes;
-} append_cell;
-typedef struct {
     connection_owner *parent;
     duckdb_appender appender;
     int status;
@@ -25,10 +18,19 @@ typedef struct {
     int *types;
     bool *nullable;
     idx_t columns;
-    append_cell *cells;
-    size_t cell_count, rows;
+    duckdb_logical_type *logical;   /* active column types, for staging chunks */
+    duckdb_data_chunk *staged;      /* reusable staging chunks */
+    size_t staged_capacity, staged_rows;
+    /* A staging failure is kept apart from [status]: a later codec rejection
+       in the same batch drops it without poisoning; [append_staged] turns it
+       into the status. */
+    bool stage_failed;
+    char stage_message[DUCKDB_ML_MESSAGE_SIZE];
 } appender_owner;
 #define Appender(v) (*((appender_owner **)Data_custom_val(v)))
+/* Staging chunks kept between batches; larger batches grow the pool for
+   themselves and shrink it back after appending. */
+#define STAGED_RETAINED 16
 static void error(appender_owner *p, const char *message) {
     if (p->status) return;
     p->status = DUCKDB_ML_STATUS_ERROR;
@@ -62,14 +64,19 @@ static void check(appender_owner *p, duckdb_state state, duckdb_ml_runtime runti
     }
 }
 static void clear_input(appender_owner *p) {
-    if (!p) return;
-    if (p->cells) {
-        for (size_t i = 0; i < p->cell_count; ++i) if (p->cells[i].bytes) {
-            free(p->cells[i].bytes); duckdb_ml_released();
-        }
-        free(p->cells); p->cells = NULL; duckdb_ml_released();
+    if (p) { p->staged_rows = 0; p->stage_failed = false; }
+}
+/* Frees the staging chunks and the active column types they were built from.
+   Runs while [p->columns] still counts those types: engine cleanup when the
+   appender is destroyed, or before the active columns change. */
+static void release_staging(appender_owner *p) {
+    for (size_t k = 0; k < p->staged_capacity; ++k) { duckdb_destroy_data_chunk(&p->staged[k]); duckdb_ml_released(); }
+    if (p->staged) { free(p->staged); p->staged = NULL; duckdb_ml_released(); }
+    p->staged_capacity = p->staged_rows = 0;
+    if (p->logical) {
+        for (idx_t i = 0; i < p->columns; ++i) duckdb_destroy_logical_type(&p->logical[i]);
+        free(p->logical); p->logical = NULL; duckdb_ml_released();
     }
-    p->cell_count = p->rows = 0;
 }
 /* Clear BEFORE destroy: DuckDB destroy calls close, and the C++ destructor
    can close again. No destructor may silently flush discarded buffered rows. */
@@ -89,6 +96,7 @@ static void close_native(appender_owner *p, bool flush, duckdb_ml_runtime runtim
         duckdb_ml_native_cleanup_begin(p->parent, runtime);
         check(p, duckdb_appender_clear(p->appender), runtime);
         duckdb_appender_destroy(&p->appender); duckdb_ml_released();
+        release_staging(p);
         duckdb_ml_native_cleanup_end(p->parent, runtime);
     }
     clear_input(p);
@@ -96,6 +104,7 @@ static void close_native(appender_owner *p, bool flush, duckdb_ml_runtime runtim
 static void delete_owner(appender_owner *p) {
     if (!p) return;
     close_native(p, false, DUCKDB_ML_RUNTIME_HELD);
+    release_staging(p); /* defensive: close_native always leaves staging empty */
     if (p->schema) { free(p->schema); duckdb_ml_released(); }
     if (p->table) { free(p->table); duckdb_ml_released(); }
     if (p->types) { free(p->types); duckdb_ml_released(); }
@@ -216,70 +225,140 @@ CAMLprim value ml_duckdb_create_appender(value v, value schema, value table) {
     duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
-static duckdb_value make_value(append_cell *c) {
-    if (c->null) return duckdb_create_null_value();
-    switch(c->type) {
-    case DUCKDB_TYPE_BOOLEAN: return duckdb_create_bool(c->integer != 0);
-    case DUCKDB_TYPE_TINYINT: return duckdb_create_int8((int8_t)c->integer);
-    case DUCKDB_TYPE_SMALLINT: return duckdb_create_int16((int16_t)c->integer);
-    case DUCKDB_TYPE_INTEGER: return duckdb_create_int32((int32_t)c->integer);
-    case DUCKDB_TYPE_BIGINT: return duckdb_create_int64(c->integer);
-    case DUCKDB_TYPE_FLOAT: return duckdb_create_float((float)c->floating);
-    case DUCKDB_TYPE_DOUBLE: return duckdb_create_double(c->floating);
-    case DUCKDB_TYPE_VARCHAR: return duckdb_create_varchar_length(c->bytes, c->length);
-    case DUCKDB_TYPE_BLOB: return duckdb_create_blob((const uint8_t *)c->bytes, c->length);
-    case DUCKDB_TYPE_DATE: return duckdb_create_date((duckdb_date){(int32_t)c->integer});
-    case DUCKDB_TYPE_TIMESTAMP: return duckdb_create_timestamp((duckdb_timestamp){c->integer});
-    case DUCKDB_TYPE_TIMESTAMP_S: return duckdb_create_timestamp_s((duckdb_timestamp_s){c->integer});
-    case DUCKDB_TYPE_TIMESTAMP_MS: return duckdb_create_timestamp_ms((duckdb_timestamp_ms){c->integer});
-    case DUCKDB_TYPE_TIMESTAMP_NS: return duckdb_create_timestamp_ns((duckdb_timestamp_ns){c->integer});
-    case DUCKDB_TYPE_TIMESTAMP_TZ: return duckdb_create_timestamp_tz((duckdb_timestamp){c->integer});
-    default: return NULL;
-    }
-}
-CAMLprim value ml_duckdb_append_rows(value v, value rows) {
-    CAMLparam2(v, rows); appender_owner *p = Appender(v);
-    p->rows = Wosize_val(rows);
-    if (p->columns && p->rows > SIZE_MAX / p->columns / sizeof(append_cell)) caml_raise_out_of_memory();
-    p->cell_count = p->rows * p->columns;
-    if (p->cell_count) {
-        p->cells = calloc(p->cell_count, sizeof(append_cell));
-        if (!p->cells) caml_raise_out_of_memory();
+/* Prepares staging for [rows] rows: ceil(rows / vector size) chunks of the
+   active column types, reset to empty. Allocation failure leaves the
+   appender's status set and stages nothing. Runs with the runtime held; it
+   touches only this appender's own buffers. */
+CAMLprim value ml_duckdb_stage_begin(value v, value rows) {
+    appender_owner *p = Appender(v); size_t size = duckdb_vector_size();
+    clear_input(p);
+    if (!p || !p->appender || p->status || Long_val(rows) < 0) return Val_unit;
+    size_t n = (size_t)Long_val(rows), chunks = (n + size - 1) / size;
+    if (!p->logical && p->columns) {
+        p->logical = calloc(p->columns, sizeof(duckdb_logical_type));
+        if (!p->logical) { error(p, "Cannot allocate staging types"); return Val_unit; }
         duckdb_ml_acquired();
+        for (idx_t i = 0; i < p->columns; ++i) p->logical[i] = duckdb_appender_column_type(p->appender, i);
     }
-    for (size_t row = 0; row < p->rows; ++row) for (idx_t col = 0; col < p->columns; ++col) {
-        value cell = Field(Field(rows, row), col);
-        append_cell *c = &p->cells[row * p->columns + col];
-        c->type = Int_val(Field(cell, 0)); c->null = Bool_val(Field(cell, 1));
-        c->integer = Int64_val(Field(cell, 2)); c->floating = Double_val(Field(cell, 3));
-        value bytes = Field(cell, 4); c->length = caml_string_length(bytes);
-        if (c->type == DUCKDB_TYPE_VARCHAR || c->type == DUCKDB_TYPE_BLOB) {
-            c->bytes = copy_string(bytes); duckdb_ml_acquired();
+    if (chunks > p->staged_capacity) {
+        duckdb_data_chunk *grown = realloc(p->staged, chunks * sizeof(duckdb_data_chunk));
+        if (!grown) { error(p, "Cannot allocate staging chunks"); return Val_unit; }
+        if (!p->staged) duckdb_ml_acquired();
+        p->staged = grown;
+        while (p->staged_capacity < chunks) {
+            duckdb_data_chunk chunk = duckdb_create_data_chunk(p->logical, p->columns);
+            if (!chunk) { error(p, "Cannot allocate staging chunks"); return Val_unit; }
+            duckdb_ml_acquired();
+            p->staged[p->staged_capacity++] = chunk;
         }
     }
+    for (size_t k = 0; k < chunks; ++k) {
+        duckdb_data_chunk_reset(p->staged[k]);
+        /* An unwritten string slot must still be a valid (empty) string. */
+        size_t held = n - k * size < size ? n - k * size : size;
+        for (idx_t i = 0; i < p->columns; ++i)
+            if (p->types[i] == DUCKDB_TYPE_VARCHAR || p->types[i] == DUCKDB_TYPE_BLOB)
+                memset(duckdb_vector_get_data(duckdb_data_chunk_get_vector(p->staged[k], i)), 0,
+                       held * sizeof(duckdb_string_t));
+    }
+    p->staged_rows = n;
+    return Val_unit;
+}
+/* The staging data of (column, row), or NULL when out of range or closed. */
+static void *slot(appender_owner *p, value column, value row, duckdb_vector *out, idx_t *index) {
+    intnat c = Long_val(column), r = Long_val(row); size_t size = duckdb_vector_size();
+    if (!p || c < 0 || (idx_t)c >= p->columns || r < 0 || (size_t)r >= p->staged_rows) return NULL;
+    *out = duckdb_data_chunk_get_vector(p->staged[(size_t)r / size], (idx_t)c); *index = (idx_t)((size_t)r % size);
+    return duckdb_vector_get_data(*out);
+}
+value ml_duckdb_stage_int64(value v, value column, value row, int64_t x) {
+    appender_owner *p = Appender(v); duckdb_vector vec; idx_t i;
+    void *d = slot(p, column, row, &vec, &i); if (!d) return Val_unit;
+    switch (p->types[Long_val(column)]) {
+    case DUCKDB_TYPE_BOOLEAN: ((bool *)d)[i] = x != 0; break;
+    case DUCKDB_TYPE_TINYINT: ((int8_t *)d)[i] = (int8_t)x; break;
+    case DUCKDB_TYPE_SMALLINT: ((int16_t *)d)[i] = (int16_t)x; break;
+    case DUCKDB_TYPE_INTEGER: case DUCKDB_TYPE_DATE: ((int32_t *)d)[i] = (int32_t)x; break;
+    case DUCKDB_TYPE_BIGINT: case DUCKDB_TYPE_TIMESTAMP: case DUCKDB_TYPE_TIMESTAMP_S:
+    case DUCKDB_TYPE_TIMESTAMP_MS: case DUCKDB_TYPE_TIMESTAMP_NS: case DUCKDB_TYPE_TIMESTAMP_TZ:
+        ((int64_t *)d)[i] = x; break;
+    default: break;
+    }
+    return Val_unit;
+}
+value ml_duckdb_stage_int64_byte(value v, value c, value r, value x) { return ml_duckdb_stage_int64(v, c, r, Int64_val(x)); }
+value ml_duckdb_stage_float(value v, value column, value row, double x) {
+    appender_owner *p = Appender(v); duckdb_vector vec; idx_t i;
+    void *d = slot(p, column, row, &vec, &i); if (!d) return Val_unit;
+    switch (p->types[Long_val(column)]) {
+    case DUCKDB_TYPE_FLOAT: ((float *)d)[i] = (float)x; break;
+    case DUCKDB_TYPE_DOUBLE: ((double *)d)[i] = x; break;
+    default: break;
+    }
+    return Val_unit;
+}
+value ml_duckdb_stage_float_byte(value v, value c, value r, value x) { return ml_duckdb_stage_float(v, c, r, Double_val(x)); }
+/* DuckDB copies the bytes into the vector's own string heap. Invalid UTF-8
+   in a VARCHAR column fails the whole batch: the engine's diagnostic is kept
+   as the staging failure and nothing stays staged, so [append_staged]
+   appends no chunk and reports it (DuckDB itself would store a NULL). */
+value ml_duckdb_stage_string(value v, value column, value row, value s) {
+    appender_owner *p = Appender(v); duckdb_vector vec; idx_t i;
+    if (!slot(p, column, row, &vec, &i)) return Val_unit;
+    int t = p->types[Long_val(column)];
+    const char *bytes = String_val(s); idx_t length = caml_string_length(s);
+    if (t == DUCKDB_TYPE_VARCHAR) {
+        duckdb_error_data invalid = duckdb_valid_utf8_check(bytes, length);
+        if (invalid) {
+            const char *message = duckdb_error_data_message(invalid);
+            /* Not connection-owned and the runtime is held: no cleanup bracket. */
+            snprintf(p->stage_message, sizeof(p->stage_message), "%s",
+                     message ? message : "Invalid UTF-8 in VARCHAR value");
+            duckdb_destroy_error_data(&invalid);
+            p->staged_rows = 0; p->stage_failed = true;
+            return Val_unit;
+        }
+        duckdb_unsafe_vector_assign_string_element_len(vec, i, bytes, length);
+    } else if (t == DUCKDB_TYPE_BLOB)
+        duckdb_vector_assign_string_element_len(vec, i, bytes, length);
+    return Val_unit;
+}
+value ml_duckdb_stage_null(value v, value column, value row) {
+    appender_owner *p = Appender(v); duckdb_vector vec; idx_t i;
+    if (!slot(p, column, row, &vec, &i)) return Val_unit;
+    duckdb_vector_ensure_validity_writable(vec);
+    duckdb_validity_set_row_invalid(duckdb_vector_get_validity(vec), i);
+    return Val_unit;
+}
+value ml_duckdb_clear_stage(value v) { clear_input(Appender(v)); return Val_unit; }
+/* Appends every staged chunk. Each chunk is one interruptible engine call
+   (it can automatically flush through a real INSERT); the first failure stops
+   the batch and is reported through the status. */
+CAMLprim value ml_duckdb_append_staged(value v) {
+    CAMLparam1(v); appender_owner *p = Appender(v);
+    if (!p) CAMLreturn(Val_unit);
+    if (!p->appender) { error(p, "Appender is closed"); clear_input(p); CAMLreturn(Val_unit); }
+    if (p->stage_failed) { error(p, p->stage_message); clear_input(p); CAMLreturn(Val_unit); }
+    size_t size = duckdb_vector_size(), rows = p->staged_rows, chunks = (rows + size - 1) / size;
+    for (size_t k = 0; k < chunks; ++k)
+        duckdb_data_chunk_set_size(p->staged[k], k + 1 < chunks ? size : rows - k * size);
     caml_enter_blocking_section();
     duckdb_ml_native_work_begin(p->parent);
-    for (size_t row = 0; row < p->rows && admit_scalar(p); ++row) {
-        check(p, duckdb_appender_begin_row(p->appender), DUCKDB_ML_RUNTIME_RELEASED);
-        for (idx_t col = 0; col < p->columns && admit_scalar(p); ++col) {
-            duckdb_value cell = make_value(&p->cells[row * p->columns + col]);
-            if (!cell) error(p, "Cannot construct appender value");
-            else {
-                if (admit_scalar(p)) check(p, duckdb_append_value(p->appender, cell), DUCKDB_ML_RUNTIME_RELEASED);
-                duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
-                duckdb_destroy_value(&cell);
-                duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
-            }
-        }
-        /* EndRow can automatically flush the collection through a real INSERT.
-           Earlier cell work is noninterruptible, not scheduler-dispatched. */
-        if (admit_user(p)) {
-            duckdb_state state = duckdb_appender_end_row(p->appender);
-            duckdb_ml_native_user_call_end(p->parent);
-            check(p, state, DUCKDB_ML_RUNTIME_RELEASED);
-        }
+    for (size_t k = 0; k < chunks && admit_user(p); ++k) {
+        duckdb_state state = duckdb_append_data_chunk(p->appender, p->staged[k]);
+        duckdb_ml_native_user_call_end(p->parent);
+        check(p, state, DUCKDB_ML_RUNTIME_RELEASED);
     }
     clear_input(p);
+    if (p->staged_capacity > STAGED_RETAINED) {
+        /* Keep at most STAGED_RETAINED chunks between batches. */
+        duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+        for (size_t k = STAGED_RETAINED; k < p->staged_capacity; ++k) {
+            duckdb_destroy_data_chunk(&p->staged[k]); duckdb_ml_released();
+        }
+        p->staged_capacity = STAGED_RETAINED;
+        duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+    }
     duckdb_ml_native_work_end(p->parent);
     caml_leave_blocking_section(); caml_process_pending_actions(); CAMLreturn(Val_unit);
 }
@@ -318,6 +397,12 @@ CAMLprim value ml_duckdb_appender_select_columns(value v, value names, value ind
         copies[i] = copy_string(Field(names, i)); duckdb_ml_acquired();
     }
     caml_enter_blocking_section();
+    if (p->logical || p->staged) {
+        /* Staging follows the active columns, which change now. */
+        duckdb_ml_native_cleanup_begin(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+        release_staging(p);
+        duckdb_ml_native_cleanup_end(p->parent, DUCKDB_ML_RUNTIME_RELEASED);
+    }
     duckdb_ml_native_work_begin(p->parent);
     for (idx_t i = 0; i < n && admit_scalar(p); ++i)
         check(p, duckdb_appender_add_column(p->appender, copies[i]), DUCKDB_ML_RUNTIME_RELEASED);
@@ -335,7 +420,6 @@ CAMLprim value ml_duckdb_appender_select_columns(value v, value names, value ind
 }
 CAMLprim value ml_duckdb_finish_appender_close(value v) { delete_owner(Appender(v)); Appender(v) = NULL; return Val_unit; }
 CAMLprim value ml_duckdb_appender_is_closed(value v) { return Val_bool(Appender(v) == NULL); }
-CAMLprim value ml_duckdb_clear_appender_input(value v) { clear_input(Appender(v)); return Val_unit; }
 CAMLprim value ml_duckdb_appender_status(value v) { return Val_int(Appender(v)->status); }
 CAMLprim value ml_duckdb_appender_message(value v) { CAMLparam1(v); CAMLreturn(caml_copy_string(Appender(v)->message)); }
 CAMLprim value ml_duckdb_appender_types(value v) {

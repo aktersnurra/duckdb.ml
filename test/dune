@@ -119,7 +119,7 @@
   (include_dirs %{env:DUCKDB_INCLUDE_DIR=../.deps/duckdb})
   (flags (:standard -std=c11 -Wall -Wextra)))
  (link_flags :standard -cclib -Wl,--wrap=duckdb_appender_create_ext
-  -cclib -Wl,--wrap=duckdb_append_value -cclib -Wl,--wrap=duckdb_appender_flush
+  -cclib -Wl,--wrap=duckdb_append_data_chunk -cclib -Wl,--wrap=duckdb_appender_flush
   -cclib -Wl,--wrap=duckdb_appender_close -cclib -Wl,--wrap=duckdb_query))
 
 (executable (name test_appender_signals) (modules test_appender_signals)

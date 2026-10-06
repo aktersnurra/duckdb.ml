@@ -1,9 +1,5 @@
 open Resource
 
-(** Complete owned rows, not a decoder. Every cell carries its exact witness.
-    [None] is NULL. Entire batches are checked before any native row mutation;
-    NOT NULL columns reject [None] there. *)
-type cell = Cell : 'a Scalar.t * 'a option -> cell
 type appender
 
 (** Opens a child in the current database and explicit schema (default main).
@@ -13,11 +9,17 @@ type appender
     An unclosed manual child at transaction exit forces rollback. *)
 val open_appender : transaction -> ?schema:string -> string -> (appender, error) result
 
-(** One admission/unlock for a complete batch. An engine error (including an
-    automatic flush), interrupted native work, or validation error poisons this
-    appender and the transaction. Ignoring it cannot commit previous rows.
-    Later operations return the first error; close still destroys the handle. *)
-val append_rows : appender -> cell list list -> (unit, error) result
+(** Staging writes only this appender's own chunks and runs outside admission
+    (through [native]). [append_staged] then appends them in one admission: a
+    poisoned/closed appender reports its failure first, then [null] (a NULL
+    staged into a NOT NULL column, as (column, row)) poisons, then an engine
+    error (including an automatic flush) or interrupted native work poisons
+    this appender and the transaction. Ignoring it cannot commit previous rows.
+    Later operations return the first error; close still destroys the handle.
+    Staging is cleared on every exit. *)
+val native : appender -> Duckdb_ffi.appender
+val nullable : appender -> int -> bool
+val append_staged : appender -> null:(int * int) option -> (unit, error) result
 val flush_appender : appender -> (unit, error) result
 
 (** Flushes on success, then clears/destroys. Never commits the transaction.

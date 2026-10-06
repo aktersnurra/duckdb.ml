@@ -157,3 +157,107 @@ let () =
   let t = T.declare "s" T.Columns.["a", int64; "b", nullable string] ~row:(fun a b -> (a, b)) in
   assert (String.equal (Duckdb.Request.query (T.select t)) "SELECT \"a\", \"b\" FROM \"main\".\"s\"");
   Stdlib.print_endline "table: spine-backed columns render=ok"
+
+(* A batch larger than one native chunk lands whole and in order. *)
+let () =
+  connected (fun c ->
+    ddl c "CREATE TABLE big(a BIGINT, b VARCHAR, f DOUBLE, d DATE)";
+    let big = T.(declare "big" Columns.["a", int64; "b", nullable string; "f", float64; "d", date]
+      ~row:(fun a b f d -> (a, b, f, d))) in
+    let rows = List.init 5000 ~f:(fun i ->
+      D.Args.[Int64.of_int i; (if i % 3 = 0 then None else Some (Int.to_string i)); Float.of_int i; Int32.of_int_exn i]) in
+    ok (T.with_appender c big ~f:(fun a -> T.append a rows));
+    let back = ok (R.Session.collect c
+      (R.many D.Fields.[] D.Fields.[int64; nullable string; float64; date] ~row:(fun a b f d -> (a, b, f, d))
+         "SELECT a, b, f, d FROM big ORDER BY a") D.Args.[]) in
+    assert (List.length back = 5000);
+    List.iteri back ~f:(fun i (a, b, f, d) ->
+      assert (Int64.equal a (Int64.of_int i));
+      assert (Option.equal String.equal b (if i % 3 = 0 then None else Some (Int.to_string i)));
+      assert (Float.equal f (Float.of_int i) && Int32.equal d (Int32.of_int_exn i))));
+  Stdlib.print_endline "table: a 5000-row batch lands whole and in order=ok"
+
+(* A codec rejection in the last row leaves the table untouched and does not
+   poison the appender; it wins over a NULL in a NOT NULL column earlier. *)
+let () =
+  connected (fun c ->
+    ddl c "CREATE TABLE strict(a BIGINT NOT NULL, b BIGINT)";
+    let positive = D.Codec.Values.custom ~encode:(fun (n : int64) ->
+      if Int64.(n > 0L) then Ok n else Or_error.error_string "not positive") ~decode:Or_error.return D.Codec.Values.int64 in
+    let strict = T.(declare "strict" Columns.["a", nullable int64; "b", positive] ~row:(fun a b -> (a, b))) in
+    let outcome = T.with_appender c strict ~f:(fun a ->
+      (match T.append a [ D.Args.[None; 1L]; D.Args.[Some 1L; 1L]; D.Args.[Some 2L; 0L] ] with
+       | Error { cause = D.Error.Encode_rejected { index = 2; _ }; _ } -> ()
+       | Error e -> failwith ("expected Encode_rejected at the second column, got " ^ describe e)
+       | Ok () -> failwith "expected Encode_rejected at the second column");
+      T.append a [ D.Args.[Some 3L; 3L] ]) in
+    ok outcome;
+    assert (Int64.equal (count c "strict") 1L));
+  Stdlib.print_endline "table: codec rejection is atomic, unpoisoning and precedes NULL=ok"
+
+(* Invalid UTF-8 in a VARCHAR value fails the batch and poisons the appender
+   (DuckDB would silently store NULL); nothing reaches the table. *)
+let () =
+  connected (fun c ->
+    ddl c "CREATE TABLE texts(s VARCHAR)";
+    let texts = T.(declare "texts" Columns.["s", nullable string] ~row:Fn.id) in
+    let first = ref None in
+    let outcome = T.with_appender c texts ~f:(fun a ->
+      let e = failed "invalid UTF-8" (fun e -> match e.cause with D.Error.Native _ -> true | _ -> false)
+        (T.append a [ D.Args.[Some "ok"]; D.Args.[Some "\xff\xfe"] ]) in
+      first := Some e;
+      let again = failed "poisoned appender" (fun _ -> true) (T.append a [ D.Args.[Some "later"] ]) in
+      (match e.cause, again.cause with
+       | D.Error.Native first, D.Error.Native later -> assert (String.equal first later)
+       | _ -> assert false);
+      Ok ()) in
+    ignore (failed "poisoned scope" (fun _ -> true) outcome);
+    assert (Option.is_some !first);
+    assert (Int64.equal (count c "texts") 0L));
+  Stdlib.print_endline "table: invalid UTF-8 VARCHAR fails the batch and poisons=ok"
+
+(* Invalid UTF-8 staged before a later codec rejection in the same batch is
+   dropped with it: the rejection does not poison, and a later valid batch
+   commits alone. *)
+let () =
+  connected (fun c ->
+    ddl c "CREATE TABLE mixed(s VARCHAR, n BIGINT)";
+    let positive = D.Codec.Values.custom ~encode:(fun (n : int64) ->
+      if Int64.(n > 0L) then Ok n else Or_error.error_string "not positive") ~decode:Or_error.return D.Codec.Values.int64 in
+    let mixed = T.(declare "mixed" Columns.["s", nullable string; "n", positive] ~row:(fun s n -> (s, n))) in
+    ok (T.with_appender c mixed ~f:(fun a ->
+      (match T.append a [ D.Args.[Some "\xff\xfe"; 1L]; D.Args.[Some "x"; 0L] ] with
+       | Error { cause = D.Error.Encode_rejected { index = 2; _ }; _ } -> ()
+       | Error e -> failwith ("expected Encode_rejected, got " ^ describe e)
+       | Ok () -> failwith "expected Encode_rejected");
+      T.append a [ D.Args.[Some "valid"; 2L] ]));
+    assert (Int64.equal (count c "mixed") 1L));
+  Stdlib.print_endline "table: codec rejection after invalid UTF-8 does not poison=ok"
+
+(* Staging chunks are reused between batches: a reset clears validity and
+   string heaps, and a batch beyond the retained pool (16 chunks) shrinks it
+   back without disturbing the next batch. *)
+let () =
+  connected (fun c ->
+    ddl c "CREATE TABLE reuse(n BIGINT, s VARCHAR)";
+    let reuse = T.(declare "reuse" Columns.["n", int64; "s", nullable string] ~row:(fun n s -> (n, s))) in
+    let nulls = List.init 2049 ~f:(fun i -> D.Args.[Int64.of_int i; None]) in
+    let large = List.init 40000 ~f:(fun i -> D.Args.[Int64.of_int (3000 + i); Some (Int.to_string i)]) in
+    ok (T.with_appender c reuse ~f:(fun a ->
+      ok (T.append a nulls);
+      ok (T.append a [ D.Args.[2049L; Some "a"]; D.Args.[2050L; Some "b"] ]);
+      ok (T.append a large);
+      T.append a [ D.Args.[2051L; Some "c"]; D.Args.[2052L; None] ]));
+    let back = ok (R.Session.collect c
+      (R.many D.Fields.[] D.Fields.[int64; nullable string] ~row:(fun n s -> (n, s))
+         "SELECT n, s FROM reuse WHERE n < 3000 ORDER BY n") D.Args.[]) in
+    assert (List.length back = 2053);
+    List.iteri back ~f:(fun i (n, s) ->
+      assert (Int64.equal n (Int64.of_int i));
+      let expected = match i with 2049 -> Some "a" | 2050 -> Some "b" | 2051 -> Some "c" | _ -> None in
+      assert (Option.equal String.equal s expected));
+    assert (Int64.equal (count c "reuse") 42053L);
+    let large_ok = ok (R.Session.find c (R.one D.Fields.[] D.Fields.[int64] ~row:Fn.id
+      "SELECT count(*)::BIGINT FROM reuse WHERE n >= 3000 AND s = (n - 3000)::VARCHAR") D.Args.[]) in
+    assert (Int64.equal large_ok 40000L));
+  Stdlib.print_endline "table: staging reuse resets validity/strings and caps the pool=ok"
