@@ -24,9 +24,10 @@ Changed (breaking):
   Declarations are written as before; annotations and adapter signatures
   name the extra parameter.
 
-Checked at run time, on first prepare: a declared parameter the query never
-uses (`Parameter_count`), `~having` on a `select` outside `group_by`, and an
-expression used outside its own query.
+Checked at run time: an expression used outside the query that bound it
+raises `Invalid_argument` when the query is built; on first prepare, a
+declared parameter the query never uses (`Parameter_count`) and `~having` on
+a `select` outside `group_by`.
 
 ### Performance (sub-project 1b)
 

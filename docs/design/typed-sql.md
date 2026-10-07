@@ -23,8 +23,13 @@ aggregates `count_star`, `count`, `sum`, `min`, `max`, `avg`.
 
 Out (later): joins, subqueries, `INSERT`/`UPDATE`/`DELETE` builders, literals
 of custom-codec types, window functions, `DISTINCT`, set operations. Static
-detection of scope leaks (an expression used outside its query) stays out, as
-Appendix A accepted: DuckDB rejects it at first prepare.
+detection of scope leaks (an expression used outside its query) stays out.
+Unlike Appendix A assumed, DuckDB would not always reject one: every query
+aliases its table `t0` and numbers parameters from `$1`, so a leaked column
+or parameter could bind the other query's namesake. Column and parameter
+nodes therefore carry the scope (one `from` or `query` call) that bound
+them, and building a query that contains a foreign one raises
+`Invalid_argument`, a programming error like an out-of-bounds `Array.get`.
 
 The layer ships inside `duckdb` as `Duckdb.Sql`. It needs library-internal
 access to codec plans and request construction; a separate package would make
@@ -191,9 +196,11 @@ other: column count and types against DuckDB's metadata.
 The typed appender keeps two indices; it holds its table with the shape
 existential.
 
-**Errors.** No new constructors. A wrong table or column name, or a leaked
-expression, is reported at first use as `Prepare` or `Type_mismatch`, as for
-hand-written SQL. Overflow in a `sum` cast is a native error during execution.
+**Errors.** No new constructors. A wrong table or column name is reported
+at first use as `Prepare` or `Type_mismatch`, as for hand-written SQL. A
+leaked expression raises `Invalid_argument` when the query is built (see
+Scope). Operators on a custom codec over an unsuitable base type, or on a
+BLOB (OCaml `string`), type-check and fail at first prepare. Overflow in a `sum` cast is a native error during execution.
 
 ## Verified compiler facts
 
@@ -251,7 +258,8 @@ Probed with the repository's OxCaml (scratch files, 2026-10-07):
 - Execution on an in-memory database: each operator family and aggregate;
   three-valued logic (`Null.(>=)` with a NULL operand gives `None`, `is_true`
   filters it); `coalesce`; `like`; `avg` of no rows gives `None`; `aggregate`
-  returns one row through `Session.find`.
+  returns one row through `Session.find`; a column or parameter smuggled into
+  another query raises `Invalid_argument` when that query is built.
 - Interop: a generated request runs twice through the statement cache, and
   once through each of the async and Eio adapters. A table declaration that
   disagrees with the catalog reports the same validation error as

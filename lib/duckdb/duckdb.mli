@@ -518,10 +518,13 @@ end
 
     Binder patterns such as [fun [id; name; age]] select their constructors
     by type (warnings 40/42, off by default in Dune). A local open
-    [Sql.( … )] shadows the comparison and arithmetic operators. Checked at
-    run time, on first prepare: names against the catalog, an expression used
-    outside its own query, a declared parameter the query never uses
-    ([Parameter_count]), and [~having] on a [select] outside [group_by]. *)
+    [Sql.( … )] shadows the comparison and arithmetic operators. An
+    expression used outside the query that bound it (smuggled out through a
+    reference) raises [Invalid_argument] when the other query is built.
+    Checked on first prepare: names against the catalog, a declared parameter
+    the query never uses ([Parameter_count]), [~having] on a [select] outside
+    [group_by], and operators the base type does not support (a custom codec
+    over another type, or a BLOB). *)
 module Sql : sig
   (** Expression kinds: a value per table row, or per group. *)
   type row

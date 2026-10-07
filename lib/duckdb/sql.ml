@@ -3,10 +3,14 @@ open! Base
 type row = private Row_kind
 type grouped = private Grouped_kind
 
-(* Expressions are untyped nodes; the phantom indices live in the interface. *)
+(* Expressions are untyped nodes; the phantom indices live in the interface.
+   Columns and parameters carry the scope (one [from] or [query] call) that
+   bound them, so an expression smuggled into another query is rejected
+   instead of binding that query's same-named column or same-numbered
+   parameter. *)
 type node =
-  | Column of string
-  | Param of { index : int; sql_type : string }
+  | Column of { scope : int; quoted : string }
+  | Param of { scope : int; index : int; sql_type : string }
   | Literal of string
   | Apply of string * node list
   | Infix of string * node * node
@@ -15,15 +19,19 @@ type node =
   | Cast of node * string
   | Count_star
 
-let rec render = function
-  | Column quoted -> "t0." ^ quoted
-  | Param { index; sql_type } -> Printf.sprintf "CAST($%d AS %s)" index sql_type
+let next_scope = Stdlib.Atomic.make 0
+let fresh_scope () = Stdlib.Atomic.fetch_and_add next_scope 1
+let foreign () = invalid_arg "Duckdb.Sql: an expression from another query"
+let rec render ~columns ~params = function
+  | Column { scope; quoted } -> if scope <> columns then foreign () else "t0." ^ quoted
+  | Param { scope; index; sql_type } ->
+    if scope <> params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
   | Literal sql -> sql
-  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
-  | Infix (op, a, b) -> "(" ^ render a ^ " " ^ op ^ " " ^ render b ^ ")"
-  | Prefix (op, a) -> "(" ^ op ^ " " ^ render a ^ ")"
-  | Postfix (a, op) -> "(" ^ render a ^ " " ^ op ^ ")"
-  | Cast (a, sql_type) -> "CAST(" ^ render a ^ " AS " ^ sql_type ^ ")"
+  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:(render ~columns ~params)) ^ ")"
+  | Infix (op, a, b) -> "(" ^ render ~columns ~params a ^ " " ^ op ^ " " ^ render ~columns ~params b ^ ")"
+  | Prefix (op, a) -> "(" ^ op ^ " " ^ render ~columns ~params a ^ ")"
+  | Postfix (a, op) -> "(" ^ render ~columns ~params a ^ " " ^ op ^ ")"
+  | Cast (a, sql_type) -> "CAST(" ^ render ~columns ~params a ^ " AS " ^ sql_type ^ ")"
   | Count_star -> "count(*)"
 
 (* The SQL type a codec crosses the native boundary as. *)
@@ -34,7 +42,7 @@ let sql_type : type a n. (a, n) Codec.t -> string = fun codec ->
   Scalar.name scalar
 
 type ('a, 'n, 'k) expr = { node : node; codec : ('a, 'n) Codec.t }
-type ('a, 'n) param = { index : int; codec : ('a, 'n) Codec.t }
+type ('a, 'n) param = { scope : int; index : int; codec : ('a, 'n) Codec.t }
 type 'k order = { key : node; descending : bool }
 
 module Params = struct
@@ -68,7 +76,7 @@ type ('row, 'k, 'm) body =
   Body : { columns : (_, 'fn, 'row) Fields.t; row : 'fn; list : node list; where : node option;
            group_by : node list; having : node option; order_by : 'k order list;
            limit : int option; offset : int option } -> ('row, 'k, 'm) body
-type ('row, 'm) source = { target : string; body : ('row, row, 'm) body }
+type ('row, 'm) source = { target : string; scope : int; body : ('row, row, 'm) body }
 
 let rec fields_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> (l, f, r) Fields.t = function
   | Exprs.[] -> Fields.[]
@@ -97,11 +105,14 @@ let group_by keys f =
          having = b.having; order_by = List.map b.order_by ~f:(fun o -> { key = o.key; descending = o.descending });
          limit = b.limit; offset = b.offset }
 
-let rec binders : type l f r s. (l, f, r, s) Columns.t -> (s, row) Binders.t = function
+let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> (s, row) Binders.t = fun columns ~scope ->
+  match columns with
   | Columns.[] -> Binders.[]
-  | Columns.((name, codec) :: rest) -> Binders.({ node = Column (Request.quote name); codec } :: binders rest)
+  | Columns.((name, codec) :: rest) ->
+    Binders.({ node = Column { scope; quoted = Request.quote name }; codec } :: binders rest ~scope)
 let from (Request.Table_def t : (_, _, _) Request.table) f =
-  { target = Request.quote t.schema ^ "." ^ Request.quote t.name; body = f (binders t.columns) }
+  let scope = fresh_scope () in
+  { target = Request.quote t.schema ^ "." ^ Request.quote t.name; scope; body = f (binders t.columns ~scope) }
 
 type 'l packed_fields = Packed_fields : ('l, _, _) Fields.t -> 'l packed_fields
 let rec fields_of_params : type l s. (l, s) Params.t -> l packed_fields = function
@@ -109,12 +120,13 @@ let rec fields_of_params : type l s. (l, s) Params.t -> l packed_fields = functi
   | Params.(codec :: rest) ->
     let (Packed_fields fields) = fields_of_params rest in
     Packed_fields Fields.(codec :: fields)
-let rec bound : type l s. (l, s) Params.t -> index:int -> s Bound.t = fun params ~index ->
+let rec bound : type l s. (l, s) Params.t -> scope:int -> index:int -> s Bound.t = fun params ~scope ~index ->
   match params with
   | Params.[] -> Bound.[]
-  | Params.(codec :: rest) -> Bound.({ index; codec } :: bound rest ~index:(index + 1))
+  | Params.(codec :: rest) -> Bound.({ scope; index; codec } :: bound rest ~scope ~index:(index + 1))
 
-let render_select ~target (Body b) =
+let render_select ~target ~columns ~params (Body b) =
+  let render = render ~columns ~params in
   let clause keyword = function None -> "" | Some node -> " " ^ keyword ^ " " ^ render node in
   let listed nodes = String.concat ~sep:", " (List.map nodes ~f:render) in
   let group_by = match b.group_by with [] -> "" | keys -> " GROUP BY " ^ listed keys in
@@ -128,11 +140,13 @@ let render_select ~target (Body b) =
 
 let query params f =
   let (Packed_fields fields) = fields_of_params params in
-  let { target; body = Body b as body } = f (bound params ~index:1) in
-  Request.generated fields b.columns ~row:b.row (render_select ~target body)
+  let scope = fresh_scope () in
+  let { target; scope = columns; body = Body b as body } = f (bound params ~scope ~index:1) in
+  Request.generated fields b.columns ~row:b.row (render_select ~target ~columns ~params:scope body)
 
 (* Expressions. *)
-let param (p : (_, _) param) = { node = Param { index = p.index; sql_type = sql_type p.codec }; codec = p.codec }
+let param (p : (_, _) param) =
+  { node = Param { scope = p.scope; index = p.index; sql_type = sql_type p.codec }; codec = p.codec }
 let asc (e : _ expr) = { key = e.node; descending = false }
 let desc (e : _ expr) = { key = e.node; descending = true }
 
