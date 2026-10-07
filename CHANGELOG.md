@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Schema declarations (sub-project 3a)
+
+[Design](docs/design/schema.md).
+
+Added:
+- `Table.declare ~constraints`: `primary_key`, `unique`, `foreign_key`
+  (typed against the referenced table's declared key, same schema),
+  `default` (at the column's type and nullability), `check` (NULL fails)
+  and `check_null` (NULL passes), over typed column binders. NOT NULL comes
+  from codecs; keys take non-null columns only.
+- `Table.create` (CREATE TABLE from the declaration), `Table.verify`
+  (read-only catalog check: columns, types, nullability, keys and foreign
+  keys exactly, CHECK and DEFAULT by presence) and `Table.lookup` (by a
+  declared key, typed `zero_or_one`).
+- `Error.cause`: `Unknown_table` and `Constraint_mismatch`.
+- `Sql.column`: a declared table column as a row expression, for CHECK.
+- `test/test_schema.ml`; 7 compile-failure fixtures in `test/schema_compile`.
+
+Changed:
+- `duckdb.mli` declares `Sql` before `Table`; `Sql.from` names its table
+  type `Request.table` (equal to `Table.t`).
+- Examples create their tables with `Table.create`.
+
+Raises `Invalid_argument` when a declaration is built: two primary keys, a
+column from another declaration, a default mentioning a column, a foreign
+key to an undeclared key or another schema, a lookup by an undeclared key.
+
 ### Typed SQL (sub-project 2)
 
 [Design](docs/design/typed-sql.md).

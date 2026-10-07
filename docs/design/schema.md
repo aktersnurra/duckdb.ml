@@ -1,6 +1,6 @@
 # Schema declarations (sub-project 3a)
 
-Status: approved design, 2026-10-07; refined while prototyping (see
+Status: implemented, 2026-10-07; refined while prototyping (see
 [Refinements](#refinements-found-while-prototyping)). Implements the first half of roadmap
 row 3 of the [core redesign](core-redesign.md): constraints on table
 declarations. Versioned migrations (3b) follow in their own design and build

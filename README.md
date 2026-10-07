@@ -24,14 +24,14 @@ type user = { id : int64; name : string; age : int32 option }
    catalog when first used, and cached per connection. *)
 let users = D.Table.(declare "users"
   Columns.["id", int64; "name", string; "age", nullable int32]
-  ~row:(fun id name age -> { id; name; age }))
-let create = R.exec D.Fields.[] "CREATE TABLE users(id BIGINT, name VARCHAR, age INTEGER)"
+  ~row:(fun id name age -> { id; name; age })
+  ~constraints:(fun [id; _; _] -> Constraint.[ primary_key Key.[id] ]))
 let adults = R.many D.Fields.[int32] D.Fields.[int64; string] ~row:(fun id name -> (id, name))
   "SELECT id, name FROM users WHERE age >= ? ORDER BY id"
 
 (* [c] is local to its scope: it cannot be stored, returned or captured. *)
 let run (c @ local) =
-  match R.Session.exec c create D.Args.[] with
+  match D.Table.create c users with
   | Error e -> Error e
   | Ok () ->
     match D.Table.with_appender c users ~f:(fun a ->
@@ -111,6 +111,40 @@ R.Session.find c adults D.Args.[18l]                             (* a select is 
 
 Joins, subqueries and write statements are not covered yet; write those as
 SQL requests. See [typed SQL](docs/design/typed-sql.md).
+
+## Schema
+
+A declaration can state the table's constraints. `Table.create` runs its
+`CREATE TABLE`, `Table.verify` checks an existing table against it, and
+`Table.lookup` reads by a declared key, typed as at most one row:
+
+```ocaml
+let users = D.Table.(declare "users"
+  Columns.["id", int64; "email", string; "age", nullable int32]
+  ~row:(fun id email age -> (id, email, age))
+  ~constraints:(fun [id; email; age] -> Constraint.[
+    primary_key Key.[id];
+    unique Key.[email];
+    default age D.Sql.(nullable (int32 18l));
+    check_null D.Sql.(Null.(column age >= nullable (int32 0l))) ]))
+let posts = D.Table.(declare "posts"
+  Columns.["id", int64; "owner", int64; "title", string]
+  ~row:(fun id owner title -> (id, owner, title))
+  ~constraints:(fun [id; owner; _] -> Constraint.[
+    primary_key Key.[id];
+    foreign_key Key.[owner] ~references:(users, fun [id; _; _] -> Key.[id]) ]))
+
+let by_email = D.Table.lookup users (fun [_; email; _] -> D.Table.Key.[email])
+(* : (string * unit, int64 * string * int32 option, zero_or_one) Request.t *)
+```
+
+NOT NULL comes from the codecs. Keys take non-null columns only, a foreign
+key must match the referenced key's types, and a default has the column's
+type and nullability; the compiler rejects the rest (fixtures in
+[`test/schema_compile`](test/schema_compile)). `check` fails on NULL;
+`check_null` follows SQL, where NULL passes. Note DuckDB's foreign-key
+limitation: a referenced row cannot be updated at all while it is
+referenced. Details in [schema](docs/design/schema.md).
 
 ## Sequencing with local handles
 
@@ -198,5 +232,6 @@ Local DuckDB databases and typed local Parquet reads and exports are
 supported. Remote storage and credentials are out of scope. Done: the
 performance work (columnar bulk reads, unboxed numbers, allocation-free
 decoding; see [performance](docs/design/performance.md)) and the typed SQL
-layer ([typed SQL](docs/design/typed-sql.md)). Planned next: schema
-declarations with migrations. See the [core redesign](docs/design/core-redesign.md) note.
+layer ([typed SQL](docs/design/typed-sql.md)), and schema declarations with
+constraints ([schema](docs/design/schema.md)). Planned next: versioned
+migrations. See the [core redesign](docs/design/core-redesign.md) note.
