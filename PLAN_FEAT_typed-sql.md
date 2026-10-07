@@ -39,11 +39,11 @@
 - [x] `test/sql_compile`: `positive.ml` plus 16 fixtures, checked by `check_sql_types.sh` in `runtest`.
 - [x] `./tools/run runtest --force` exit 0.
 
-### Task 3: Adapter interop
+### Task 3: Adapter interop — DONE
 
 **Files:** Modify `test/async/typed_request_async.ml`, `test/eio/request_eio.ml`.
 
-- [ ] **Step 1: Add a generated request to the Async test.** After the `rollback left no row` check, insert:
+- [x] **Step 1: Add a generated request to the Async test.** After the `rollback left no row` check, insert:
 
 ```ocaml
   let generated = D.Sql.(query Params.[int64] (fun [floor] ->
@@ -55,7 +55,7 @@
 
 and extend the final message to `…, cancellable submit, generated SQL=ok`.
 
-- [ ] **Step 2: Add the same to the Eio test.** After `rollback left no row`:
+- [x] **Step 2: Add the same to the Eio test.** After `rollback left no row`:
 
 ```ocaml
       let generated = D.Sql.(query Params.[int64] (fun [floor] ->
@@ -67,15 +67,15 @@ and extend the final message to `…, cancellable submit, generated SQL=ok`.
 
 and extend its message to `…, fiber cancellation, generated SQL=ok`.
 
-- [ ] **Step 3: Run.** `./tools/run build @test/async/runtest @test/eio/runtest 2>&1 | grep -E "generated SQL|Error"`. Expected: both lines end in `generated SQL=ok`, no `Error`.
+- [x] **Step 3: Run.** `./tools/run build @test/async/runtest @test/eio/runtest 2>&1 | grep -E "generated SQL|Error"`. Expected: both lines end in `generated SQL=ok`, no `Error`.
 
-- [ ] **Step 4: Commit.** `jj describe -m "test(sql): generated requests through the Async and Eio adapters"`, then `jj new`.
+- [x] **Step 4: Commit.** `jj describe -m "test(sql): generated requests through the Async and Eio adapters"`, then `jj new`.
 
-### Task 4: Example and timing
+### Task 4: Example and timing — DONE (generated 39.5/40.7 ms vs hand-written 41.8/41.0 ms)
 
 **Files:** Create `examples/sql.ml`. Modify `examples/dune`.
 
-- [ ] **Step 1: Write `examples/sql.ml`.**
+- [x] **Step 1: Write `examples/sql.ml`.**
 
 ```ocaml
 (* Typed SQL: queries built from typed expressions compile to requests. *)
@@ -126,14 +126,14 @@ let () =
   | Error _ -> Stdio.eprintf "query failed\n"
 ```
 
-- [ ] **Step 2: Register it.** Append to `examples/dune`:
+- [x] **Step 2: Register it.** Append to `examples/dune`:
 
 ```
 (executable (name sql) (modules sql) (libraries base stdio duckdb)
  (flags (:standard -extension-universe beta)))
 ```
 
-- [ ] **Step 3: Run.** `./tools/run exec examples/sql.exe`. Expected:
+- [x] **Step 3: Run.** `./tools/run exec examples/sql.exe`. Expected:
 
 ```
 SELECT t0."id", t0."name" FROM "main"."users" AS t0 WHERE ((t0."age" >= CAST($1 AS INTEGER)) IS TRUE) ORDER BY t0."id" ASC
@@ -142,19 +142,19 @@ ada: 2, oldest 36
 bob: 1, oldest unknown
 ```
 
-- [ ] **Step 4: One-off timing (not a harness path).** In the scratchpad, time `R.Session.fold` over a 1M-row `t(a BIGINT, b BIGINT)` table (`b` NULL every tenth row) for the generated `select Exprs.[a; b]` and for `R.many … "SELECT a, b FROM t"`, `SET threads=1`, `taskset -c 0`, median of 10 after 2 warmups. Record both medians in the design note's acceptance section. Expected: within noise (same decode path).
+- [x] **Step 4: One-off timing (not a harness path).** In the scratchpad, time `R.Session.fold` over a 1M-row `t(a BIGINT, b BIGINT)` table (`b` NULL every tenth row) for the generated `select Exprs.[a; b]` and for `R.many … "SELECT a, b FROM t"`, `SET threads=1`, `taskset -c 0`, median of 10 after 2 warmups. Record both medians in the design note's acceptance section. Expected: within noise (same decode path).
 
-- [ ] **Step 5: Commit.** `jj describe -m "docs(examples): typed SQL example"`, then `jj new`.
+- [x] **Step 5: Commit.** `jj describe -m "docs(examples): typed SQL example"`, then `jj new`.
 
-### Task 5: Documentation
+### Task 5: Documentation — DONE
 
 **Files:** `docs/architecture.md`, `docs/design/typed-requests.md`, `docs/design/core-redesign.md`, `README.md`, `CHANGELOG.md`, `docs/design/typed-sql.md`.
 
-- [ ] **Step 1:** `docs/architecture.md`: replace the planned-typed-SQL / "no SQL DSL" text with a short description of `Duckdb.Sql` (output is `Request.t`, checked by the type checker, link to the design note).
-- [ ] **Step 2:** `docs/design/typed-requests.md`: update the L3 row to say L3 is implemented by `Duckdb.Sql`.
-- [ ] **Step 3:** `docs/design/core-redesign.md`: roadmap row 2 marked done with a link to `typed-sql.md`; Appendix A note that `typed-sql.md` supersedes it where they differ.
-- [ ] **Step 4:** `README.md`: a "Typed SQL" section after "What the compiler rejects", with the `adults`/`by_name` example and three rejected lines (nullable compare, ungrouped column in a grouped select, `find` on a `select`); roadmap paragraph: typed SQL done, schema and migrations next. Add `examples/sql.exe` to the build commands.
-- [ ] **Step 5:** `CHANGELOG.md`: entry for sub-project 2 — `Duckdb.Sql`; breaking `Table.t`/`Table.Columns` shape index; runtime-checked cases (unused parameter is `Parameter_count`, `~having` outside `group_by`, scope leaks).
-- [ ] **Step 6:** Design note status: "implemented".
-- [ ] **Step 7: Verify.** `./tools/run build @all`, `./tools/run runtest --force` (exit 0), `./tools/run exec examples/sql.exe`.
-- [ ] **Step 8: Commit.** `jj describe -m "docs: typed SQL in the architecture, README and changelog"`.
+- [x] **Step 1:** `docs/architecture.md`: replace the planned-typed-SQL / "no SQL DSL" text with a short description of `Duckdb.Sql` (output is `Request.t`, checked by the type checker, link to the design note).
+- [x] **Step 2:** `docs/design/typed-requests.md`: update the L3 row to say L3 is implemented by `Duckdb.Sql`.
+- [x] **Step 3:** `docs/design/core-redesign.md`: roadmap row 2 marked done with a link to `typed-sql.md`; Appendix A note that `typed-sql.md` supersedes it where they differ.
+- [x] **Step 4:** `README.md`: a "Typed SQL" section after "What the compiler rejects", with the `adults`/`by_name` example and three rejected lines (nullable compare, ungrouped column in a grouped select, `find` on a `select`); roadmap paragraph: typed SQL done, schema and migrations next. Add `examples/sql.exe` to the build commands.
+- [x] **Step 5:** `CHANGELOG.md`: entry for sub-project 2 — `Duckdb.Sql`; breaking `Table.t`/`Table.Columns` shape index; runtime-checked cases (unused parameter is `Parameter_count`, `~having` outside `group_by`, scope leaks).
+- [x] **Step 6:** Design note status: "implemented".
+- [x] **Step 7: Verify.** `./tools/run build @all`, `./tools/run runtest --force` (exit 0), `./tools/run exec examples/sql.exe`.
+- [x] **Step 8: Commit.** `jj describe -m "docs: typed SQL in the architecture, README and changelog"`.

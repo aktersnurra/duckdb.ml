@@ -1,6 +1,6 @@
 # Typed SQL (sub-project 2)
 
-Status: approved design, 2026-10-07; refined while prototyping (see
+Status: implemented, 2026-10-07; refined while prototyping (see
 [Refinements](#refinements-found-while-prototyping)). Implements roadmap row 2 of the
 [core redesign](core-redesign.md) and replaces its
 [Appendix A](core-redesign.md#appendix-a-typed-sql-end-state-sketch) sketch
@@ -280,8 +280,12 @@ Existing tests and `request_compile` fixtures migrate to the three-index
 
 **Acceptance:** `./tools/run build @all` and `./tools/run runtest --force`
 pass; `examples/sql.exe` runs. No performance target: generated requests
-decode through the same path as hand-written ones. One benchmark row confirms
-a generated `select` matches the equivalent hand-written SQL within noise.
+decode through the same path as hand-written ones. A one-off measurement
+(not a harness path; the harness has no table) confirms it: folding 1M rows
+of `t(a BIGINT, b BIGINT)` (`b` NULL every tenth row), `threads=1`,
+`taskset -c 0`, median of 10 after 2 warmups, two interleaved rounds: the
+generated `select Exprs.[a; b]` took 39.5 and 40.7 ms, the hand-written
+`SELECT a, b FROM t` 41.8 and 41.0 ms.
 
 **Documentation:** `docs/architecture.md` drops the "no SQL DSL" non-goal;
 the L3 row of `typed-requests.md` is updated; the README gains a short

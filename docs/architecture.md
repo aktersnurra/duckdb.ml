@@ -143,8 +143,10 @@ protected cleanup drains. Adapter transaction callbacks receive a local
 ## Scope
 
 Typed rows, appender ingestion, transactions, and local Parquet import/export
-are supported. Remote storage and credentials are not supported. A typed SQL
-layer is planned (sub-project 2 of `docs/design/core-redesign.md`), after a
-performance sub-project (1b: columnar bulk reads, unboxed numbers,
-allocation-free decoding). See [typed requests](design/typed-requests.md) and
-the [core redesign](design/core-redesign.md).
+are supported. Remote storage and credentials are not supported.
+`Duckdb.Sql` builds single-table SELECT queries from typed expressions and
+compiles them to ordinary requests, so execution, caching, validation and the
+adapters are shared with hand-written SQL; see [typed SQL](design/typed-sql.md).
+See also [typed requests](design/typed-requests.md), the
+[performance work](design/performance.md) and the
+[core redesign](design/core-redesign.md).

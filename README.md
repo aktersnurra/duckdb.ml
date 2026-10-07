@@ -74,6 +74,44 @@ What stays a runtime check is reported as a flat `Error.t`
 column, a schema that does not match its declaration, and `Busy`/`Closed`
 when you opt into manually managed handles through `Owned`.
 
+## Typed SQL
+
+`Duckdb.Sql` builds single-table queries from typed expressions. A query is
+an ordinary `Request.t`, run, cached and validated like hand-written SQL:
+
+```ocaml
+module S = D.Sql
+
+let adults = S.(
+  query Params.[int32] (fun [min_age] ->
+    from users (fun [id; name; age] ->
+      select Exprs.[id; name] ~row:(fun id name -> (id, name))
+        ~where:(is_true Null.(age >= nullable (param min_age)))
+        ~order_by:[asc id] ~limit:100)))
+(* : (int32 * unit, int64 * string, many) Request.t *)
+
+let by_name = S.(
+  query Params.[] (fun [] ->
+    from users (fun [_; name; age] ->
+      group_by Keys.[name] (fun [name] ->
+        select Exprs.[name; count_star; Null.max age]
+          ~row:(fun n c m -> (n, c, m)) ~having:(count_star > int64 1L)))))
+```
+
+Expressions carry their value type, nullability and grouping. NULL follows
+SQL's three-valued logic in the types: `Null` operators take and return
+options, and `is_true`, `coalesce` and `nullable` convert explicitly. These
+are compile errors (fixtures in [`test/sql_compile`](test/sql_compile)):
+
+```ocaml
+select Exprs.[id] ~row:Fn.id ~where:(age >= int32 18l)          (* age is nullable *)
+group_by Keys.[name] (fun [name] -> select Exprs.[name; id] …)  (* id is not grouped *)
+R.Session.find c adults D.Args.[18l]                             (* a select is many rows *)
+```
+
+Joins, subqueries and write statements are not covered yet; write those as
+SQL requests. See [typed SQL](docs/design/typed-sql.md).
+
 ## Sequencing with local handles
 
 A `let*` continuation must be a global closure, so it cannot use a local
@@ -150,6 +188,7 @@ For a provisioned checkout:
 ./tools/run exec examples/synchronous.exe
 ./tools/run exec examples/asynchronous.exe
 ./tools/run exec examples/eio.exe
+./tools/run exec examples/sql.exe
 bash test/install_adapters_smoke.sh
 ```
 
@@ -158,6 +197,6 @@ bash test/install_adapters_smoke.sh
 Local DuckDB databases and typed local Parquet reads and exports are
 supported. Remote storage and credentials are out of scope. Done: the
 performance work (columnar bulk reads, unboxed numbers, allocation-free
-decoding; see [performance](docs/design/performance.md)). Planned, in order: a
-typed SQL layer built from GADT expressions, and schema declarations with
-migrations. See the [core redesign](docs/design/core-redesign.md) note.
+decoding; see [performance](docs/design/performance.md)) and the typed SQL
+layer ([typed SQL](docs/design/typed-sql.md)). Planned next: schema
+declarations with migrations. See the [core redesign](docs/design/core-redesign.md) note.

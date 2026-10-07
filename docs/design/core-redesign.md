@@ -18,14 +18,13 @@ plan and implementation:
 |---|---|---|
 | 1 | Core redesign (this note) | Scoped `@ local` handles, one kind-indexed session type, `Codec` as the only value description, one shared list structure, a shape GADT for execution, one error type |
 | 1b | Performance | A measured baseline (full benchmark run, several samples), then in order of payoff: columnar bulk reads (whole DuckDB vectors into OCaml arrays/Bigarrays in one native call), unboxed numbers (`int64#`, `float#`) through the decode path, allocation-free decoding for codecs without custom conversion, and `[@zero_alloc]` proofs on the borrowed path. Comes before typed SQL, which decodes through the same path |
-| 2 | Typed SQL | GADT expressions and a query builder that compile to `Request.t` ([Appendix A](#appendix-a-typed-sql-end-state-sketch)) |
+| 2 | Typed SQL | GADT expressions and a query builder that compile to `Request.t` ([Appendix A](#appendix-a-typed-sql-end-state-sketch)). Done: [typed SQL](typed-sql.md) |
 | 3 | Schema and migrations | Constraints on table declarations, then versioned migrations |
 | later | `[@@deriving duckdb]` | Optional ppx that generates `Columns`/row declarations. Added only if hand-written declarations turn out to be tedious; nothing in 1–3 depends on it |
 
 Sub-project 2 reverses the earlier non-goal "no SQL DSL" in
-`docs/architecture.md` and in the L3 row of `typed-requests.md`. Those
-documents are updated when sub-project 2's design is approved. Its design
-note decides whether it ships inside `duckdb` or as a separate package.
+`docs/architecture.md` and in the L3 row of `typed-requests.md`; both are
+updated. It ships inside `duckdb` as `Duckdb.Sql` ([typed SQL](typed-sql.md)).
 
 ## Decisions taken
 
@@ -456,6 +455,9 @@ Where sub-project 1 as built differs from this note, by plan task:
   2's design. `typed-requests.md` is unchanged.
 
 ## Appendix A: typed SQL end-state sketch
+
+Superseded where they differ by [typed SQL](typed-sql.md), which lists the
+divergences.
 
 This appendix is not part of sub-project 1. It records what sub-project 1
 must not block.

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Typed SQL (sub-project 2)
+
+[Design](docs/design/typed-sql.md).
+
+Added:
+- `Duckdb.Sql`: single-table SELECT queries built from phantom-typed
+  expressions `('a, 'n, 'k) expr` that compile to an ordinary `Request.t`.
+  `query`/`from` bind parameters and columns through GADT list patterns;
+  `select` (many rows), `aggregate` (one row) and `group_by` with `~where`,
+  `~having`, `~order_by`, `~limit`, `~offset`. Comparisons, `like`, boolean
+  operators, three-valued `Null` operators, `nullable`/`coalesce`/`is_null`/
+  `is_true`, per-type arithmetic (`I64` … `F32`; integer `/` is nullable),
+  and the aggregates `count_star`, `count`, `sum`, `min`, `max`, `avg`.
+- `examples/sql.ml`; `test/test_sql.ml`; 16 compile-failure fixtures in
+  `test/sql_compile`.
+
+Changed (breaking):
+- `Table.t` and `Table.Columns` gain a `'shape` index (each column's value
+  type and nullability, `Codec.slot`): `('columns, 'shape, 'row) Table.t`.
+  Declarations are written as before; annotations and adapter signatures
+  name the extra parameter.
+
+Checked at run time, on first prepare: a declared parameter the query never
+uses (`Parameter_count`), `~having` on a `select` outside `group_by`, and an
+expression used outside its own query.
+
 ### Performance (sub-project 1b)
 
 [Design and results](docs/design/performance.md).

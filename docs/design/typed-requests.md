@@ -21,7 +21,7 @@ prototyped yet.
 | L0 | Scoped resources, raw SQL, `bind`/`column` checked against engine types at run time, `Row.t` decoders, `cell` appender rows | exists, unchanged |
 | L1 | Request values: SQL text + typed parameter list + typed row list + multiplicity phantom. Prepared-statement cache owned by the connection. Backend-generic `CONNECTION` signature with sync, Async and Eio instances | proposed |
 | L2 | Typed table declarations: typed appender rows (no `cell`), a typed `SELECT` of the declared columns, typed `INSERT`, checked against DuckDB catalog metadata when used | proposed |
-| L3 | GADT SQL expression DSL | out of scope (`docs/architecture.md` excludes a SQL DSL; at most a separate optional `duckdb-query` package) |
+| L3 | GADT SQL expression DSL | implemented inside `duckdb` as `Duckdb.Sql` (sub-project 2, [typed SQL](typed-sql.md)); this document's earlier "out of scope" is superseded |
 
 L1 and L2 are purely additive: no existing value, type or constructor in
 `duckdb.mli`, `duckdb_async.mli`, `duckdb_eio.mli` or `duckdb_worker.mli`
