@@ -41,7 +41,14 @@ INT_FIELDS = {
     "compactions",
 }
 METRICS = FIELDS[6:]
-PATHS = ("borrowed_chunks", "owned_rows")
+PATHS = (
+    "borrowed_chunks",
+    "owned_rows",
+    "column_views",
+    "collect",
+    "row_ingest",
+    "columnar_ingest",
+)
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -95,9 +102,9 @@ def parse_tsv(text):
             }
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid TSV value") from error
-        if row["path"] not in PATHS or row["order"] not in (
-            "owned_first",
-            "borrowed_first",
+        order = row["order"]
+        if row["path"] not in PATHS or not (
+            order.startswith("first=") and order[len("first=") :] in PATHS
         ):
             raise ValueError("unknown path or order")
         if any(
@@ -125,16 +132,23 @@ def validate_rows(rows, expected_samples=None):
         )
         if samples != expected:
             raise ValueError("missing or duplicate sample")
+        # Sample s starts its rotation at PATHS[s mod len(PATHS)].
+        if any(
+            row["order"] != "first=" + PATHS[row["sample"] % len(PATHS)]
+            for row in grouped[path]
+        ):
+            raise ValueError("broken path rotation")
     reference = [
         (row["sample"], row["rows"], row["checksum"], row["nulls"])
         for row in grouped[PATHS[0]]
     ]
-    other = [
-        (row["sample"], row["rows"], row["checksum"], row["nulls"])
-        for row in grouped[PATHS[1]]
-    ]
-    if reference != other:
-        raise ValueError("checksum/count mismatch")
+    for path in PATHS[1:]:
+        other = [
+            (row["sample"], row["rows"], row["checksum"], row["nulls"])
+            for row in grouped[path]
+        ]
+        if reference != other:
+            raise ValueError("checksum/count mismatch")
     return {path: grouped[path] for path in sorted(grouped)}
 
 
