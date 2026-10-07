@@ -95,5 +95,5 @@ let fold_files c paths fields ~row ~init ~f =
   else loop paths init
 let fold (Session.Connection c : [ `Connection ] Session.t @ local) paths fields ~row ~init ~f =
   fold_files c paths fields ~row ~init ~f
-let fold_table (Session.Connection c : [ `Connection ] Session.t @ local) paths (Request.Table_def t : (_, _) Request.table) ~init ~f =
+let fold_table (Session.Connection c : [ `Connection ] Session.t @ local) paths (Request.Table_def t : (_, _, _) Request.table) ~init ~f =
   fold_files c paths (Request.fields_of_columns t.columns) ~row:t.row ~init ~f

@@ -130,7 +130,7 @@ module Request : sig
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result Async.Deferred.t
   val with_transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) ->
     ('a, error) result Async.Deferred.t
-  val ingest : t @ local -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
+  val ingest : t @ local -> ('c, _, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
     (unit, error) result Async.Deferred.t
 
   (** The same operations as an instance, for code generic over backends. *)
@@ -146,5 +146,5 @@ module Request : sig
   val submit_fold : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t ->
     init:'a -> f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> 'a submitted
   val submit_transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> 'a submitted
-  val submit_ingest : t @ local -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> unit submitted
+  val submit_ingest : t @ local -> ('c, _, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> unit submitted
 end

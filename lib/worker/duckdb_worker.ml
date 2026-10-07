@@ -33,7 +33,7 @@ module type S = sig
     'p D.Args.t -> ('out, D.Error.t) result
   val request_transaction : slot -> D.Bridge.request @ unique ->
     f:(D.transaction @ local -> ('a, D.Error.t) result) -> ('a, D.Error.t) result
-  val table_ingest : slot -> D.Bridge.request @ unique -> ('c, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
+  val table_ingest : slot -> D.Bridge.request @ unique -> ('c, _, _) D.Table.t -> 'c D.Args.t list list -> flush:bool ->
     (unit, D.Error.t) result
   val is_in_callback : unit -> bool
 end

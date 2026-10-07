@@ -38,7 +38,7 @@ module type S = sig
     ('p, 'row, _) Duckdb.Request.t -> 'p Duckdb.Args.t -> ('out, Duckdb.Error.t) result
   val request_transaction : slot -> Duckdb.Bridge.request @ unique ->
     f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, Duckdb.Error.t) result
-  val table_ingest : slot -> Duckdb.Bridge.request @ unique -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
+  val table_ingest : slot -> Duckdb.Bridge.request @ unique -> ('c, _, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool ->
     (unit, Duckdb.Error.t) result
 
   (** Thread-local callback marker; reading it never touches a scheduler. *)

@@ -13,10 +13,10 @@ type ('params, 'row, 'multiplicity) t =
   { id : int; sql : string; oneshot : bool; params : 'params params; rows : 'row rows }
 (* A declared table; its SELECT and INSERT are built once so that they share
    statement-cache entries. *)
-type ('columns, 'row) table =
-  Table_def : { schema : string; name : string; columns : ('columns, 'fn, 'row) Columns.t; row : 'fn;
+type ('columns, 'shape, 'row) table =
+  Table_def : { schema : string; name : string; columns : ('columns, 'fn, 'row, 'shape) Columns.t; row : 'fn;
                 select : (unit, 'row, many) t; insert : ('columns, unit, zero) t }
-    -> ('columns, 'row) table
+    -> ('columns, 'shape, 'row) table
 
 (* Cache identity: two requests never share a statement, even with equal SQL. *)
 let next_id = Stdlib.Atomic.make 0
@@ -46,7 +46,7 @@ module type CONNECTION = sig
   include QUERY
   val with_transaction : [ `Connection ] owner @ local ->
     f:([ `Transaction ] Session.t @ local -> ('a, Failure.t) result) -> ('a, error) result future
-  val ingest : [ `Connection ] owner @ local -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+  val ingest : [ `Connection ] owner @ local -> ('columns, _, _) table -> 'columns Args.t list list -> flush:bool ->
     (unit, error) result future
 end
 
@@ -260,11 +260,10 @@ let run_shape : type p row out. connection -> transaction option -> (row, out) s
 let fold_on ~context c r ~init ~f = run_fold ~context c None r Args.[] ~init ~f
 
 (* Declared tables. *)
-let rec fields_of_columns : type l f r. (l, f, r) Columns.t -> (l, f, r) Fields.t = function
+let rec fields_of_columns : type l f r s. (l, f, r, s) Columns.t -> (l, f, r) Fields.t = function
   | Columns.[] -> Fields.[]
   | Columns.((_, codec) :: columns) -> Fields.(codec :: fields_of_columns columns)
-let column_names columns =
-  List.rev (Columns.fold columns ~init:[] { g = (fun (name, _) acc -> name :: acc) })
+let column_names = Columns.names
 let quote name = "\"" ^ String.substr_replace_all name ~pattern:"\"" ~with_:"\"\"" ^ "\""
 let declare_table ?(schema = "main") name columns ~row =
   let names = column_names columns and fields = fields_of_columns columns in
@@ -277,7 +276,10 @@ let declare_table ?(schema = "main") name columns ~row =
 
 (* Typed appender: the declaration is checked against the catalog, in the
    appender's own transaction snapshot, before any row is accepted. *)
-type ('columns, 'row) appender = { table : ('columns, 'row) table; core : Appender.appender }
+(* The table's shape is not needed past opening; it stays existential. *)
+type ('columns, 'row) appender =
+  Typed : { table : ('columns, _, 'row) table; core : Appender.appender } -> ('columns, 'row) appender
+let core (Typed a) = a.core
 let table_context (Table_def t) = Table { schema = t.schema; name = t.name }
 (* Poisons a transaction whose typed table operation failed without a core error. *)
 let typed_failure = Native "Typed table operation failed; transaction must roll back"
@@ -313,7 +315,7 @@ let open_typed tx (Table_def t as table) =
       ~actual:(Appender.types a)
       ~count_error:(fun expected actual -> Column_count { expected; actual })) in
   match checked with
-  | Ok () -> Ok { table; core = a }
+  | Ok () -> Ok (Typed { table; core = a })
   | Error _ as error -> poison_transaction tx typed_failure; force_close_child (Appender.child a); error
 let with_appender_transaction tx table ~f =
   let context = table_context table in
@@ -322,8 +324,8 @@ let with_appender_transaction tx table ~f =
   let work () =
     match f a with
     | Error e -> primary := Some e; poison_transaction tx typed_failure; Ok (Error e)
-    | Ok x -> Ok (Result.map (within context (Appender.close_appender a.core)) ~f:(fun () -> x)) in
-  match capture_all (fun () -> scope ~lifting:(Cause context) work (fun () -> force_close_child (Appender.child a.core))) with
+    | Ok x -> Ok (Result.map (within context (Appender.close_appender (core a))) ~f:(fun () -> x)) in
+  match capture_all (fun () -> scope ~lifting:(Cause context) work (fun () -> force_close_child (Appender.child (core a)))) with
   | Ok (Ok outcome) -> outcome
   | Ok (Error cause) -> poison_transaction tx cause; Error { context; cause }
   | Error (exn, backtrace) ->
@@ -380,16 +382,15 @@ let rec stage_row : type l f r. Appender.appender -> Duckdb_ffi.appender -> (l, 
     let rest = stage_row a native fields args ~column:(column + 1) ~row in
     match here with Some _ -> here | None -> rest
 (* A codec rejection rejects the whole batch before any native append. *)
-let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
-  let (Table_def t) = a.table in
-  let context = table_context a.table in
+let append (type c) (Typed { table = Table_def t as table; core } : (c, _) appender) (rows : c Args.t list) =
+  let context = table_context table in
   let fields = fields_of_columns t.columns in
-  let native = Appender.native a.core in
+  let native = Appender.native core in
   Duckdb_ffi.stage_begin native (List.length rows);
   let rec stage rows ~row ~first = match rows with
     | [] -> first
     | args :: rows ->
-      let here = stage_row a.core native fields args ~column:0 ~row in
+      let here = stage_row core native fields args ~column:0 ~row in
       let first = match first, here with
         | None, Some column -> Some (column, row)
         | _ -> first in
@@ -402,7 +403,7 @@ let append (type c) (a : (c, _) appender) (rows : c Args.t list) =
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     Duckdb_ffi.clear_stage native;
     Stdlib.Printexc.raise_with_backtrace exn backtrace
-  | null -> within context (Appender.append_staged a.core ~null)
+  | null -> within context (Appender.append_staged core ~null)
 (* Columnar ingest. Every check runs before any native work and outside
    admission, so a rejection neither poisons nor touches the appender. *)
 let rec bulk_length : type a. a Bulk.Columns.col -> int = function
@@ -428,7 +429,7 @@ let rec bulk_scalar : type a. a Bulk.Columns.col -> Codec.packed_scalar = functi
 let first_zero (mask : Bulk.mask) ~len =
   let rec go i = if i = len then None else if mask.{i} = 0 then Some i else go (i + 1) in
   go 0
-let rec check_columns_bulk : type l f r. Appender.appender -> (l, f, r) Columns.t -> l Bulk.Columns.t ->
+let rec check_columns_bulk : type l f r s. Appender.appender -> (l, f, r, s) Columns.t -> l Bulk.Columns.t ->
   column:int -> rows:int -> (unit, cause) Result.t = fun a declared bulk ~column ~rows ->
   match declared, bulk with
   | Columns.[], Bulk.Columns.[] -> Ok ()
@@ -483,15 +484,14 @@ let rec stage_columns : type l. Duckdb_ffi.appender -> l Bulk.Columns.t -> colum
   | Bulk.Columns.(col :: rest) ->
     stage_column native col ~column ~pos ~n;
     stage_columns native rest ~column:(column + 1) ~pos ~n
-let append_columns (type c) (a : (c, _) appender) (bulk : c Bulk.Columns.t) =
-  let (Table_def t) = a.table in
-  let context = table_context a.table in
+let append_columns (type c) (Typed { table = Table_def t as table; core } : (c, _) appender) (bulk : c Bulk.Columns.t) =
+  let context = table_context table in
   let rows = match bulk with Bulk.Columns.[] -> 0 | Bulk.Columns.(col :: _) -> bulk_length col in
-  let* () = within context (check_columns_bulk a.core t.columns bulk ~column:0 ~rows) in
-  let native = Appender.native a.core in
-  within context (Appender.append_slices a.core ~rows ~stage:(fun ~pos ~n ->
+  let* () = within context (check_columns_bulk core t.columns bulk ~column:0 ~rows) in
+  let native = Appender.native core in
+  within context (Appender.append_slices core ~rows ~stage:(fun ~pos ~n ->
     stage_columns native bulk ~column:0 ~pos ~n))
-let flush a = within (table_context a.table) (Appender.flush_appender a.core)
+let flush (Typed a) = within (table_context a.table) (Appender.flush_appender a.core)
 
 (* A transaction owned by the calling scope; errors pass through flat. *)
 let with_owned_transaction c ~f = Resource.with_transaction ~lifting:(Flat Transaction) c ~f

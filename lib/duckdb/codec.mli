@@ -3,6 +3,9 @@ open! Base
 type non_null = private Non_null_codec
 type nullable = private Nullable_codec
 
+(** One column of a declaration's shape: its value type and nullability. *)
+type ('a, 'n) slot = private Slot
+
 (** A non-null value crosses the native boundary as one base scalar.
     [Identity]: the user type is the base scalar itself, so no conversion
     happens. [Plan]: [decode] and [encode] convert between the base scalar and

@@ -2,6 +2,7 @@ open! Base
 
 type non_null = private Non_null_codec
 type nullable = private Nullable_codec
+type ('a, 'n) slot = private Slot
 type 'a plan =
   | Identity : 'a Scalar.t -> 'a plan
   | Plan : { scalar : 'b Scalar.t; decode : 'b -> 'a Or_error.t; encode : 'a -> 'b Or_error.t } -> 'a plan

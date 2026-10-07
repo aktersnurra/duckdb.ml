@@ -21,6 +21,9 @@ end
 module Codec : sig
   type non_null = private Non_null_codec
   type nullable = private Nullable_codec
+
+  (** One column of a table's shape: its value type and nullability. *)
+  type ('a, 'n) slot = private Slot
   type ('a, 'nullability) t
 
   (** Shorthands; included by [Fields] and [Table.Columns] for list literals. *)
@@ -388,7 +391,7 @@ module Request : sig
   type ('params, 'row, 'multiplicity) t
 
   (** A declared table; built and used through [Table]. *)
-  type ('columns, 'row) table
+  type ('columns, 'shape, 'row) table
 
   (** [oneshot] (default false) bypasses the connection's statement cache. *)
   val exec : ?oneshot:bool -> ('params, _, _) Fields.t -> string -> ('params, unit, zero) t
@@ -427,7 +430,7 @@ module Request : sig
 
     (** A complete transaction and typed appender lifecycle. [flush] requests an
         additional explicit flush after all batches. *)
-    val ingest : [ `Connection ] owner @ local -> ('columns, _) table -> 'columns Args.t list list -> flush:bool ->
+    val ingest : [ `Connection ] owner @ local -> ('columns, _, _) table -> 'columns Args.t list list -> flush:bool ->
       (unit, error) result future
   end
 
@@ -438,25 +441,29 @@ end
 
 (** A declared table: name, column names with codecs, and a row constructor. *)
 module Table : sig
-  type ('columns, 'row) t = ('columns, 'row) Request.table
+  (** ['shape] records each column's value type and nullability, from which
+      [Sql.from] types its column binders. *)
+  type ('columns, 'shape, 'row) t = ('columns, 'shape, 'row) Request.table
   module Columns : sig
     include module type of Codec.Values
-    type ('list, 'fn, 'result) t =
-      | [] : (unit, 'result, 'result) t
-      | (::) : (string * ('a, _) Codec.t) * ('list, 'fn, 'result) t -> ('a * 'list, 'a -> 'fn, 'result) t
+    type ('list, 'fn, 'result, 'shape) t =
+      | [] : (unit, 'result, 'result, unit) t
+      | (::) : (string * ('a, 'n) Codec.t) * ('list, 'fn, 'result, 'shape) t ->
+        ('a * 'list, 'a -> 'fn, 'result, ('a, 'n) Codec.slot * 'shape) t
   end
 
   (** Names are quoted, never spliced unquoted, and must be NUL-free (checked on
       use). Columns are matched to the catalog by name in any order; omitted
       catalog columns must have a default. Checked when an appender opens or a
       generated request is first prepared. *)
-  val declare : ?schema:string -> string -> ('columns, 'fn, 'row) Columns.t -> row:'fn -> ('columns, 'row) t
+  val declare : ?schema:string -> string -> ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn ->
+    ('columns, 'shape, 'row) t
 
   (** SELECT of exactly the declared columns, decoded by the declared row. *)
-  val select : (_, 'row) t -> (unit, 'row, Request.many) Request.t
+  val select : (_, _, 'row) t -> (unit, 'row, Request.many) Request.t
 
   (** INSERT of exactly the declared columns; omitted columns take defaults. *)
-  val insert : ('columns, _) t -> ('columns, unit, Request.zero) Request.t
+  val insert : ('columns, _, _) t -> ('columns, unit, Request.zero) Request.t
 
   type ('columns, 'row) appender
 
@@ -469,7 +476,7 @@ module Table : sig
       Callback errors/exceptions/effect denial poison settlement. On success
       the scope flushes and closes; it never commits a transaction it does not
       own. *)
-  val with_appender : _ session @ local -> ('columns, 'row) t ->
+  val with_appender : _ session @ local -> ('columns, _, 'row) t ->
     f:(('columns, 'row) appender @ local -> ('a, Error.t) result) -> ('a, Error.t) result
 
   (** One admission for a complete batch, validated before any native row
@@ -527,7 +534,7 @@ val export : connection @ local -> query:string -> path -> (unit, Error.t) resul
     snapshot guarantee. *)
 val fold : connection @ local -> path list -> (_, 'fn, 'row) Fields.t -> row:'fn -> init:'a ->
   f:('row -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result
-val fold_table : connection @ local -> path list -> (_, 'row) Table.t -> init:'a ->
+val fold_table : connection @ local -> path list -> (_, _, 'row) Table.t -> init:'a ->
   f:('row -> 'a -> ('a step, Error.t) result) -> ('a, Error.t) result
 end
 

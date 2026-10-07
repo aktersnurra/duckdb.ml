@@ -95,7 +95,7 @@ module Request : sig
   val fold : t @ local -> ('p, 'row, [< `Zero | `One | `Many ]) Duckdb.Request.t -> 'p Duckdb.Args.t -> init:'a ->
     f:('row -> 'a -> ('a Duckdb.step, Duckdb.Error.t) result) -> ('a, error) result
   val with_transaction : t @ local -> f:(Duckdb.transaction @ local -> ('a, Duckdb.Error.t) result) -> ('a, error) result
-  val ingest : t @ local -> ('c, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
+  val ingest : t @ local -> ('c, _, _) Duckdb.Table.t -> 'c Duckdb.Args.t list list -> flush:bool -> (unit, error) result
 
   (** The same operations as an instance, for code generic over backends. *)
   module Generic : Duckdb.Request.CONNECTION with type 'k owner = t and type error = error and type 'a future = 'a

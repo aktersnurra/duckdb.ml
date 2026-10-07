@@ -1,11 +1,11 @@
 open! Base
 
-type ('columns, 'row) t = ('columns, 'row) Request.table
+type ('columns, 'shape, 'row) t = ('columns, 'shape, 'row) Request.table
 module Columns = Columns
 
 let declare = Request.declare_table
-let select (Request.Table_def t : (_, _) t) = t.select
-let insert (Request.Table_def t : (_, _) t) = t.insert
+let select (Request.Table_def t : (_, _, _) t) = t.select
+let insert (Request.Table_def t : (_, _, _) t) = t.insert
 (* The payload is global so that a facade function receiving a local appender
    can still pass the internal one to the global internals. *)
 type ('columns, 'row) appender = { appender : ('columns, 'row) Request.appender @@ global }
