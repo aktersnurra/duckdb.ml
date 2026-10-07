@@ -4,10 +4,14 @@ module D = Duckdb
 module R = D.Request
 module S = D.Sql
 
+(* The declaration states the constraints; Table.create runs its CREATE TABLE. *)
 let users = D.Table.(declare "users"
   Columns.["id", int64; "name", string; "age", nullable int32]
-  ~row:(fun id name age -> (id, name, age)))
-let create = R.exec D.Fields.[] "CREATE TABLE users(id BIGINT, name VARCHAR, age INTEGER)"
+  ~row:(fun id name age -> (id, name, age))
+  ~constraints:(fun [id; _; age] -> Constraint.[
+    primary_key Key.[id];
+    check_null S.(Null.(column age >= nullable (int32 0l))) ]))
+let by_id = D.Table.lookup users (fun [id; _; _] -> D.Table.Key.[id])
 
 let adults = S.(
   query Params.[int32] (fun [min_age] ->
@@ -23,7 +27,7 @@ let by_name = S.(
           ~order_by:[asc name]))))
 
 let run (c @ local) =
-  match R.Session.exec c create D.Args.[] with
+  match D.Table.create c users with
   | Error e -> Error e
   | Ok () ->
     match D.Table.with_appender c users ~f:(fun a ->
@@ -34,7 +38,13 @@ let run (c @ local) =
       | Error e -> Error e
       | Ok adults ->
         List.iter adults ~f:(fun (id, name) -> Stdio.printf "adult %Ld %s\n" id name);
-        R.Session.collect c by_name D.Args.[]
+        match R.Session.find_opt c by_id D.Args.[2L] with
+        | Error e -> Error e
+        | Ok found ->
+          Stdio.printf "user 2: %s\n" (Option.value_map found ~default:"none" ~f:(fun (_, name, _) -> name));
+          match D.Table.verify c users with
+          | Error e -> Error e
+          | Ok () -> R.Session.collect c by_name D.Args.[]
 
 let () =
   Stdio.print_endline (R.query adults);

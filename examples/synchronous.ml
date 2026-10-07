@@ -35,7 +35,6 @@ let require label = function
    engine when first used, and cached per connection. *)
 let example = D.Table.(declare "example" Columns.[ "value", int64; "note", string ]
   ~row:(fun value note -> value, note))
-let create_example = R.exec D.Fields.[] "create table example(value bigint, note varchar)"
 let insert_example = D.Table.insert example
 let count_example = R.one D.Fields.[] D.Fields.[int64] ~row:Fn.id "select count(*) from example"
 
@@ -45,7 +44,7 @@ let count_example = R.one D.Fields.[] D.Fields.[int64] ~row:Fn.id "select count(
    along is inferred local; annotate [(c @ local)] when the compiler reports
    an escape at the call site. *)
 let setup (connection @ local) =
-  match R.Session.exec connection create_example D.Args.[] with
+  match D.Table.create connection example with
   | Error _ as error -> error
   | Ok () ->
     match R.Session.with_transaction connection ~f:(fun transaction ->
