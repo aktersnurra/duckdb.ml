@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Versioned migrations (sub-project 3b)
+
+[Design](docs/design/migrations.md).
+
+Added:
+- `Migration`: `step version name kind` with kinds `create` (a
+  declaration's CREATE TABLE), `add_column` (declared type and default, then
+  SET NOT NULL for a non-null column), `drop_table`, `drop_column`,
+  `rename_table`, `rename_column`, `sql` and `run` (code in the step's
+  transaction). `apply` creates `main.duckdb_ml_migrations`, checks that the
+  applied history is a prefix of the list, applies each pending step in its
+  own transaction, optionally verifies declarations, and returns the
+  versions it applied.
+- `Error.context` `Migration { version; name }`; `Error.cause`
+  `Migration_mismatch { version; expected; actual }`.
+- `test/test_migration.ml`; 3 compile-failure fixtures in
+  `test/migration_compile`.
+
+Forward only. A `run` step's checksum covers its name only, so editing one
+is not detected. Two processes migrating one database conflict on the
+bookkeeping key; the second fails and finds the steps applied on a rerun.
+
 ### Schema declarations (sub-project 3a)
 
 [Design](docs/design/schema.md).

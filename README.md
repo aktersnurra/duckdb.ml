@@ -146,6 +146,33 @@ type and nullability; the compiler rejects the rest (fixtures in
 limitation: a referenced row cannot be updated at all while it is
 referenced. Details in [schema](docs/design/schema.md).
 
+## Migrations
+
+`Migration.apply` brings a database up to date from an ordered list of
+numbered steps, each in its own transaction with its bookkeeping row:
+
+```ocaml
+module M = D.Migration
+
+let migrations = M.[
+  step 1 "create users" (create users);
+  step 2 "create posts" (create posts);
+  step 3 "seed" (run (fun tx -> D.Request.Session.exec tx seed D.Args.[]));
+  step 4 "index" (sql "CREATE INDEX posts_owner ON posts(owner)") ]
+
+let start (c @ local) = M.apply c migrations ~verify:M.[ table users; table posts ]
+(* : (int list, Error.t) result, the versions this call applied *)
+```
+
+Other steps are `add_column` (a column picked from a declaration),
+`drop_table`, `drop_column`, `rename_table` and `rename_column`. Migrations
+go forward only. The applied history must match the start of the
+list (version, name, checksum of the SQL); an edited, renamed or missing step
+is a `Migration_mismatch`. DuckDB cannot add a column with constraints, so
+`add_column` adds a non-null column with its default and then sets it NOT
+NULL, and rejects a column that is part of a key, CHECK or foreign key.
+Details in [migrations](docs/design/migrations.md).
+
 ## Sequencing with local handles
 
 A `let*` continuation must be a global closure, so it cannot use a local
@@ -232,6 +259,6 @@ Local DuckDB databases and typed local Parquet reads and exports are
 supported. Remote storage and credentials are out of scope. Done: the
 performance work (columnar bulk reads, unboxed numbers, allocation-free
 decoding; see [performance](docs/design/performance.md)) and the typed SQL
-layer ([typed SQL](docs/design/typed-sql.md)), and schema declarations with
-constraints ([schema](docs/design/schema.md)). Planned next: versioned
-migrations. See the [core redesign](docs/design/core-redesign.md) note.
+layer ([typed SQL](docs/design/typed-sql.md)), schema declarations with
+constraints ([schema](docs/design/schema.md)) and versioned migrations
+([migrations](docs/design/migrations.md)). See the [core redesign](docs/design/core-redesign.md) note.

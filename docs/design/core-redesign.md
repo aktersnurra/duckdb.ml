@@ -19,7 +19,7 @@ plan and implementation:
 | 1 | Core redesign (this note) | Scoped `@ local` handles, one kind-indexed session type, `Codec` as the only value description, one shared list structure, a shape GADT for execution, one error type |
 | 1b | Performance | A measured baseline (full benchmark run, several samples), then in order of payoff: columnar bulk reads (whole DuckDB vectors into OCaml arrays/Bigarrays in one native call), unboxed numbers (`int64#`, `float#`) through the decode path, allocation-free decoding for codecs without custom conversion, and `[@zero_alloc]` proofs on the borrowed path. Comes before typed SQL, which decodes through the same path |
 | 2 | Typed SQL | GADT expressions and a query builder that compile to `Request.t` ([Appendix A](#appendix-a-typed-sql-end-state-sketch)). Done: [typed SQL](typed-sql.md) |
-| 3 | Schema and migrations | Constraints on table declarations, then versioned migrations. 3a (constraints) done: [schema](schema.md); 3b (migrations) next |
+| 3 | Schema and migrations | Constraints on table declarations, then versioned migrations. Done: [schema](schema.md) (3a) and [migrations](migrations.md) (3b) |
 | later | `[@@deriving duckdb]` | Optional ppx that generates `Columns`/row declarations. Added only if hand-written declarations turn out to be tedious; nothing in 1–3 depends on it |
 
 Sub-project 2 reverses the earlier non-goal "no SQL DSL" in
