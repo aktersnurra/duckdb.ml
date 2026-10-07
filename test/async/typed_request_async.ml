@@ -51,6 +51,11 @@ let main () =
   require "transaction rolls back on request error" (Result.is_error rolled);
   Q.collect pool values D.Args.[0L] >>| request_ok >>= fun remaining ->
   require "rollback left no row" (List.length remaining = 2);
+  let generated = D.Sql.(query Params.[int64] (fun [floor] ->
+    from notes (fun [value; _] ->
+      select Exprs.[value] ~row:Fn.id ~where:(value >= param floor) ~order_by:[asc value]))) in
+  Q.collect pool generated D.Args.[0L] >>| request_ok >>= fun typed ->
+  require "generated request" (List.equal Int64.equal typed remaining);
   (* Cancellable form: a queued typed request is removed by the existing cancel. *)
   let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
   let busy = ok (A.transaction pool ~f:(fun _ ->
@@ -68,6 +73,6 @@ let main () =
   ok (A.completion busy) >>| ok >>= fun () ->
   ok (A.shutdown pool) >>| ok >>| fun () ->
   require "resources released" (Duckdb_ffi.live_resources () = 0);
-  print_endline "async request: generic instance ops/errors/transaction/ingest, reentrancy, cancellable submit=ok"
+  print_endline "async request: generic instance ops/errors/transaction/ingest, reentrancy, cancellable submit, generated SQL=ok"
 
 let () = Thread_safe.block_on_async_exn main

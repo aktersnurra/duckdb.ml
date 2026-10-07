@@ -38,6 +38,11 @@ let () =
       require "transaction rolls back on request error" (Result.is_error (Q.with_transaction pool ~f:(fun tx ->
         Result.bind (R.Session.exec tx insert D.Args.[3L; None]) ~f:(fun () -> R.Session.find tx one_note D.Args.[99L]) [@nontail])));
       require "rollback left no row" (List.length (request_ok (Q.collect pool values D.Args.[0L])) = 2);
+      let generated = D.Sql.(query Params.[int64] (fun [floor] ->
+        from notes (fun [value; _] ->
+          select Exprs.[value] ~row:Fn.id ~where:(value >= param floor) ~order_by:[asc value]))) in
+      require "generated request"
+        (List.equal Int64.equal (request_ok (Q.collect pool generated D.Args.[0L])) [1L; 2L]);
       (* A typed request waiting for the only connection is cancelled with its fiber. *)
       let entered = Stdlib.Atomic.make false and release = Stdlib.Atomic.make false in
       Eio.Fiber.both
@@ -55,4 +60,4 @@ let () =
           Stdlib.Atomic.set release true);
       ok (E.shutdown pool);
       require "resources released" (Duckdb_ffi.live_resources () = 0);
-      Stdlib.print_endline "eio request: generic instance ops/errors/transaction/ingest, reentrancy, fiber cancellation=ok"))
+      Stdlib.print_endline "eio request: generic instance ops/errors/transaction/ingest, reentrancy, fiber cancellation, generated SQL=ok"))
