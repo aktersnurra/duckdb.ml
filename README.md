@@ -82,6 +82,41 @@ handle. Use `match` for several steps, `Result.bind … [@nontail]` for one, or
 helper that takes a handle is inferred `@ local`; when the compiler reports an
 escape at a call site, annotate the parameter `(c @ local)`.
 
+## Fast paths
+
+For analytics, read columns instead of rows. A column view is checked once
+per chunk; its numeric accessors return unboxed values and never allocate
+(the build checks it):
+
+```ocaml
+module C = D.Statement.Column
+module I64 = Stdlib_upstream_compatible.Int64_u
+
+let[@zero_alloc] rec sum (v @ local) i n acc =
+  if i = n then acc else sum v (i + 1) n (I64.add acc (C.int64 v i))
+
+(* The sum of column 0; a NULL in it is an error. *)
+let total (p @ local) =
+  D.Statement.fold_chunks p ~init:0L ~f:(fun chunk acc ->
+    match C.view chunk 0 D.Scalar.Int64 C.Non_null with
+    | C.Rejected e -> Error e
+    | C.Opened v -> Ok (D.Continue Int64.(acc + I64.to_int64 (sum v 0 (C.length v) #0L))))
+```
+
+`Bulk.collect` copies a whole column into a Bigarray with one native copy
+per chunk, and `Table.append_columns` appends Bigarrays the same way, typed
+by the table declaration:
+
+```ocaml
+let ids (p @ local) = D.Bulk.collect p ~column:0 (D.Bulk.Int64 D.Scalar.Int64) C.Non_null
+let load a ~ids ~names ~ages ~valid =
+  D.Table.append_columns a D.Bulk.Columns.[ Int64 (D.Scalar.Int64, ids);
+    Strings (D.Scalar.String, names); Nullable (Int32 (D.Scalar.Int32, ages), valid) ]
+```
+
+Typed rows and `Table.append` use the same native paths internally. Numbers:
+[performance](docs/design/performance.md).
+
 ## Documentation
 
 - [Architecture](docs/architecture.md): the layers, modes, errors and adapters.
@@ -104,7 +139,8 @@ bash test/install_adapters_smoke.sh
 ## Scope and roadmap
 
 Local DuckDB databases and typed local Parquet reads and exports are
-supported. Remote storage and credentials are out of scope. Planned, in order:
-performance (columnar bulk reads, unboxed numbers, allocation-free decoding),
-a typed SQL layer built from GADT expressions, and schema declarations with
+supported. Remote storage and credentials are out of scope. Done: the
+performance work (columnar bulk reads, unboxed numbers, allocation-free
+decoding; see [performance](docs/design/performance.md)). Planned, in order: a
+typed SQL layer built from GADT expressions, and schema declarations with
 migrations. See the [core redesign](docs/design/core-redesign.md) note.

@@ -56,15 +56,15 @@
  (action (run timeout 120 ./%{exe:test_native_delivery.exe})))
 
 (rule (alias query-delivery)
- (deps check_query_interfaces.sh ../../lib/duckdb/resource.mli ../../lib/duckdb/scalar.mli ../../lib/ffi/duckdb_ffi.mli)
+ (deps check_query_interfaces.sh ../../lib/duckdb/failure.mli ../../lib/duckdb/resource.mli ../../lib/duckdb/scalar.mli ../../lib/ffi/duckdb_ffi.mli)
  (action (progn
-  (run bash %{dep:check_query_interfaces.sh} %{ocamlc})
+  (run bash %{dep:check_query_interfaces.sh} %{ocamlc} %{lib:base:base.cmi})
   (run timeout 120 ./%{exe:test_native_delivery.exe} query))))
 
 (rule (alias appender-delivery)
- (deps check_appender_interfaces.sh ../../lib/duckdb/resource.mli ../../lib/duckdb/scalar.mli ../../lib/ffi/duckdb_ffi.mli)
+ (deps check_appender_interfaces.sh ../../lib/duckdb/failure.mli ../../lib/duckdb/resource.mli ../../lib/duckdb/scalar.mli ../../lib/ffi/duckdb_ffi.mli)
  (action (progn
-  (run bash %{dep:check_appender_interfaces.sh} %{ocamlc})
+  (run bash %{dep:check_appender_interfaces.sh} %{ocamlc} %{lib:base:base.cmi})
   (run timeout 120 ./%{exe:test_native_delivery.exe} appender))))
 
 (rule (alias control-publication)

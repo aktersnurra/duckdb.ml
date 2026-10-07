@@ -98,7 +98,8 @@ module Error : sig
     | Missing_column of { name : string }
     (** A catalog column without a default absent from the declaration. *)
     | Encode_rejected of { index : int; reason : Base.Error.t }
-    (** A codec's encoder rejected the value at this zero-based position. *)
+    (** A codec's encoder rejected the value at this one-based position: the
+        parameter, or the column of an appended row or [append_columns]. *)
     | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
     (** A codec's decoder rejected a value; [row] as for [Null]. *)
     | Destination_exists

@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Performance (sub-project 1b)
+
+[Design and results](docs/design/performance.md).
+
+Added:
+- `Statement.Column`: local typed views of one chunk column, checked once
+  per chunk (`view` returns `Opened`/`Rejected`). Numeric accessors return
+  unboxed values and are `[@zero_alloc]`; nullable views have `is_null`,
+  `null_count` and `_or` accessors with an explicit default.
+- `Bulk`: `collect` and `collect_strings` copy one result column into a
+  Bigarray (or string array) with one native copy per chunk; `blit` and
+  `blit_validity` do so for one chunk; `Bulk.Columns` describes whole
+  columns for appending.
+- `Table.append_columns`: appends Bigarray columns typed by the table
+  declaration, with one copy per column per 2,048-row slice.
+- `Error.Length_mismatch { column; expected; actual }` for
+  `append_columns` columns or masks of unequal length.
+- `lib/duckdb` builds with `-zero-alloc-check default`;
+  `test/test_allocation.ml` asserts per-row allocation of the fast paths.
+- Benchmark: paths `column_views`, `collect`, `row_ingest` and
+  `columnar_ingest`, rotated per sample; the database runs with `threads=1`,
+  recorded in the output.
+
+Changed:
+- Typed rows (requests, tables, Parquet, adapters) decode through a
+  per-chunk vector cache with saturated row application: 280 ms to 89 ms
+  for 1M rows of two BIGINT columns. Errors are unchanged; cancellation is
+  still checked before every row. For a row whose later column is rejected,
+  effects between curried arguments of the row function no longer run.
+- `Table.append` stages rows into reusable native data chunks and appends
+  them with `duckdb_append_data_chunk`: 566 ms to 70 ms for 1M rows in
+  1,000-row batches. Error precedence and batch atomicity are unchanged;
+  invalid UTF-8 in a VARCHAR value still poisons the appender.
+- `Codec.non_null` and `Codec.nullable` are private variants, so
+  single-case matches on `Bulk.validity` and `Bulk.strings` are exhaustive.
+- `duckdb-ffi`: `append_cell`, `append_rows` and `clear_appender_input` are
+  replaced by staging externals (`stage_begin`, `stage_*`, `stage_blit`,
+  `stage_mask`, `append_staged`, `clear_stage`); per-chunk view externals
+  (`view_*`) are added.
+- The documentation of `Encode_rejected` now states that its index is
+  one-based, as it always was.
+
 ### Changed (breaking)
 
 Core redesign, sub-project 1 ([design](docs/design/core-redesign.md)).

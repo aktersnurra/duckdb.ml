@@ -1,6 +1,6 @@
 # Performance (sub-project 1b)
 
-Status: design approved, not yet implemented.
+Status: implemented. Measured results are in [Results](#results).
 
 Sub-project 1 made the API type-safe; this note makes it fast. Three workloads,
 in order of payoff: bulk analytic reads, typed rows, and ingest. The approach
@@ -8,6 +8,10 @@ is `[@@noalloc]` C externals that return unboxed values, views type-checked once
 per chunk, and one C call per chunk for bulk copies. Raw unchecked loads from
 OCaml (Bigarray proxies over vector memory, unsafe reads) were rejected: they
 would put unsafe casts in the safe API.
+
+All fast paths read through a per-chunk vector cache: when a chunk is fetched,
+C records each column's data pointer, validity pointer and type, so a read is
+one indirection instead of three DuckDB calls.
 
 ## Baseline
 
@@ -62,6 +66,66 @@ value, ~80% of the total). Per cell, today:
   in an array of arrays, validates with `Result.all`, then appends value by
   value.
 
+## Results
+
+Same machine, query and settings as the baseline (1M rows, `taskset -c 0`,
+`threads=1`, median of 10 after 2 warmups), at the final change of this
+sub-project, from one run of
+`python3 bench/run_benchmarks.py --rows 1000000 --warmups 2 --samples 10`.
+The six paths rotate their order per sample. The machine's load average was
+about 3.1–3.7 during the run.
+
+| Path | Time | Minor words | Target | Baseline |
+|---|---|---|---|---|
+| Borrowed chunks (`Statement.column`) | 279.2 ms | 28.3M | — | 290 ms, 55.2M |
+| Typed rows (`owned_rows`) | 89.3 ms | 21.5M | ≤ 110 ms: met | 280–286 ms, 63.2M |
+| Column views (sum both columns, count NULLs) | 67.6 ms (best 63.6) | 6,003 | ≤ 65 ms: **missed** | — |
+| Collect, both columns (two executions) | 124.2 ms | 9,725 | ≤ 70 ms was set for one execution: reported as measured | — |
+| Row ingest (`Table.append`) | 90.4 ms | 159,629 | ≤ 190 ms: met | 566–627 ms |
+| Columnar ingest (`Table.append_columns`) | 43.6 ms | 12,630 | ≤ 75 ms: met | — |
+
+- Column views miss the target by 2.6 ms at the median; the best sample was
+  63.6 ms. Engine and fetch alone take about 55 ms (baseline), so the reads
+  cost about 12 ms for 2M values plus the NULL count, one `[@@noalloc]` call
+  per value. The run was under load; it was not repeated on an idle machine.
+- Collect runs the query once per column, so each execution is about 62 ms,
+  of which about 55 ms is engine and fetch.
+- Ingest times include one aggregate query over the table that checks the
+  rows. Engine-only `INSERT … SELECT` of the same rows takes 31–37 ms. In a
+  separate program without that query (median of 7, appender scope
+  included), `append_columns` took 34.6 ms and `Table.append` 72.6 ms.
+- Minor words for column views, collect and columnar ingest are per run and
+  do not grow with the row count (below).
+
+Allocation, from `test/test_allocation.ml`: total allocated words (minor and
+major heap) per row, as the difference between runs over 100,000 and
+1,000,000 rows. The test asserts each line.
+
+| Path | Words per row | Target |
+|---|---|---|
+| Column views | 0.0034 | < 0.05: met |
+| Collect | 0.0041 | < 0.05: met |
+| Typed rows, decoder alone | 10.50 | ≤ 12: met |
+| Columnar ingest | 0.0088 | < 0.05: met |
+
+The typed-row 10.5 words are the row itself: a boxed `int64` (3 words), for
+the 90% non-NULL rows a boxed `int64` and a `Some` (5 words), and the pair
+(3 words): 3 + 0.9 × 5 + 3 = 10.5.
+
+Against the other bindings (baseline table, measured earlier on the same
+machine with `threads=1`; not rerun):
+
+- Column views (67.6 ms) are within a few milliseconds of Python
+  `fetchnumpy` (63 ms) and `duckdb-rs` `query_arrow` (66 ms), not faster. The
+  work differs: `fetchnumpy` materialises both columns and sums one,
+  `query_arrow` sums column 0 only, and the column-views path sums both
+  columns (NULLs as 0) and counts NULLs.
+- Typed rows (89.3 ms) are faster than `duckdb-rs` rows with
+  `get::<i64>`/`get::<Option<i64>>` (111 ms). Both decode both columns into
+  owned values per row; ours also allocates the row pair and, in the
+  benchmark callback, a new totals record and its `Ok (Continue _)`
+  (21.5 words per row in all).
+
 ## 1. Borrowed column views
 
 A column view is a typed window onto one column of the current chunk. It is
@@ -76,8 +140,10 @@ module Statement.Column : sig
     | Non_null : Codec.non_null nulls
     | Nullable : Codec.nullable nulls
 
+  type ('a, 'n) opened = Opened of ('a, 'n) t | Rejected of Error.t @@ global
+
   val view : chunk @ local -> int -> 'a Scalar.t -> 'n nulls
-             -> (('a, 'n) t, Error.t) result @ local
+             -> ('a, 'n) opened @ local
   val length : _ t @ local -> int
 
   (* Non-null views: total. [@zero_alloc]. *)
@@ -92,6 +158,7 @@ module Statement.Column : sig
 
   (* Nullable views: the caller names what NULL means. [@zero_alloc]. *)
   val is_null    : (_, Codec.nullable) t @ local -> int -> bool
+  val null_count : (_, Codec.nullable) t @ local -> int     (* this chunk *)
   val int64_or   : (int64,   Codec.nullable) t @ local -> default:int64# -> int -> int64#
   val float_or   : (float,   Codec.nullable) t @ local -> default:float# -> int -> float#
   val int32_or   : (int32,   Codec.nullable) t @ local -> default:int32# -> int -> int32#
@@ -105,6 +172,10 @@ end
 
 Semantics:
 
+- `view` returns `opened`, not a `result`: the `Error` payload of a local
+  `result` would be local too and could not be returned from a chunk
+  callback. `Rejected`'s `@@ global` modality allows that; the view in
+  `Opened` still cannot escape.
 - The `'a` index comes from `Scalar.t`. `Timestamp_us : int64 Scalar.t`, so
   `Column.int64` reads timestamps and `Column.int32` reads dates. An accessor
   of the wrong type is a compile error.
@@ -114,9 +185,18 @@ Semantics:
 - Plain accessors exist only on non-null views and `is_null`/`_or` only on
   nullable views, so a silent zero or a forgotten NULL check is a compile
   error. Neither path raises or returns a `Result` per value.
-- A wrong engine type is `Type_mismatch`; a bad column index is the existing
-  index error. A row index outside `[0, length)` raises `Invalid_argument`,
-  like `Array.get` (`[@zero_alloc]` permits allocation on raising paths).
+- A wrong engine type is `Type_mismatch` (the engine type must equal the
+  scalar's exactly: `Int64` on an INTEGER column is rejected); a bad column
+  index is the existing index error. A row index outside `[0, length)` raises
+  `Invalid_argument`, like `Array.get` (`[@zero_alloc]` permits allocation on
+  raising paths).
+- Every read, `_or` accessors included, is one `[@@noalloc]` C call that
+  looks the vector and row up once through an inline accessor. (Profiling
+  found a read macro that evaluated that lookup three times.) `null_count`
+  counts the validity mask a word at a time.
+- `Codec.non_null` and `Codec.nullable` are `private` variants, not abstract
+  types, so the compiler knows they differ and single-case GADT matches
+  (`All_valid`, `Mask`, `Strings_opt`) are exhaustive.
 - Views are local: they cannot escape the chunk callback.
 
 Precedent: `duckdb-rs`'s row API returns a checked `Result` per value; its
@@ -128,8 +208,10 @@ tuple `#(bool * int64#)`. Not probed with `[@@noalloc]` externals yet.
 
 ## 2. Collect into Bigarrays
 
+`Bulk` is a top-level module (`Duckdb.Bulk`), after `Statement`.
+
 ```ocaml
-module Statement.Bulk : sig
+module Bulk : sig
   (* 'a is the view's type, 'k/'e the Bigarray element; dates and timestamps
      share int32/int64 and carry their scalar *)
   type ('a, 'k, 'e) kind =
@@ -141,30 +223,23 @@ module Statement.Bulk : sig
     | Float64 : (float, float, Bigarray.float64_elt) kind
     | Float32 : (float32, float, Bigarray.float32_elt) kind
 
-  type 'n validity =
-    | All_valid : Codec.non_null validity
-    | Mask : (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-             -> Codec.nullable validity                    (* 1 = valid, one byte per row *)
-
+  type mask = (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t  (* 1 = valid *)
+  type 'n validity = All_valid : Codec.non_null validity | Mask : mask -> Codec.nullable validity
   type ('k, 'e, 'n) t =
     { data : ('k, 'e, Bigarray.c_layout) Bigarray.Array1.t; validity : 'n validity }
-
-  val blit : ('a, _) Column.t @ local -> ('a, 'k, 'e) kind
-             -> into:('k, 'e, Bigarray.c_layout) Bigarray.Array1.t -> pos:int -> unit
-  val blit_validity : (_, Codec.nullable) Column.t @ local
-             -> into:(int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> pos:int -> unit
-end
-
-module Statement : sig
-  …
-  val collect : prepared @ local -> column:int -> ('a, 'k, 'e) Bulk.kind -> 'n Column.nulls
-                -> (('k, 'e, 'n) Bulk.t, Error.t) result
-
   type _ strings =
     | Strings : string array -> Codec.non_null strings
     | Strings_opt : string option array -> Codec.nullable strings
-  val collect_strings : prepared @ local -> column:int -> 'n Column.nulls
-                        -> ('n strings, Error.t) result
+
+  val blit : ('a, _) Statement.Column.t @ local -> ('a, 'k, 'e) kind
+             -> into:('k, 'e, Bigarray.c_layout) Bigarray.Array1.t @ local -> pos:int -> unit
+  val blit_validity : (_, Codec.nullable) Statement.Column.t @ local
+             -> into:mask @ local -> pos:int -> unit
+
+  val collect : Statement.prepared @ local -> column:int -> ('a, 'k, 'e) kind
+                -> 'n Statement.Column.nulls -> (('k, 'e, 'n) t, Error.t) result
+  val collect_strings : Statement.prepared @ local -> column:int -> string Scalar.t
+                        -> 'n Statement.Column.nulls -> ('n strings, Error.t) result
 end
 ```
 
@@ -177,8 +252,14 @@ end
   so the engine type is checked once (`Type_mismatch`).
 - `collect` executes the statement, folds its chunks and blits each one. The
   result grows by doubling and is returned as an `Array1.sub` (shared memory,
-  no copy). If the materialized result's row count is exposed by the FFI, the
-  plan allocates exactly once instead; the implementation plan checks this.
+  no copy), so it may keep up to about twice its length of backing storage.
+  A NULL in a `Non_null` collect is `Null` with the row absolute within the
+  result. `collect_strings` takes `Scalar.String` or `Scalar.Blob`.
+- Before folding, `collect` checks the column index and exact engine type
+  against the executed result, so an empty result is rejected with `Index` or
+  `Type_mismatch` too. It checks the executed result rather than the
+  prepared statement because prepared types can be `INVALID` or miscounted
+  for parameterised statements such as `range(?)`.
 - Matching on `validity` of a non-null collect has the single case
   `All_valid`.
 - Several columns in one pass: a `fold_chunks` with one `Bulk.blit` (and
@@ -197,12 +278,20 @@ No API change. `Request`, `Table`, Parquet reads and both adapters share the
 |---|---|
 | Engine type and column count checked per cell | Opened once per chunk as `Column` views |
 | Boxing, `Or_error.return` and `Ok` per cell | New `Identity` case in `Codec.plan` for base scalars without a custom decoder: read straight from the view. Custom codecs keep the `Or_error` path. |
-| Partial application per field per row | Saturated application: for arities 1–8, the fold matches the `Fields` spine shape and calls `fn a b …` once. Matching `[f1; f2]` refines `'fn` to `a -> b -> 'r`. Longer rows fall back to the curried path. |
+| Partial application per field per row | Saturated application: for arities 1–8, the fold matches the `Fields` spine shape and calls `fn a b …` once. Matching `[f1; f2]` refines `'fn` to `a -> b -> 'r`. Longer rows fall back to the curried path. Per chunk, if every column has exactly its declared engine type, the rows before the first NULL in a non-null field take the fast path; the rest use the per-cell path, so errors are unchanged. A custom decoder's rejection on the fast path is reported as before. |
 | NULL check per cell | Non-null fields use the per-chunk `Non_null` check; nullable fields read the validity bit and allocate `Some` only for non-NULL values |
-| Cancellation checkpoint per row | One checkpoint per chunk (2,048 rows) |
+| Cancellation checkpoint per row | Kept per row: a cancel from a fold callback stops the fold at the next row (pinned by `test_adapter_bridge`'s `mid_chunk_cancel`). `Resource.checkpoint` is free outside Bridge requests. |
 
 What remains per row is what the caller asked for: the row value, boxed
 `int64` fields, `Some` for nullable fields and the list cell for `collect`.
+The allocation target is defined on the decoder alone: a fold over
+`Fields.[int64; nullable int64]` whose callback returns a preallocated
+`Ok (Continue ())` allocates at most 12 words per row (asserted).
+
+Saturated application changes one observable detail. On the fast path every
+column of a row is decoded before the row function runs, so effects between
+curried arguments (`fun a -> effect (); fun b -> …`) do not run for a row
+whose later column is rejected. The reported error is the same.
 Errors are unchanged: request-level `Null { row }` stays absolute,
 `Decode_rejected` still comes from custom codecs, `Type_mismatch` from schema
 validation.
@@ -218,6 +307,17 @@ validation.
 - Batch atomicity is unchanged. The whole batch is staged; only after every
   value has encoded are the chunks handed to `duckdb_append_data_chunk`. On a
   codec rejection the staged chunks are cleared and the table is not touched.
+- Staging runs outside connection admission (codec encoders are user code,
+  as before) and writes only the appender's own staging chunks. The append
+  itself runs inside admission. Error precedence is unchanged: codec
+  rejections first (row-major), then poisoning/closed/busy, then a NULL in a
+  NOT NULL column, then engine errors. A codec rejection never poisons.
+- The pool is per appender, grows for a large batch and is cut back to 16
+  chunks after each append.
+- VARCHAR values are UTF-8 validated when staged. Invalid UTF-8 becomes a
+  native error that poisons the appender, unless a later codec rejection in
+  the same batch wins, which does not poison. BLOB values are not
+  validated.
 - `Identity` plans skip `Or_error` here too.
 - Engine failures poison the appender as today.
 
@@ -233,9 +333,8 @@ module Bulk.Columns : sig
     | Bool    : (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> bool col
     | Float64 : (float, Bigarray.float64_elt, Bigarray.c_layout) Bigarray.Array1.t -> float col
     | Float32 : (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t -> float32 col
-    | Strings : string array -> string col
-    | Nullable : 'a col * (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-                 -> 'a option col
+    | Strings : string Scalar.t * string array -> string col
+    | Nullable : 'a col * Bulk.mask -> 'a option col
   type _ t = [] : unit t | (::) : 'a col * 'l t -> ('a * 'l) t
 end
 
@@ -246,19 +345,28 @@ val Table.append_columns : ('columns, _) appender @ local -> 'columns Bulk.Colum
 Usage with the README's `users` table:
 
 ```ocaml
-Table.append_columns a Bulk.Columns.[ Int64 (Int64, ids); Strings names; Nullable (Int32 (Int32, ages), valid) ]
+Table.append_columns a Bulk.Columns.[ Int64 (Int64, ids); Strings (String, names); Nullable (Int32 (Int32, ages), valid) ]
 ```
 
 - Compile time: missing, extra or reordered columns, a wrong element type, a
-  NULL mask on a non-null column, and any column whose declared codec is custom
-  (no constructor produces `user_id col`).
-- Runtime, before any native work, reported as `Error.t`: unequal lengths
-  across columns and masks, and an engine scalar that differs from the
-  appender's catalog type (`Type_mismatch`).
+  NULL mask on a non-null column, and a custom codec whose OCaml type differs
+  from its base type (no constructor produces `user_id col`).
+- Runtime, before any native work, reported as `Error.t`, column by column
+  in column order: length (the new cause
+  `Length_mismatch { column; expected; actual }`, against the first column),
+  mask length, a declared custom codec whose type equals the base type (for
+  example a validating `int64` codec: `Encode_rejected { index; reason }`),
+  an engine scalar that differs from the appender's catalog type
+  (`Type_mismatch`), and a NULL mask entry in a NOT NULL column (`Null`).
+  None of these poisons the appender. This differs from `append`, where a
+  NULL in a NOT NULL column poisons.
 - C: per 2,048-row slice, one `memcpy` per fixed-width column, validity built
   from the mask, then `duckdb_append_data_chunk`. Strings are copied per
-  element; DuckDB must own them.
-- Engine failures poison the appender exactly as `append` does.
+  element; DuckDB must own them. The Bigarray kind must match the column's
+  physical type exactly; a mismatch in C fails the batch rather than copying
+  nothing.
+- Engine failures and invalid UTF-8 poison the appender exactly as `append`
+  does.
 
 ## 5. Verification
 
@@ -301,7 +409,7 @@ test.
 |---|---|---|
 | Column views | ≤ 65 ms | 0 words per value (asserted) |
 | Collect | ≤ 70 ms | O(1) OCaml words independent of row count (asserted) |
-| Typed rows | ≤ 110 ms | ≤ 16 words per row |
+| Typed rows | ≤ 110 ms | ≤ 12 words per row, decoder alone (asserted) |
 | Row ingest | ≤ 190 ms | dominated by the caller's row values |
 | Columnar ingest | ≤ 75 ms | O(1) OCaml words (asserted) |
 

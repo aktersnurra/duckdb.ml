@@ -96,6 +96,16 @@ and Parquet decoding, and is checked against the catalog by column name.
 It is the only append path: a batch is validated before any native row
 mutation.
 
+Two native structures carry the fast paths. When a chunk is fetched, C
+records each column's data pointer, validity pointer and type in a per-chunk
+vector cache; `Statement.Column` views, `Bulk` copies and the typed-row
+decoder read through it with one `[@@noalloc]` call per value or per chunk.
+Each appender owns a pool of DuckDB data chunks: `Table.append` encodes rows
+straight into them outside admission, and `Table.append_columns` copies
+Bigarray slices into them; the chunks are then appended with
+`duckdb_append_data_chunk` in one admission. See
+[performance](design/performance.md).
+
 Parameterized statements are re-validated only when a schema change may have
 become visible. A process-wide schema epoch advances around every
 CREATE/ALTER/DROP and on settlement of a transaction that ran one.

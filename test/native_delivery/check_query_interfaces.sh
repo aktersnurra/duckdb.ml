@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 compiler=$1
+base=$(dirname "$2")
 root=$(cd "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-cp "$root/lib/duckdb/"{scalar,resource}.mli "$root/lib/ffi/duckdb_ffi.mli" "$tmp/"
+cp "$root/lib/duckdb/"{scalar,failure,resource}.mli "$root/lib/ffi/duckdb_ffi.mli" "$tmp/"
 cd "$tmp"
-"$compiler" -extension-universe beta -w @a -c scalar.mli
-"$compiler" -extension-universe beta -w @a -c duckdb_ffi.mli
-"$compiler" -extension-universe beta -w @a -c resource.mli
+"$compiler" -extension-universe beta -I "$base" -w @a -c scalar.mli
+"$compiler" -extension-universe beta -I "$base" -w @a -c duckdb_ffi.mli
+"$compiler" -extension-universe beta -I "$base" -w @a -c failure.mli
+"$compiler" -extension-universe beta -I "$base" -w @a -c resource.mli
 printf 'val cleanup : Resource.connection -> unit\n' >query_cleanup.mli
 printf 'let cleanup connection = Resource.admit_cleanup connection\n' >query_cleanup.ml
-"$compiler" -extension-universe beta -w @a -c query_cleanup.mli
-"$compiler" -extension-universe beta -w @a -c query_cleanup.ml
+"$compiler" -extension-universe beta -I "$base" -w @a -c query_cleanup.mli
+"$compiler" -extension-universe beta -I "$base" -w @a -c query_cleanup.ml
 chmod u+w resource.mli
 sed -i '/^val admit_cleanup :/d' resource.mli
-"$compiler" -extension-universe beta -w @a -c resource.mli
-"$compiler" -extension-universe beta -w @a -c query_cleanup.mli
-if "$compiler" -extension-universe beta -w @a -c query_cleanup.ml >red.out 2>&1; then
+"$compiler" -extension-universe beta -I "$base" -w @a -c resource.mli
+"$compiler" -extension-universe beta -I "$base" -w @a -c query_cleanup.mli
+if "$compiler" -extension-universe beta -I "$base" -w @a -c query_cleanup.ml >red.out 2>&1; then
  echo 'missing admit_cleanup unexpectedly accepted'
  exit 1
 fi

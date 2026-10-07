@@ -41,7 +41,7 @@ test ! -d "$prefix/lib/duckdb"
 test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb-ffi/META")" = ""
 producer_build -p duckdb --build-dir _build-safe
 local_dune install --root "$producer" --build-dir _build-safe --prefix "$prefix" duckdb
-test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb/META")" = "base duckdb-ffi stdlib_stable threads"
+test "$(sed -n 's/^requires = "\(.*\)"/\1/p' "$prefix/lib/duckdb/META")" = "base duckdb-ffi stdlib_stable stdlib_upstream_compatible threads"
 # Entire producer source and both build trees are unavailable at their previous
 # paths during the independent consumer build, as in the packaging prerequisite.
 mv "$producer" "$producer.hidden"
