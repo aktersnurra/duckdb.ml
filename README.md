@@ -114,7 +114,24 @@ let load a ~ids ~names ~ages ~valid =
     Strings (D.Scalar.String, names); Nullable (Int32 (D.Scalar.Int32, ages), valid) ]
 ```
 
-Typed rows and `Table.append` use the same native paths internally. Numbers:
+Typed rows and `Table.append` use the same native paths internally.
+
+Against the official Python and Rust bindings, reading 1M rows of two BIGINT
+columns (one with NULLs):
+
+| Path | Time |
+|---|---|
+| Python `fetchnumpy` | 63 ms |
+| `duckdb-rs` `query_arrow` | 66 ms |
+| duckdb.ml column views | 68 ms |
+| duckdb.ml typed rows | 89 ms |
+| `duckdb-rs` typed rows (`get::<i64>`) | 111 ms |
+| Python `fetchall` | 485 ms |
+
+Column views are level with numpy and Arrow, not faster. Typed rows beat
+duckdb-rs's row API. All bindings were measured on one DuckDB thread
+(`SET threads=1`; Python and Rust default to one per core), pinned to one core,
+on DuckDB 1.5.5 in October 2026. The method, workloads and scripts are in
 [performance](docs/design/performance.md).
 
 ## Documentation
