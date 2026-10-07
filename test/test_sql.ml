@@ -192,16 +192,16 @@ let () =
    is built, even where the other table has a column of that name or the
    other query a parameter of that number. *)
 let () =
-  let column = ref None and parameter = ref None in
+  let leaked = ref None and parameter = ref None in
   ignore (S.(query Params.[int64] (fun [p] -> from users (fun [id; _; _] ->
-    column := Some id; parameter := Some (param p); select Exprs.[id] ~row:Fn.id))));
+    leaked := Some id; parameter := Some (param p); select Exprs.[id] ~row:Fn.id))));
   let other = T.(declare "others" Columns.["id", int64] ~row:Fn.id) in
   let rejected name build =
     match build () with
     | exception Invalid_argument _ -> ()
     | (_ : (int64 * unit, int64, R.many) R.t) -> failwith (name ^ ": accepted a foreign expression") in
   rejected "column" (fun () -> S.(query Params.[int64] (fun [p] -> from other (fun [id] ->
-    select Exprs.[id] ~row:Fn.id ~where:(Option.value_exn !column = param p)))));
+    select Exprs.[id] ~row:Fn.id ~where:(Option.value_exn !leaked = param p)))));
   rejected "parameter" (fun () -> S.(query Params.[int64] (fun [_] -> from other (fun [id] ->
     select Exprs.[id] ~row:Fn.id ~where:(id = Option.value_exn !parameter)))));
   Stdlib.print_endline "sql: an expression from another query is rejected when built=ok"

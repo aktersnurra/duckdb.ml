@@ -1,11 +1,243 @@
 open! Base
+open Failure
 
 type ('columns, 'shape, 'row) t = ('columns, 'shape, 'row) Request.table
 module Columns = Columns
 
-let declare = Request.declare_table
+type ('a, 'n) column = ('a, 'n) Sql.column
+module Binders = struct
+  type 'shape t =
+    | [] : unit t
+    | (::) : ('a, 'n) column * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+end
+module Key = struct
+  type 'key t =
+    | [] : unit t
+    | (::) : ('a, Codec.non_null) column * 'key t -> ('a * 'key) t
+end
+
+let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> s Binders.t = fun columns ~scope ->
+  match columns with
+  | Columns.[] -> Binders.[]
+  | Columns.((name, codec) :: rest) -> Binders.({ Sql.scope; name; codec } :: binders rest ~scope)
+let rec key_columns : type k. k Key.t -> (int * string) list = function
+  | Key.[] -> []
+  | Key.(c :: rest) -> (c.Sql.scope, c.name) :: key_columns rest
+let rec key_fields : type k. k Key.t -> k Sql.packed_fields = function
+  | Key.[] -> Sql.Packed_fields Fields.[]
+  | Key.(c :: rest) ->
+    let (Sql.Packed_fields fields) = key_fields rest in
+    Sql.Packed_fields Fields.(c.Sql.codec :: fields)
+let same_set a b =
+  let sort = List.sort ~compare:String.compare in
+  List.equal String.equal (sort a) (sort b)
+let keys constraints =
+  List.filter_map constraints ~f:(function
+    | Table_constraint.Primary_key names | Table_constraint.Unique names -> Some names
+    | _ -> None)
+
+(* Constraints as the callback builds them: columns still carry the scope
+   they were bound in, and expressions are unrendered. *)
+module Constraint = struct
+  type t =
+    | Primary_key of (int * string) list
+    | Unique of (int * string) list
+    | Foreign_key of { columns : (int * string) list; table : string; references : string list }
+    | Check of Sql.node
+    | Default of { column : int * string; node : Sql.node }
+  let primary_key key = Primary_key (key_columns key)
+  let unique key = Unique (key_columns key)
+  let foreign_key key ~references:((Request.Table_def other : (_, _, _) Request.table), f) =
+    let scope = Sql.fresh_scope () in
+    let referenced = key_columns (f (binders other.columns ~scope)) in
+    if List.exists referenced ~f:(fun (s, _) -> s <> scope) then Sql.foreign ();
+    let references = List.map referenced ~f:snd in
+    if not (List.exists (keys other.constraints) ~f:(same_set references)) then
+      invalid_arg "Duckdb.Table: a foreign key must reference a declared primary or unique key";
+    Foreign_key { columns = key_columns key; table = other.schema ^ "\000" ^ other.name; references }
+  let default (c : (_, _) column) (e : (_, _, _) Sql.expr) = Default { column = (c.scope, c.name); node = e.node }
+  let check (e : (_, _, _) Sql.expr) = Check e.node
+  let check_null (e : (_, _, _) Sql.expr) = Check e.node
+end
+
+(* Renders the callback's constraints against the declaration's scope. *)
+let resolve ~schema ~scope (constraints : Constraint.t list) =
+  let names columns =
+    List.map columns ~f:(fun (s, name) -> if s <> scope then Sql.foreign () else name) in
+  let render node = Sql.render ~qualifier:"" ~columns:scope ~params:(-1) node in
+  let resolved = List.map constraints ~f:(function
+    | Constraint.Primary_key columns -> Table_constraint.Primary_key (names columns)
+    | Constraint.Unique columns -> Table_constraint.Unique (names columns)
+    | Constraint.Foreign_key { columns; table; references } ->
+      (match String.lsplit2 table ~on:'\000' with
+       | Some (other_schema, other) when String.equal other_schema schema ->
+         Table_constraint.Foreign_key { columns = names columns; table = other; references }
+       | _ -> invalid_arg "Duckdb.Table: a foreign key must reference a table in the same schema")
+    | Constraint.Check node -> Table_constraint.Check { sql = render node; columns = Sql.mentioned node }
+    | Constraint.Default { column; node } ->
+      if not (List.is_empty (Sql.mentioned node)) then
+        invalid_arg "Duckdb.Table: a default cannot mention a column";
+      Table_constraint.Default { column = List.hd_exn (names [ column ]); sql = render node }) in
+  if List.count resolved ~f:(function Table_constraint.Primary_key _ -> true | _ -> false) > 1 then
+    invalid_arg "Duckdb.Table: at most one primary key";
+  resolved
+
+let declare ?(schema = "main") ?constraints name columns ~row =
+  let constraints = match constraints with
+    | None -> []
+    | Some f ->
+      let scope = Sql.fresh_scope () in
+      resolve ~schema ~scope (f (binders columns ~scope)) in
+  Request.declare_table ~schema ~constraints name columns ~row
 let select (Request.Table_def t : (_, _, _) t) = t.select
 let insert (Request.Table_def t : (_, _, _) t) = t.insert
+
+(* One column of the declaration: name, SQL type, nullability. *)
+let rec specs : type l f r s. (l, f, r, s) Columns.t -> (string * string * bool) list = function
+  | Columns.[] -> []
+  | Columns.((name, codec) :: rest) ->
+    let nullable = match codec with Codec.Nullable _ -> true | Codec.Non_null _ -> false in
+    (name, Sql.sql_type codec, nullable) :: specs rest
+let quoted names = "(" ^ String.concat ~sep:", " (List.map names ~f:Request.quote) ^ ")"
+let ddl (Request.Table_def t : (_, _, _) t) =
+  let default name = List.find_map t.constraints ~f:(function
+    | Table_constraint.Default { column; sql } when String.equal column name -> Some sql
+    | _ -> None) in
+  let columns = List.map (specs t.columns) ~f:(fun (name, sql_type, nullable) ->
+    Request.quote name ^ " " ^ sql_type ^ (if nullable then "" else " NOT NULL")
+    ^ Option.value_map (default name) ~default:"" ~f:(fun sql -> " DEFAULT " ^ sql)) in
+  let table name = Request.quote t.schema ^ "." ^ Request.quote name in
+  let constraints = List.filter_map t.constraints ~f:(function
+    | Table_constraint.Primary_key names -> Some ("PRIMARY KEY " ^ quoted names)
+    | Table_constraint.Unique names -> Some ("UNIQUE " ^ quoted names)
+    | Table_constraint.Foreign_key { columns; table = other; references } ->
+      Some ("FOREIGN KEY " ^ quoted columns ^ " REFERENCES " ^ table other ^ " " ^ quoted references)
+    | Table_constraint.Check { sql; _ } -> Some ("CHECK (" ^ sql ^ ")")
+    | Table_constraint.Default _ -> None) in
+  "CREATE TABLE " ^ table t.name ^ " (" ^ String.concat ~sep:", " (columns @ constraints) ^ ")"
+let create (s @ local) table = Request.Session.exec s (Request.exec ~oneshot:true Fields.[] (ddl table)) Args.[] [@nontail]
+
+(* Verification reads the catalog in the session's snapshot. *)
+let catalog_columns = Request.many Fields.[string; string] Fields.[string; bool; bool]
+  ~row:(fun name nullable default -> (name, nullable, default))
+  "SELECT column_name, is_nullable, column_default IS NOT NULL FROM duckdb_columns() \
+   WHERE database_name = current_database() AND schema_name = ? AND table_name = ? ORDER BY column_index"
+let catalog_constraints = Request.many Fields.[string; string] Fields.[int64; string; string]
+  ~row:(fun index kind table -> (index, kind, table))
+  "SELECT CAST(constraint_index AS BIGINT), constraint_type, coalesce(referenced_table, '') \
+   FROM duckdb_constraints() WHERE database_name = current_database() AND schema_name = ? \
+   AND table_name = ? AND constraint_type <> 'NOT NULL'"
+let catalog_names list = Request.many Fields.[string; string] Fields.[int64; string]
+  ~row:(fun index name -> (index, name))
+  ("SELECT CAST(constraint_index AS BIGINT), unnest(" ^ list ^ ") FROM duckdb_constraints() \
+    WHERE database_name = current_database() AND schema_name = ? AND table_name = ? \
+    AND constraint_type <> 'NOT NULL'")
+let catalog_columns_of = catalog_names "constraint_column_names"
+let catalog_references = catalog_names "referenced_column_names"
+
+(* A constraint as verification compares it: kind, column set, and for a
+   foreign key the referenced table and column set. *)
+type shape = { kind : string; columns : string list; table : string; references : string list }
+let describe { kind; columns; table; references } =
+  kind ^ " " ^ quoted columns
+  ^ if String.is_empty table then "" else " REFERENCES " ^ Request.quote table ^ " " ^ quoted references
+let same a b =
+  String.equal a.kind b.kind && same_set a.columns b.columns && String.equal a.table b.table
+  && same_set a.references b.references
+let declared_shapes constraints =
+  List.filter_map constraints ~f:(function
+    | Table_constraint.Primary_key columns -> Some { kind = "PRIMARY KEY"; columns; table = ""; references = [] }
+    | Table_constraint.Unique columns -> Some { kind = "UNIQUE"; columns; table = ""; references = [] }
+    | Table_constraint.Foreign_key { columns; table; references } -> Some { kind = "FOREIGN KEY"; columns; table; references }
+    | Table_constraint.Check { columns; _ } -> Some { kind = "CHECK"; columns; table = ""; references = [] }
+    | Table_constraint.Default _ -> None)
+(* The first shape of [expected] without a distinct match in [actual]. *)
+let rec unmatched expected actual =
+  match expected with
+  | [] -> None
+  | e :: rest ->
+    match List.findi actual ~f:(fun _ a -> same e a) with
+    | None -> Some e
+    | Some (i, _) -> unmatched rest (List.filteri actual ~f:(fun j _ -> j <> i))
+
+(* Compares the declaration with catalog rows read by [verify]. *)
+let compare_catalog (Request.Table_def t : (_, _, _) t) ~catalog ~kinds ~columns ~references =
+  let context = Table { schema = t.schema; name = t.name } in
+  let mismatch constraint_kind ~expected ~actual =
+    Error { context; cause = Constraint_mismatch { constraint_kind; expected; actual } } in
+  let nullability = List.find_map (specs t.columns) ~f:(fun (name, _, nullable) ->
+    match List.find catalog ~f:(fun (n, _, _) -> String.equal n name) with
+    | Some (_, actual, _) when Bool.( <> ) actual nullable ->
+      let show n = Request.quote name ^ if n then " nullable" else " NOT NULL" in
+      Some (show nullable, show actual)
+    | _ -> None) in
+  match nullability with
+  | Some (expected, actual) -> mismatch "NOT NULL" ~expected ~actual
+  | None ->
+    let of_index rows index =
+      List.filter_map rows ~f:(fun (i, name) -> if Int64.equal i index then Some name else None) in
+    let actual = List.map kinds ~f:(fun (index, kind, table) ->
+      { kind; columns = of_index columns index; table; references = of_index references index }) in
+    let declared = declared_shapes t.constraints in
+    match unmatched declared actual, unmatched actual declared with
+    | Some e, _ -> mismatch e.kind ~expected:(describe e) ~actual:"none"
+    | None, Some a -> mismatch a.kind ~expected:"none" ~actual:(describe a)
+    | None, None ->
+      let defaulted name = List.exists t.constraints ~f:(function
+        | Table_constraint.Default { column; _ } -> String.equal column name
+        | _ -> false) in
+      match List.find catalog ~f:(fun (name, _, default) ->
+        List.mem (Columns.names t.columns) name ~equal:String.equal && Bool.( <> ) default (defaulted name)) with
+      | Some (name, _, true) -> mismatch "DEFAULT" ~expected:"none" ~actual:("DEFAULT on " ^ Request.quote name)
+      | Some (name, _, false) -> mismatch "DEFAULT" ~expected:("DEFAULT on " ^ Request.quote name) ~actual:"none"
+      | None -> Ok ()
+
+let verify (s @ local) (Request.Table_def t as table : (_, _, _) t) =
+  let context = Table { schema = t.schema; name = t.name } in
+  let args = Args.[t.schema; t.name] in
+  match Request.Session.collect s catalog_columns args with
+  | Error e -> Error e
+  | Ok [] -> Error { context; cause = Unknown_table { schema = t.schema; name = t.name } }
+  | Ok catalog ->
+    match Request.check_declaration (Columns.names t.columns)
+            (List.map catalog ~f:(fun (name, _, default) -> (name, default))) with
+    | Error cause -> Error { context; cause }
+    | Ok (_ : int list) ->
+      (* Types: the declared columns, prepared against the catalog. *)
+      let typed = Request.many ~oneshot:true Fields.[] (Request.fields_of_columns t.columns) ~row:t.row
+        ("SELECT " ^ String.concat ~sep:", " (List.map (Columns.names t.columns) ~f:Request.quote)
+         ^ " FROM " ^ Request.quote t.schema ^ "." ^ Request.quote t.name ^ " LIMIT 0") in
+      match Request.Session.collect s typed Args.[] with
+      | Error e -> Error { e with context }
+      | Ok (_ : _ list) ->
+        match Request.Session.collect s catalog_constraints args with
+        | Error e -> Error e
+        | Ok kinds ->
+          match Request.Session.collect s catalog_columns_of args with
+          | Error e -> Error e
+          | Ok columns ->
+            match Request.Session.collect s catalog_references args with
+            | Error e -> Error e
+            | Ok references -> compare_catalog table ~catalog ~kinds ~columns ~references
+
+let lookup (Request.Table_def t : (_, _, _) t) f =
+  let scope = Sql.fresh_scope () in
+  let key = f (binders t.columns ~scope) in
+  let columns = key_columns key in
+  if List.exists columns ~f:(fun (s, _) -> s <> scope) then Sql.foreign ();
+  let names = List.map columns ~f:snd in
+  if not (List.exists (keys t.constraints) ~f:(same_set names)) then
+    invalid_arg "Duckdb.Table.lookup: the key must be the declared primary key or a declared unique key";
+  let codecs = specs t.columns in
+  let condition = List.mapi names ~f:(fun i name ->
+    let sql_type = List.find_map_exn codecs ~f:(fun (n, ty, _) -> Option.some_if (String.equal n name) ty) in
+    Printf.sprintf "%s = CAST($%d AS %s)" (Request.quote name) (i + 1) sql_type) in
+  let (Sql.Packed_fields params) = key_fields key in
+  Request.generated params (Request.fields_of_columns t.columns) ~row:t.row
+    ("SELECT " ^ String.concat ~sep:", " (List.map (Columns.names t.columns) ~f:Request.quote)
+     ^ " FROM " ^ Request.quote t.schema ^ "." ^ Request.quote t.name
+     ^ " WHERE " ^ String.concat ~sep:" AND " condition)
+
 (* The payload is global so that a facade function receiving a local appender
    can still pass the internal one to the global internals. *)
 type ('columns, 'row) appender = { appender : ('columns, 'row) Request.appender @@ global }

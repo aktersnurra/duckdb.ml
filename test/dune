@@ -234,3 +234,7 @@
 (rule (alias runtest)
  (deps check_sql_types.sh ../lib/duckdb/duckdb.mli (glob_files sql_compile/*))
  (action (run bash %{dep:check_sql_types.sh} %{ocamlc})))
+(test (name test_schema) (modules test_schema) (libraries base duckdb duckdb-ffi))
+(rule (alias runtest)
+ (deps check_schema_types.sh ../lib/duckdb/duckdb.mli (glob_files schema_compile/*))
+ (action (run bash %{dep:check_schema_types.sh} %{ocamlc})))

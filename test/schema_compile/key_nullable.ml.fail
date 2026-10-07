@@ -1,0 +1,8 @@
+module D = Duckdb
+module S = D.Sql
+module T = D.Table
+let users = T.(declare "users" Columns.["id", int64; "email", string; "age", nullable int32]
+  ~row:(fun id email age -> (id, email, age))
+  ~constraints:(fun [id; _; _] -> Constraint.[ primary_key Key.[id] ]))
+let t = T.(declare "t" Columns.["a", nullable int64] ~row:(fun a -> a)
+  ~constraints:(fun [a] -> Constraint.[ unique Key.[a] ]))

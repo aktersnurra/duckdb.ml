@@ -14,6 +14,7 @@ type ('params, 'row, 'multiplicity) t =
    statement-cache entries. *)
 type ('columns, 'shape, 'row) table =
   Table_def : { schema : string; name : string; columns : ('columns, 'fn, 'row, 'shape) Columns.t; row : 'fn;
+                constraints : Table_constraint.t list;
                 select : (unit, 'row, many) t; insert : ('columns, unit, zero) t }
     -> ('columns, 'shape, 'row) table
 
@@ -29,9 +30,13 @@ val query : (_, _, _) t -> string
 (* A request built by [Sql]; its multiplicity comes from the query's structure. *)
 val generated : ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t -> row:'fn -> string -> ('params, 'row, 'm) t
 
-val declare_table : ?schema:string -> string -> ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn ->
-  ('columns, 'shape, 'row) table
+val declare_table : ?schema:string -> ?constraints:Table_constraint.t list -> string ->
+  ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn -> ('columns, 'shape, 'row) table
 val fields_of_columns : ('list, 'fn, 'result, _) Columns.t -> ('list, 'fn, 'result) Fields.t
+
+(* Matches declared names to catalog [(name, has_default)] rows: the catalog
+   position of each declared name, or [Unknown_column]/[Missing_column]. *)
+val check_declaration : string list -> (string * bool) list -> (int list, Failure.cause) Result.t
 
 (* A double-quoted SQL identifier. *)
 val quote : string -> string

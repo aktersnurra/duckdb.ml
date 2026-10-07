@@ -11,6 +11,7 @@ let cause_name : Duckdb.Error.cause -> string = function
   | Unbound_parameter _ -> "Unbound_parameter" | Parameter_count _ -> "Parameter_count"
   | Column_count _ -> "Column_count" | Parameter_schema_changed -> "Parameter_schema_changed"
   | Row_count _ -> "Row_count" | Unknown_column _ -> "Unknown_column" | Missing_column _ -> "Missing_column"
+  | Unknown_table _ -> "Unknown_table" | Constraint_mismatch _ -> "Constraint_mismatch"
   | Encode_rejected _ -> "Encode_rejected" | Decode_rejected _ -> "Decode_rejected"
   | Destination_exists -> "Destination_exists" | Unsupported_parquet_type _ -> "Unsupported_parquet_type"
   | Rollback_failed _ -> "Rollback_failed"

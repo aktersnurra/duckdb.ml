@@ -9,7 +9,7 @@ type grouped = private Grouped_kind
    instead of binding that query's same-named column or same-numbered
    parameter. *)
 type node =
-  | Column of { scope : int; quoted : string }
+  | Column of { scope : int; name : string }
   | Param of { scope : int; index : int; sql_type : string }
   | Literal of string
   | Apply of string * node list
@@ -22,17 +22,30 @@ type node =
 let next_scope = Stdlib.Atomic.make 0
 let fresh_scope () = Stdlib.Atomic.fetch_and_add next_scope 1
 let foreign () = invalid_arg "Duckdb.Sql: an expression from another query"
-let rec render ~columns ~params = function
-  | Column { scope; quoted } -> if scope <> columns then foreign () else "t0." ^ quoted
+(* [qualifier] prefixes column names: ["t0."] in queries, [""] in a table's
+   own CHECK and DEFAULT clauses. *)
+let rec render ?(qualifier = "t0.") ~columns ~params node =
+  let render = render ~qualifier ~columns ~params in
+  match node with
+  | Column { scope; name } -> if scope <> columns then foreign () else qualifier ^ Request.quote name
   | Param { scope; index; sql_type } ->
     if scope <> params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
   | Literal sql -> sql
-  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:(render ~columns ~params)) ^ ")"
-  | Infix (op, a, b) -> "(" ^ render ~columns ~params a ^ " " ^ op ^ " " ^ render ~columns ~params b ^ ")"
-  | Prefix (op, a) -> "(" ^ op ^ " " ^ render ~columns ~params a ^ ")"
-  | Postfix (a, op) -> "(" ^ render ~columns ~params a ^ " " ^ op ^ ")"
-  | Cast (a, sql_type) -> "CAST(" ^ render ~columns ~params a ^ " AS " ^ sql_type ^ ")"
+  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
+  | Infix (op, a, b) -> "(" ^ render a ^ " " ^ op ^ " " ^ render b ^ ")"
+  | Prefix (op, a) -> "(" ^ op ^ " " ^ render a ^ ")"
+  | Postfix (a, op) -> "(" ^ render a ^ " " ^ op ^ ")"
+  | Cast (a, sql_type) -> "CAST(" ^ render a ^ " AS " ^ sql_type ^ ")"
   | Count_star -> "count(*)"
+(* The column names a node mentions, without duplicates. *)
+let mentioned node =
+  let rec go acc = function
+    | Column { name; _ } -> if List.mem acc name ~equal:String.equal then acc else name :: acc
+    | Param _ | Literal _ | Count_star -> acc
+    | Apply (_, args) -> List.fold args ~init:acc ~f:go
+    | Infix (_, a, b) -> go (go acc a) b
+    | Prefix (_, a) | Postfix (a, _) | Cast (a, _) -> go acc a in
+  List.rev (go [] node)
 
 (* The SQL type a codec crosses the native boundary as. *)
 let sql_type : type a n. (a, n) Codec.t -> string = fun codec ->
@@ -42,6 +55,9 @@ let sql_type : type a n. (a, n) Codec.t -> string = fun codec ->
   Scalar.name scalar
 
 type ('a, 'n, 'k) expr = { node : node; codec : ('a, 'n) Codec.t }
+(* A declared table column, as table constraints bind it. *)
+type ('a, 'n) column = { scope : int; name : string; codec : ('a, 'n) Codec.t }
+let column (c : (_, _) column) = { node = Column { scope = c.scope; name = c.name }; codec = c.codec }
 type ('a, 'n) param = { scope : int; index : int; codec : ('a, 'n) Codec.t }
 type 'k order = { key : node; descending : bool }
 
@@ -109,7 +125,7 @@ let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> (s, row) 
   match columns with
   | Columns.[] -> Binders.[]
   | Columns.((name, codec) :: rest) ->
-    Binders.({ node = Column { scope; quoted = Request.quote name }; codec } :: binders rest ~scope)
+    Binders.({ node = Column { scope; name }; codec } :: binders rest ~scope)
 let from (Request.Table_def t : (_, _, _) Request.table) f =
   let scope = fresh_scope () in
   { target = Request.quote t.schema ^ "." ^ Request.quote t.name; scope; body = f (binders t.columns ~scope) }

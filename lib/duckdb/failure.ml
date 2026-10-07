@@ -15,6 +15,8 @@ type cause =
   | Parameter_schema_changed
   | Row_count of { expected : [ `One | `Zero_or_one ]; actual : [ `Zero | `More_than_one ] }
   | Unknown_column of { name : string } | Missing_column of { name : string }
+  | Unknown_table of { schema : string; name : string }
+  | Constraint_mismatch of { constraint_kind : string; expected : string; actual : string }
   | Encode_rejected of { index : int; reason : Base.Error.t }
   | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
   | Destination_exists | Unsupported_parquet_type of { column : int; actual : string }

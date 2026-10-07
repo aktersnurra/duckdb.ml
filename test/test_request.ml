@@ -7,6 +7,7 @@ let rec describe (e : D.Error.t) = match e.cause with
   | Native s -> "Native: " ^ s
   | Parameter_count _ -> "Parameter_count" | Row_count _ -> "Row_count"
   | Unknown_column _ -> "Unknown_column" | Missing_column _ -> "Missing_column"
+  | Unknown_table _ -> "Unknown_table" | Constraint_mismatch _ -> "Constraint_mismatch"
   | Encode_rejected _ -> "Encode_rejected" | Decode_rejected _ -> "Decode_rejected"
   | Rollback_failed { primary; _ } -> "Rollback_failed: " ^ describe primary
   | _ -> "other cause"

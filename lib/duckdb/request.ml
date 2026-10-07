@@ -15,6 +15,7 @@ type ('params, 'row, 'multiplicity) t =
    statement-cache entries. *)
 type ('columns, 'shape, 'row) table =
   Table_def : { schema : string; name : string; columns : ('columns, 'fn, 'row, 'shape) Columns.t; row : 'fn;
+                constraints : Table_constraint.t list;
                 select : (unit, 'row, many) t; insert : ('columns, unit, zero) t }
     -> ('columns, 'shape, 'row) table
 
@@ -266,14 +267,14 @@ let rec fields_of_columns : type l f r s. (l, f, r, s) Columns.t -> (l, f, r) Fi
   | Columns.((_, codec) :: columns) -> Fields.(codec :: fields_of_columns columns)
 let column_names = Columns.names
 let quote name = "\"" ^ String.substr_replace_all name ~pattern:"\"" ~with_:"\"\"" ^ "\""
-let declare_table ?(schema = "main") name columns ~row =
+let declare_table ?(schema = "main") ?(constraints = []) name columns ~row =
   let names = column_names columns and fields = fields_of_columns columns in
   let target = quote schema ^ "." ^ quote name in
   let listed = String.concat ~sep:", " (List.map names ~f:quote) in
   let select = many Fields.[] fields ~row ("SELECT " ^ listed ^ " FROM " ^ target) in
   let insert = exec fields ("INSERT INTO " ^ target ^ " (" ^ listed ^ ") VALUES ("
     ^ String.concat ~sep:", " (List.map names ~f:(fun _ -> "?")) ^ ")") in
-  Table_def { schema; name; columns; row; select; insert }
+  Table_def { schema; name; columns; row; constraints; select; insert }
 
 (* Typed appender: the declaration is checked against the catalog, in the
    appender's own transaction snapshot, before any row is accepted. *)

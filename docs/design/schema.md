@@ -1,6 +1,7 @@
 # Schema declarations (sub-project 3a)
 
-Status: approved design, 2026-10-07. Implements the first half of roadmap
+Status: approved design, 2026-10-07; refined while prototyping (see
+[Refinements](#refinements-found-while-prototyping)). Implements the first half of roadmap
 row 3 of the [core redesign](core-redesign.md): constraints on table
 declarations. Versioned migrations (3b) follow in their own design and build
 on this one.
@@ -144,21 +145,44 @@ only when called.
 
 ## Internals
 
-- `lib/duckdb/constraint.ml` (new): the typed `Table.column`, `Key` and
-  `Constraint` lists and their untyped form:
-  `Primary_key of string list | Unique of string list |
+- `lib/duckdb/table_constraint.ml` (new, no dependencies): the untyped,
+  rendered form `Primary_key of string list | Unique of string list |
   Foreign_key of { columns; table; references } | Check of { sql; columns } |
-  Default of { column; sql }`.
-- `Request.Table_def` gains `constraints : Constraint.t list`, built once in
-  `declare` by applying the callback to column binders.
-- `Sql` gains `column` and an unqualified rendering mode, and exposes the
-  set of columns an expression mentions (for CHECK verification and the
-  DEFAULT rule).
+  Default of { column; sql }`. `Request.Table_def` gains
+  `constraints : Table_constraint.t list`, built once in `declare`.
+- `lib/duckdb/table.ml`: the typed `Binders`, `Key` and `Constraint` (whose
+  values still carry each column's binding scope and unrendered
+  expressions), `declare` (binds the columns in a fresh scope, applies the
+  callback, checks and renders), `create`, `verify`, `lookup`.
+- `Sql` gains `type ('a, 'n) column` and `column` (a table column as a row
+  expression), a `?qualifier` on rendering (`""` in a table's own clauses),
+  and `mentioned` (the columns a node uses, for CHECK verification and the
+  DEFAULT rule). Column nodes now carry the raw name and quote at rendering.
 - `duckdb.mli`: `Sql` moves before `Table`, because constraints mention
   `Sql.expr`; `Sql.from` names its table type `Request.table`.
 - `Table.lookup` builds its SQL and calls `Request.generated` with the key's
   `Fields`.
 - `Error.cause` gains `Unknown_table` and `Constraint_mismatch`.
+
+## Refinements found while prototyping
+
+- The untyped constraint module is `Table_constraint`, not `Constraint`, so
+  that the public `Table.Constraint` does not shadow it inside `table.ml`.
+- `Table.column` is an alias of `Sql.column`: `Sql` is declared before
+  `Table`, so the column type lives there.
+- `verify` checks column types by preparing `SELECT <declared columns> …
+  LIMIT 0` and validating it like any request, instead of mapping catalog
+  type names: `duckdb_columns().data_type` spells some types differently
+  (`TIMESTAMP WITH TIME ZONE`) from the engine type ids the library checks.
+- `verify` reads the catalog with `match`, not `let*`: a `let*`
+  continuation cannot capture the local session.
+- Catalog column lists are read one name per row (`unnest`) and grouped by
+  `constraint_index`, since the codecs decode no LIST type.
+- Tests read the exact DDL from the error context of a second, failing
+  `create` (`Query sql`), without exposing the renderer.
+- Type errors in `~constraints` are often reported at a column codec in
+  `Columns.[…]`, because the declaration is inferred as a whole; the
+  messages still name both types.
 
 ## Verified DuckDB facts
 

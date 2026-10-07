@@ -103,6 +103,13 @@ module Error : sig
     (** A declared table column absent from the catalog. *)
     | Missing_column of { name : string }
     (** A catalog column without a default absent from the declaration. *)
+    | Unknown_table of { schema : string; name : string }
+    (** [Table.verify]: the declared table does not exist. *)
+    | Constraint_mismatch of { constraint_kind : string; expected : string; actual : string }
+    (** [Table.verify]: a declared constraint (["PRIMARY KEY"], ["UNIQUE"],
+        ["FOREIGN KEY"], ["CHECK"], ["DEFAULT"] or ["NOT NULL"]) differs from
+        the catalog. [expected] or [actual] is ["none"] for a constraint on one
+        side only. *)
     | Encode_rejected of { index : int; reason : Base.Error.t }
     (** A codec's encoder rejected the value at this one-based position: the
         parameter, or the column of an appended row or [append_columns]. *)
@@ -439,71 +446,6 @@ module Request : sig
     with type 'k owner = 'k session and type error = Error.t and type 'a future = 'a
 end
 
-(** A declared table: name, column names with codecs, and a row constructor. *)
-module Table : sig
-  (** ['shape] records each column's value type and nullability, from which
-      [Sql.from] types its column binders. *)
-  type ('columns, 'shape, 'row) t = ('columns, 'shape, 'row) Request.table
-  module Columns : sig
-    include module type of Codec.Values
-    type ('list, 'fn, 'result, 'shape) t =
-      | [] : (unit, 'result, 'result, unit) t
-      | (::) : (string * ('a, 'n) Codec.t) * ('list, 'fn, 'result, 'shape) t ->
-        ('a * 'list, 'a -> 'fn, 'result, ('a, 'n) Codec.slot * 'shape) t
-  end
-
-  (** Names are quoted, never spliced unquoted, and must be NUL-free (checked on
-      use). Columns are matched to the catalog by name in any order; omitted
-      catalog columns must have a default. Checked when an appender opens or a
-      generated request is first prepared. *)
-  val declare : ?schema:string -> string -> ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn ->
-    ('columns, 'shape, 'row) t
-
-  (** SELECT of exactly the declared columns, decoded by the declared row. *)
-  val select : (_, _, 'row) t -> (unit, 'row, Request.many) Request.t
-
-  (** INSERT of exactly the declared columns; omitted columns take defaults. *)
-  val insert : ('columns, _, _) t -> ('columns, unit, Request.zero) Request.t
-
-  type ('columns, 'row) appender
-
-  (** Opens an appender on the declared columns and checks them against the
-      catalog before any row is accepted. The appender holds the transaction
-      snapshot and reserves the connection until the scope exits; other token
-      operations return Busy. Generated-column or very wide (metadata larger
-      than one native chunk) tables are rejected. Given a connection, the scope
-      owns BEGIN/COMMIT/ROLLBACK; given a transaction, it never settles it.
-      Callback errors/exceptions/effect denial poison settlement. On success
-      the scope flushes and closes; it never commits a transaction it does not
-      own. *)
-  val with_appender : _ session @ local -> ('columns, _, 'row) t ->
-    f:(('columns, 'row) appender @ local -> ('a, Error.t) result) -> ('a, Error.t) result
-
-  (** One admission for a complete batch, validated before any native row
-      mutation. A codec rejection rejects the batch without native work. An
-      engine error (including an automatic flush), invalid UTF-8 in a VARCHAR
-      value, interrupted native work, or a [None] in a NOT NULL column poisons
-      this appender and the transaction;
-      later operations return the first error. *)
-  val append : ('columns, _) appender @ local -> 'columns Args.t list -> (unit, Error.t) result
-
-  (** Appends whole columns. The column list is typed by the declaration;
-      columns with a custom codec are rejected at runtime. Checks run column
-      by column in column order, and within a column: length
-      ([Length_mismatch] against the first column), mask length, custom codec
-      ([Encode_rejected]), engine type other than the catalog's
-      ([Type_mismatch]), a NULL mask entry in a NOT NULL column ([Null], with
-      the zero-based row). All run before any native work and leave the
-      appender usable (the enclosing scope still rolls back if [f] returns the
-      error). The rows are then staged and appended slice by slice (one
-      vector each) in one admission; an engine failure, invalid UTF-8 in a
-      VARCHAR value or interrupted native work poisons as [append]. *)
-  val append_columns : ('columns, _) appender @ local -> 'columns Bulk.Columns.t -> (unit, Error.t) result
-
-  (** Explicit flush; an engine error poisons as [append]. *)
-  val flush : (_, _) appender @ local -> (unit, Error.t) result
-end
-
 (** Typed single-table SELECT queries. A query is built from typed
     expressions and compiles to an ordinary [Request.t]:
 
@@ -533,6 +475,11 @@ module Sql : sig
   (** An expression decoding to ['a] when selected, with nullability ['n]
       ([Codec.non_null] or [Codec.nullable]) and kind ['k]. *)
   type ('a, 'n, +'k) expr
+
+  (** A declared table column, as [Table.declare ~constraints] binds it;
+      [column] makes it a row expression, e.g. for a CHECK. *)
+  type ('a, 'n) column
+  val column : ('a, 'n) column -> ('a, 'n, row) expr
 
   (** A bound query parameter; [param] makes it an expression of any kind. *)
   type ('a, 'n) param
@@ -583,7 +530,7 @@ module Sql : sig
   val query : ('params, 'shape) Params.t -> ('shape Bound.t -> ('row, 'm) source) -> ('params, 'row, 'm) Request.t
 
   (** Binds the table's columns as row expressions, in declaration order. *)
-  val from : (_, 'shape, _) Table.t -> (('shape, row) Binders.t -> ('row, row, 'm) body) -> ('row, 'm) source
+  val from : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('row, row, 'm) body) -> ('row, 'm) source
 
   (** Any number of rows. [~where] filters rows; [~having] filters groups and
       belongs inside [group_by]. *)
@@ -721,6 +668,134 @@ module Sql : sig
     val ( *. ) : (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr
     val ( /. ) : (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr
   end
+end
+
+(** A declared table: name, column names with codecs, and a row constructor. *)
+module Table : sig
+  (** ['shape] records each column's value type and nullability, from which
+      [Sql.from] types its column binders. *)
+  type ('columns, 'shape, 'row) t = ('columns, 'shape, 'row) Request.table
+  module Columns : sig
+    include module type of Codec.Values
+    type ('list, 'fn, 'result, 'shape) t =
+      | [] : (unit, 'result, 'result, unit) t
+      | (::) : (string * ('a, 'n) Codec.t) * ('list, 'fn, 'result, 'shape) t ->
+        ('a * 'list, 'a -> 'fn, 'result, ('a, 'n) Codec.slot * 'shape) t
+  end
+
+  (** A column as [~constraints] binds it. *)
+  type ('a, 'n) column = ('a, 'n) Sql.column
+
+  (** The declaration's columns, as [~constraints] and [lookup] bind them. *)
+  module Binders : sig
+    type 'shape t =
+      | [] : unit t
+      | (::) : ('a, 'n) column * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+  end
+
+  (** A key: non-null columns. ['key] is the tuple of their values, a
+      [lookup]'s parameters. *)
+  module Key : sig
+    type 'key t =
+      | [] : unit t
+      | (::) : ('a, Codec.non_null) column * 'key t -> ('a * 'key) t
+  end
+
+  (** Table constraints. NOT NULL is not declared: a non-null codec makes a
+      NOT NULL column. Misuse that types cannot express raises
+      [Invalid_argument] when the declaration is built: two primary keys, a
+      column from another declaration, a default that mentions a column, a
+      foreign key to an undeclared key or to another schema. *)
+  module Constraint : sig
+    type t
+    val primary_key : _ Key.t -> t
+    val unique : _ Key.t -> t
+
+    (** [references] binds the referenced table's columns and names its
+        declared primary or unique key, in the same schema. DuckDB rejects
+        any UPDATE of a referenced row, even of non-key columns, while it is
+        referenced. A table cannot reference itself. *)
+    val foreign_key : 'key Key.t -> references:((_, 'shape, _) Request.table * ('shape Binders.t -> 'key Key.t)) -> t
+
+    (** A literal at the column's type and nullability, e.g.
+        [Sql.(nullable (int32 18l))] for a nullable column. *)
+    val default : ('a, 'n) column -> ('a, 'n, _) Sql.expr -> t
+
+    (** Fails on false and on NULL. *)
+    val check : (bool, Codec.non_null, Sql.row) Sql.expr -> t
+
+    (** SQL's own rule: fails on false, NULL passes. *)
+    val check_null : (bool option, Codec.nullable, Sql.row) Sql.expr -> t
+  end
+
+  (** Names are quoted, never spliced unquoted, and must be NUL-free (checked on
+      use). Columns are matched to the catalog by name in any order; omitted
+      catalog columns must have a default. Checked when an appender opens or a
+      generated request is first prepared.
+      [~constraints] binds the columns and lists the table's constraints. *)
+  val declare : ?schema:string -> ?constraints:('shape Binders.t -> Constraint.t list) -> string ->
+    ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn -> ('columns, 'shape, 'row) t
+
+  (** SELECT of exactly the declared columns, decoded by the declared row. *)
+  val select : (_, _, 'row) t -> (unit, 'row, Request.many) Request.t
+
+  (** INSERT of exactly the declared columns; omitted columns take defaults. *)
+  val insert : ('columns, _, _) t -> ('columns, unit, Request.zero) Request.t
+
+  (** The declared columns of the row whose key equals the parameters. The
+      key must be the declared primary key or a declared unique key
+      ([Invalid_argument] otherwise). *)
+  val lookup : (_, 'shape, 'row) t -> ('shape Binders.t -> 'key Key.t) -> ('key, 'row, Request.zero_or_one) Request.t
+
+  (** CREATE TABLE with the declared columns and constraints; an existing
+      table is a native error. *)
+  val create : _ session @ local -> (_, _, _) t -> (unit, Error.t) result
+
+  (** Read-only check of an existing table against the declaration, in the
+      session's snapshot; the first difference wins: [Unknown_table]; column
+      names ([Unknown_column], [Missing_column]) and types ([Type_mismatch]);
+      then [Constraint_mismatch] for nullability, PRIMARY KEY, UNIQUE and
+      FOREIGN KEY (exact column sets, both ways), CHECK (by column set) and
+      DEFAULT (by presence). *)
+  val verify : _ session @ local -> (_, _, _) t -> (unit, Error.t) result
+
+  type ('columns, 'row) appender
+
+  (** Opens an appender on the declared columns and checks them against the
+      catalog before any row is accepted. The appender holds the transaction
+      snapshot and reserves the connection until the scope exits; other token
+      operations return Busy. Generated-column or very wide (metadata larger
+      than one native chunk) tables are rejected. Given a connection, the scope
+      owns BEGIN/COMMIT/ROLLBACK; given a transaction, it never settles it.
+      Callback errors/exceptions/effect denial poison settlement. On success
+      the scope flushes and closes; it never commits a transaction it does not
+      own. *)
+  val with_appender : _ session @ local -> ('columns, _, 'row) t ->
+    f:(('columns, 'row) appender @ local -> ('a, Error.t) result) -> ('a, Error.t) result
+
+  (** One admission for a complete batch, validated before any native row
+      mutation. A codec rejection rejects the batch without native work. An
+      engine error (including an automatic flush), invalid UTF-8 in a VARCHAR
+      value, interrupted native work, or a [None] in a NOT NULL column poisons
+      this appender and the transaction;
+      later operations return the first error. *)
+  val append : ('columns, _) appender @ local -> 'columns Args.t list -> (unit, Error.t) result
+
+  (** Appends whole columns. The column list is typed by the declaration;
+      columns with a custom codec are rejected at runtime. Checks run column
+      by column in column order, and within a column: length
+      ([Length_mismatch] against the first column), mask length, custom codec
+      ([Encode_rejected]), engine type other than the catalog's
+      ([Type_mismatch]), a NULL mask entry in a NOT NULL column ([Null], with
+      the zero-based row). All run before any native work and leave the
+      appender usable (the enclosing scope still rolls back if [f] returns the
+      error). The rows are then staged and appended slice by slice (one
+      vector each) in one admission; an engine failure, invalid UTF-8 in a
+      VARCHAR value or interrupted native work poisons as [append]. *)
+  val append_columns : ('columns, _) appender @ local -> 'columns Bulk.Columns.t -> (unit, Error.t) result
+
+  (** Explicit flush; an engine error poisons as [append]. *)
+  val flush : (_, _) appender @ local -> (unit, Error.t) result
 end
 
 module Parquet : sig
