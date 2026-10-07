@@ -66,8 +66,6 @@ let[@zero_alloc] rec sum_required (v @ local) i n acc =
   if i = n then acc else sum_required v (i + 1) n (I64.add acc (C.int64 v i))
 let[@zero_alloc] rec sum_nullable (v @ local) i n acc =
   if i = n then acc else sum_nullable v (i + 1) n (I64.add acc (C.int64_or v ~default:#0L i))
-let rec count_nulls (v @ local) i n acc =
-  if i = n then acc else count_nulls v (i + 1) n (if C.is_null v i then acc + 1 else acc)
 
 let column_views prepared () =
   fail_error (Duckdb.Statement.fold_chunks prepared ~init:{ rows = 0; nulls = 0; checksum = 0L }
@@ -78,7 +76,7 @@ let column_views prepared () =
                   | C.Opened a, C.Opened b ->
                     let n = C.length a in
                     Ok (Duckdb.Continue
-                          { rows = totals.rows + n; nulls = totals.nulls + count_nulls b 0 n 0
+                          { rows = totals.rows + n; nulls = totals.nulls + C.null_count b
                           ; checksum = Int64.(totals.checksum + I64.to_int64 (sum_required a 0 n #0L)
                                               + I64.to_int64 (sum_nullable b 0 n #0L)) })))
 

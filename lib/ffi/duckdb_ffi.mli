@@ -174,6 +174,19 @@ external view_int16 : prepared @ local -> int -> int -> int = "ml_duckdb_view_in
 external view_int8 : prepared @ local -> int -> int -> int = "ml_duckdb_view_int8" [@@noalloc]
 external view_bool : prepared @ local -> int -> int -> bool = "ml_duckdb_view_bool" [@@noalloc]
 external view_valid : prepared @ local -> int -> int -> bool = "ml_duckdb_view_valid" [@@noalloc]
+(* One call per nullable read: the value, or [default] at a NULL row. *)
+external view_int64_or : prepared @ local -> int -> int -> int64# -> int64#
+  = "ml_duckdb_view_int64_or_byte" "ml_duckdb_view_int64_or" [@@noalloc]
+external view_int32_or : prepared @ local -> int -> int -> int32# -> int32#
+  = "ml_duckdb_view_int32_or_byte" "ml_duckdb_view_int32_or" [@@noalloc]
+external view_double_or : prepared @ local -> int -> int -> float# -> float#
+  = "ml_duckdb_view_double_or_byte" "ml_duckdb_view_double_or" [@@noalloc]
+external view_float_or : prepared @ local -> int -> int -> float32# -> float32#
+  = "ml_duckdb_view_float_or_byte" "ml_duckdb_view_float_or" [@@noalloc]
+external view_int16_or : prepared @ local -> int -> int -> int -> int = "ml_duckdb_view_int16_or" [@@noalloc]
+external view_int8_or : prepared @ local -> int -> int -> int -> int = "ml_duckdb_view_int8_or" [@@noalloc]
+external view_bool_or : prepared @ local -> int -> int -> bool -> bool = "ml_duckdb_view_bool_or" [@@noalloc]
+external view_null_count : prepared @ local -> int -> int -> int = "ml_duckdb_view_null_count" [@@noalloc]
 external view_first_null : prepared @ local -> int -> int -> int = "ml_duckdb_view_first_null" [@@noalloc]
 external view_blit : prepared @ local -> int -> int -> ('a, 'b, Bigarray.c_layout) Bigarray.Array1.t @ local -> int -> unit
   = "ml_duckdb_view_blit" [@@noalloc]

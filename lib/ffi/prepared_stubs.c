@@ -8,8 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define Prepared(v) (*((prepared_owner **)Data_custom_val(v)))
-prepared_owner *duckdb_ml_prepared(value v) { return Prepared(v); }
+#define Prepared(v) DUCKDB_ML_PREPARED_SLOT(v)
 static void set_error(prepared_owner *p, const char *text) {
     p->status = DUCKDB_ML_STATUS_ERROR; snprintf(p->message, sizeof(p->message), "%s", text ? text : "DuckDB operation failed");
 }

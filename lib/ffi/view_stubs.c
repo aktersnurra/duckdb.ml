@@ -11,35 +11,89 @@
    element read or blit whose width differs from the column's. A read of the
    right width but another type of the same width reinterprets bits but stays
    in bounds. */
-static duckdb_ml_vector *cached(value v, value column, idx_t *rows) {
+static inline duckdb_ml_vector *cached(value v, value column, idx_t *rows) {
     prepared_owner *p = duckdb_ml_prepared(v); intnat c = Long_val(column);
     if (!(p && p->chunk && c >= 0 && (idx_t)c < p->vector_count)) return NULL;
     *rows = p->chunk_rows; return &p->vectors[c];
 }
-/* The column's cache entry when [row] lies in [0, chunk_rows), else NULL. */
-static duckdb_ml_vector *cached_row(value v, value column, value row) {
-    idx_t rows = 0; duckdb_ml_vector *x = cached(v, column, &rows); intnat i = Long_val(row);
-    return (x && i >= 0 && (idx_t)i < rows) ? x : NULL;
-}
-static int valid_row(duckdb_ml_vector *x, intnat i) {
+static inline int valid_row(duckdb_ml_vector *x, intnat i) {
     return !x->validity || ((x->validity[i / 64] >> (i % 64)) & 1);
 }
-/* [x] must also store elements of exactly sizeof(T) bytes. */
-#define READ(T, x, i) (((x) && (x)->width == sizeof(T)) ? ((T *)(x)->data)[i] : (T)0)
-int64_t ml_duckdb_view_int64(value v, value c, value i) { return READ(int64_t, cached_row(v, c, i), Long_val(i)); }
+/* The column's cache entry when [i] lies in [0, chunk_rows) and its elements
+   are exactly [width] bytes, else NULL. Evaluated once per read. */
+static inline duckdb_ml_vector *readable(value v, value column, intnat i, size_t width) {
+    idx_t rows = 0; duckdb_ml_vector *x = cached(v, column, &rows);
+    return (x && i >= 0 && (idx_t)i < rows && x->width == width) ? x : NULL;
+}
+/* [read_T] yields 0 for a refused read; [read_T_or] yields [d] for a refused
+   read or a NULL row. */
+#define READS(T, name) \
+    static inline T read_##name(value v, value c, intnat i) { \
+        duckdb_ml_vector *x = readable(v, c, i, sizeof(T)); return x ? ((T *)x->data)[i] : (T)0; } \
+    static inline T read_##name##_or(value v, value c, intnat i, T d) { \
+        duckdb_ml_vector *x = readable(v, c, i, sizeof(T)); return (x && valid_row(x, i)) ? ((T *)x->data)[i] : d; }
+READS(int64_t, int64)
+READS(int32_t, int32)
+READS(double, double)
+READS(float, float)
+READS(int16_t, int16)
+READS(int8_t, int8)
+READS(uint8_t, byte)
+int64_t ml_duckdb_view_int64(value v, value c, value i) { return read_int64(v, c, Long_val(i)); }
 value ml_duckdb_view_int64_byte(value v, value c, value i) { return caml_copy_int64(ml_duckdb_view_int64(v, c, i)); }
-int32_t ml_duckdb_view_int32(value v, value c, value i) { return READ(int32_t, cached_row(v, c, i), Long_val(i)); }
+int32_t ml_duckdb_view_int32(value v, value c, value i) { return read_int32(v, c, Long_val(i)); }
 value ml_duckdb_view_int32_byte(value v, value c, value i) { return caml_copy_int32(ml_duckdb_view_int32(v, c, i)); }
-double ml_duckdb_view_double(value v, value c, value i) { return READ(double, cached_row(v, c, i), Long_val(i)); }
+double ml_duckdb_view_double(value v, value c, value i) { return read_double(v, c, Long_val(i)); }
 value ml_duckdb_view_double_byte(value v, value c, value i) { return caml_copy_double(ml_duckdb_view_double(v, c, i)); }
-float ml_duckdb_view_float(value v, value c, value i) { return READ(float, cached_row(v, c, i), Long_val(i)); }
+float ml_duckdb_view_float(value v, value c, value i) { return read_float(v, c, Long_val(i)); }
 value ml_duckdb_view_float_byte(value v, value c, value i) { return caml_copy_float32(ml_duckdb_view_float(v, c, i)); }
-value ml_duckdb_view_int16(value v, value c, value i) { return Val_long(READ(int16_t, cached_row(v, c, i), Long_val(i))); }
-value ml_duckdb_view_int8(value v, value c, value i) { return Val_long(READ(int8_t, cached_row(v, c, i), Long_val(i))); }
+value ml_duckdb_view_int16(value v, value c, value i) { return Val_long(read_int16(v, c, Long_val(i))); }
+value ml_duckdb_view_int8(value v, value c, value i) { return Val_long(read_int8(v, c, Long_val(i))); }
 /* Loaded as a byte: a non-0/1 byte must not be read as a C bool. */
-value ml_duckdb_view_bool(value v, value c, value i) { return Val_bool(READ(uint8_t, cached_row(v, c, i), Long_val(i)) != 0); }
+value ml_duckdb_view_bool(value v, value c, value i) { return Val_bool(read_byte(v, c, Long_val(i)) != 0); }
 value ml_duckdb_view_valid(value v, value c, value i) {
-    duckdb_ml_vector *x = cached_row(v, c, i); return Val_bool(x && valid_row(x, Long_val(i)));
+    intnat r = Long_val(i); idx_t rows = 0; duckdb_ml_vector *x = cached(v, c, &rows);
+    return Val_bool(x && r >= 0 && (idx_t)r < rows && valid_row(x, r));
+}
+/* One call per nullable read: the value, or [d] at a NULL row or a refused
+   read. */
+int64_t ml_duckdb_view_int64_or(value v, value c, value i, int64_t d) { return read_int64_or(v, c, Long_val(i), d); }
+value ml_duckdb_view_int64_or_byte(value v, value c, value i, value d) {
+    return caml_copy_int64(read_int64_or(v, c, Long_val(i), Int64_val(d)));
+}
+int32_t ml_duckdb_view_int32_or(value v, value c, value i, int32_t d) { return read_int32_or(v, c, Long_val(i), d); }
+value ml_duckdb_view_int32_or_byte(value v, value c, value i, value d) {
+    return caml_copy_int32(read_int32_or(v, c, Long_val(i), Int32_val(d)));
+}
+double ml_duckdb_view_double_or(value v, value c, value i, double d) { return read_double_or(v, c, Long_val(i), d); }
+value ml_duckdb_view_double_or_byte(value v, value c, value i, value d) {
+    return caml_copy_double(read_double_or(v, c, Long_val(i), Double_val(d)));
+}
+float ml_duckdb_view_float_or(value v, value c, value i, float d) { return read_float_or(v, c, Long_val(i), d); }
+value ml_duckdb_view_float_or_byte(value v, value c, value i, value d) {
+    return caml_copy_float32(read_float_or(v, c, Long_val(i), Float32_val(d)));
+}
+value ml_duckdb_view_int16_or(value v, value c, value i, value d) {
+    return Val_long(read_int16_or(v, c, Long_val(i), (int16_t)Long_val(d)));
+}
+value ml_duckdb_view_int8_or(value v, value c, value i, value d) {
+    return Val_long(read_int8_or(v, c, Long_val(i), (int8_t)Long_val(d)));
+}
+value ml_duckdb_view_bool_or(value v, value c, value i, value d) {
+    return Val_bool(read_byte_or(v, c, Long_val(i), Bool_val(d) ? 1 : 0) != 0);
+}
+/* NULL rows among the first [length] rows of the cached chunk (clamped to
+   it); 0 without a cache entry or a validity mask. */
+value ml_duckdb_view_null_count(value v, value c, value length) {
+    idx_t rows = 0; duckdb_ml_vector *x = cached(v, c, &rows); intnat n = Long_val(length), count = 0;
+    if (!x || !x->validity) return Val_long(0);
+    if (n > (intnat)rows) n = (intnat)rows;
+    for (intnat w = 0; w * 64 < n; ++w) {
+        intnat in_word = n - w * 64 < 64 ? n - w * 64 : 64;
+        uint64_t wanted = in_word == 64 ? UINT64_MAX : ((UINT64_C(1) << in_word) - 1);
+        count += __builtin_popcountll(~x->validity[w] & wanted);
+    }
+    return Val_long(count);
 }
 /* First NULL row in [0, length), or -1. Scans the mask a word at a time. */
 value ml_duckdb_view_first_null(value v, value c, value length) {

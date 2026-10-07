@@ -3,6 +3,7 @@
 #define DUCKDB_API_NO_DEPRECATED
 #include <duckdb.h>
 #include <caml/mlvalues.h>
+#include <caml/custom.h>
 /* Private native seam. A child retains its parent's stable shell independently
    of OCaml finalization order. Safe-layer admission owns serialization. */
 typedef struct connection_owner connection_owner;
@@ -78,5 +79,8 @@ typedef struct prepared_owner {
     idx_t vector_count;
     idx_t chunk_rows; /* rows of [chunk] behind the cache; 0 without one */
 } prepared_owner;
-prepared_owner *duckdb_ml_prepared(value v);
+/* The owner behind a prepared custom block; inline so per-value view reads
+   do not pay a cross-file call. */
+#define DUCKDB_ML_PREPARED_SLOT(v) (*((prepared_owner **)Data_custom_val(v)))
+static inline prepared_owner *duckdb_ml_prepared(value v) { return DUCKDB_ML_PREPARED_SLOT(v); }
 #endif

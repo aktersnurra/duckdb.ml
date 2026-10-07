@@ -37,13 +37,16 @@ let[@zero_alloc] int8 (v @ local) i = check v i; I8.of_int (F.view_int8 v.native
 let[@zero_alloc] bool (v @ local) i = check v i; F.view_bool v.native v.column i
 let string (v @ local) i = check v i; F.chunk_string v.native v.column i
 let[@zero_alloc] is_null (v @ local) i = check v i; not (F.view_valid v.native v.column i)
-let[@zero_alloc] int64_or (v @ local) ~default i = if is_null v i then default else F.view_int64 v.native v.column i
-let[@zero_alloc] float_or (v @ local) ~default i = if is_null v i then default else F.view_double v.native v.column i
-let[@zero_alloc] int32_or (v @ local) ~default i = if is_null v i then default else F.view_int32 v.native v.column i
-let[@zero_alloc] float32_or (v @ local) ~default i = if is_null v i then default else F.view_float v.native v.column i
-let[@zero_alloc] int16_or (v @ local) ~default i = if is_null v i then default else I16.of_int (F.view_int16 v.native v.column i)
-let[@zero_alloc] int8_or (v @ local) ~default i = if is_null v i then default else I8.of_int (F.view_int8 v.native v.column i)
-let[@zero_alloc] bool_or (v @ local) ~default i = if is_null v i then default else F.view_bool v.native v.column i
+let[@zero_alloc] null_count (v @ local) = F.view_null_count v.native v.column v.length
+let[@zero_alloc] int64_or (v @ local) ~default i = check v i; F.view_int64_or v.native v.column i default
+let[@zero_alloc] float_or (v @ local) ~default i = check v i; F.view_double_or v.native v.column i default
+let[@zero_alloc] int32_or (v @ local) ~default i = check v i; F.view_int32_or v.native v.column i default
+let[@zero_alloc] float32_or (v @ local) ~default i = check v i; F.view_float_or v.native v.column i default
+let[@zero_alloc] int16_or (v @ local) ~default i =
+  check v i; I16.of_int (F.view_int16_or v.native v.column i (I16.to_int default))
+let[@zero_alloc] int8_or (v @ local) ~default i =
+  check v i; I8.of_int (F.view_int8_or v.native v.column i (I8.to_int default))
+let[@zero_alloc] bool_or (v @ local) ~default i = check v i; F.view_bool_or v.native v.column i default
 let string_opt (v @ local) i = if is_null v i then None else Some (F.chunk_string v.native v.column i)
 let[@inline] room ~message (v @ local) into ~pos =
   if pos < 0 || pos > Bigarray.Array1.dim into - v.length then invalid_arg message

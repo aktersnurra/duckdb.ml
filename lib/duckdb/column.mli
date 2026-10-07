@@ -13,6 +13,8 @@ val int8 : (int8, Codec.non_null) t @ local -> int -> int8 [@@zero_alloc]
 val bool : (bool, Codec.non_null) t @ local -> int -> bool [@@zero_alloc]
 val string : (string, Codec.non_null) t @ local -> int -> string
 val is_null : (_, Codec.nullable) t @ local -> int -> bool [@@zero_alloc]
+(* NULL rows in the view, by one scan of its validity mask; 0 without one. *)
+val null_count : (_, Codec.nullable) t @ local -> int [@@zero_alloc]
 val int64_or : (int64, Codec.nullable) t @ local -> default:int64# -> int -> int64# [@@zero_alloc]
 val float_or : (float, Codec.nullable) t @ local -> default:float# -> int -> float# [@@zero_alloc]
 val int32_or : (int32, Codec.nullable) t @ local -> default:int32# -> int -> int32# [@@zero_alloc]
