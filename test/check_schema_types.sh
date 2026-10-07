@@ -35,3 +35,4 @@ expect default_nullability 'Type "int64 option" is not compatible with type "int
 expect check_nullable 'Type "bool option" is not compatible with type "bool"'
 expect find_lookup '"Duckdb.Request.zero_or_one"' '[< `One ]'
 expect binder_arity 'is not compatible with type "unit"' 'Duckdb.Codec.slot'
+expect default_aggregate 'Duckdb.Sql.grouped' 'Duckdb.Sql.row'

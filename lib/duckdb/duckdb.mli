@@ -470,9 +470,12 @@ end
     expression used outside the query that bound it (smuggled out through a
     reference) raises [Invalid_argument] when the other query is built.
     Checked on first prepare: names against the catalog, a declared parameter
-    the query never uses ([Parameter_count]), [~having] on a [select] outside
-    [group_by], and operators the base type does not support (a custom codec
-    over another type, or a BLOB). *)
+    the query never uses ([Parameter_count]), operators the base type does
+    not support (a custom codec over another type, or a BLOB), an empty
+    select list, and a negative [~limit] or [~offset]. [~having] on a
+    [select] outside [group_by] is rejected there too unless the select list
+    holds only literals and parameters, in which case DuckDB treats the table
+    as one group (0 or 1 rows, which [many] admits). *)
 module Sql : sig
   (** Expression kinds: a value per table row, or per group. *)
   type row
@@ -544,7 +547,9 @@ module Sql : sig
     ?order_by:'k order list -> ?limit:int -> ?offset:int -> ('list, 'fn, 'row, 'k) Exprs.t -> row:'fn ->
     ('row, 'k, Request.many) body
 
-  (** Aggregates without GROUP BY: exactly one row. *)
+  (** Aggregates without GROUP BY: exactly one row. A select list without
+      any aggregate raises [Invalid_argument] when built (it would return a
+      row per table row). *)
   val aggregate : ?where:(bool, Codec.non_null, row) expr -> ('list, 'fn, 'row, grouped) Exprs.t -> row:'fn ->
     ('row, row, Request.one) body
 
@@ -556,8 +561,11 @@ module Sql : sig
   val asc : (_, _, 'k) expr -> 'k order
   val desc : (_, _, 'k) expr -> 'k order
 
-  (** Literals render as typed SQL. Values of custom-codec types enter a
-      query as parameters. *)
+  (** Literals render as typed SQL ([CAST(… AS …)]). Values of custom-codec
+      types enter a query as parameters: comparing a custom-codec column with
+      a literal of its OCaml type compares the unencoded literal with the
+      encoded column. A [string] containing NUL fails with [Embedded_nul];
+      pass such values as parameters. *)
   val bool : bool -> (bool, Codec.non_null, 'k) expr
   val int8 : int8 -> (int8, Codec.non_null, 'k) expr
   val int16 : int16 -> (int16, Codec.non_null, 'k) expr
@@ -725,7 +733,7 @@ module Table : sig
 
     (** A literal at the column's type and nullability, e.g.
         [Sql.(nullable (int32 18l))] for a nullable column. *)
-    val default : ('a, 'n) column -> ('a, 'n, _) Sql.expr -> t
+    val default : ('a, 'n) column -> ('a, 'n, Sql.row) Sql.expr -> t
 
     (** Fails on false and on NULL. *)
     val check : (bool, Codec.non_null, Sql.row) Sql.expr -> t
@@ -760,9 +768,11 @@ module Table : sig
   (** Read-only check of an existing table against the declaration, in the
       session's snapshot; the first difference wins: [Unknown_table]; column
       names ([Unknown_column], [Missing_column]) and types ([Type_mismatch]);
-      then [Constraint_mismatch] for nullability, PRIMARY KEY, UNIQUE and
-      FOREIGN KEY (exact column sets, both ways), CHECK (by column set) and
-      DEFAULT (by presence). *)
+      then [Constraint_mismatch] for nullability, PRIMARY KEY and UNIQUE
+      (exact column sets, both ways), FOREIGN KEY (exact column pairs, both
+      ways), CHECK (by column set; the expression is not compared) and
+      DEFAULT (by presence). Names compare byte-exactly, and unique indexes
+      are not constraints. *)
   val verify : _ session @ local -> (_, _, _) t -> (unit, Error.t) result
 
   type ('columns, 'row) appender
@@ -807,9 +817,10 @@ end
 (** Versioned migrations: an ordered list of numbered steps, applied forward
     only, each in its own transaction with its bookkeeping row in
     ["main"."duckdb_ml_migrations"]. Run them on a synchronous connection,
-    e.g. at startup before opening an adapter pool. Two processes migrating
-    one database conflict on the bookkeeping key; the second gets the native
-    error and finds the steps applied when rerun. *)
+    e.g. at startup before opening an adapter pool. Two connections
+    migrating one database conflict on the bookkeeping key; the second gets
+    the native error and finds the steps applied when rerun (DuckDB's file
+    lock keeps a second process out). *)
 module Migration : sig
   type kind
   type step
@@ -831,8 +842,13 @@ module Migration : sig
 
   (** ADD COLUMN with the declared type and default; a non-null column is
       then set NOT NULL, which fails on a non-empty table without a default.
-      A column in a declared key, CHECK or foreign key raises
-      [Invalid_argument]: DuckDB cannot add one; recreate the table. *)
+      A column in a declared key, CHECK or foreign key, or whose default is
+      not a literal, raises [Invalid_argument]: DuckDB cannot add either.
+      Pass the declaration as it was when the step was written (a frozen
+      copy, e.g. [users_v2]), not the current one: the step's checksum
+      covers the declaration's structure, so a later change to the current
+      declaration would read as an edited step. The same holds for
+      [create]. *)
   val add_column : (_, 'shape, _) Table.t -> ('shape Table.Binders.t -> column) -> kind
 
   (** Name-based steps; identifiers are quoted, [schema] defaults to ["main"]. *)

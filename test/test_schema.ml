@@ -156,3 +156,27 @@ let () =
     ~constraints:(fun [o] -> Constraint.[ foreign_key Key.[o] ~references:(users, fun [id; _; _] -> Key.[id]) ])));
   invalid "lookup by an undeclared key" (fun () -> T.lookup posts (fun [_; owner; _] -> T.Key.[owner]));
   Stdlib.print_endline "schema: Invalid_argument for misuse at declare and lookup=ok"
+
+(* Review findings: a foreign key compares its column pairs, so a reference
+   permuted against the declaration is a difference; a permuted key cannot be
+   declared at all (DuckDB rejects it at CREATE). *)
+let parent = T.(declare "parent" Columns.["x", int64; "y", int64] ~row:(fun x y -> (x, y))
+  ~constraints:(fun [x; y] -> Constraint.[ primary_key Key.[x; y]; unique Key.[y; x] ]))
+let child = T.(declare "child" Columns.["a", int64; "b", int64] ~row:(fun a b -> (a, b))
+  ~constraints:(fun [a; b] -> Constraint.[ foreign_key Key.[a; b] ~references:(parent, fun [x; y] -> Key.[x; y]) ]))
+let () =
+  connected (fun c ->
+    ok (T.create c parent);
+    ddl c "CREATE TABLE child(a BIGINT NOT NULL, b BIGINT NOT NULL, FOREIGN KEY (a, b) REFERENCES parent (y, x))";
+    match T.verify c child with
+    | Error { D.Error.cause = Constraint_mismatch { constraint_kind = "FOREIGN KEY"; _ }; _ } -> ()
+    | Error e -> failwith ("permuted reference: " ^ describe e)
+    | Ok () -> failwith "permuted reference: verified");
+  connected (fun c -> ok (T.create c parent); ok (T.create c child); ok (T.verify c child));
+  let only_pk = T.(declare "only_pk" Columns.["x", int64; "y", int64] ~row:(fun x y -> (x, y))
+    ~constraints:(fun [x; y] -> Constraint.[ primary_key Key.[x; y] ])) in
+  invalid "reference permuted against the referenced key" (fun () ->
+    T.(declare "child" Columns.["a", int64; "b", int64] ~row:(fun a b -> (a, b))
+      ~constraints:(fun [a; b] -> Constraint.[
+        foreign_key Key.[a; b] ~references:(only_pk, fun [x; y] -> Key.[y; x]) ])));
+  Stdlib.print_endline "schema: foreign keys pair columns in order, in verify and at declare=ok"

@@ -139,3 +139,40 @@ let () =
      | Ok _ -> failwith "verify: passed");
     assert (Int64.equal (count c "SELECT count(*) FROM duckdb_ml_migrations") 2L));
   Stdlib.print_endline "migration: version order checked, verify after applying=ok"
+
+(* Review findings. add_column with non-string defaults (DuckDB's statement
+   extraction rejects CAST/TRUE in ADD COLUMN … DEFAULT): existing rows get
+   the typed values. A computed default cannot be added. A create step takes
+   a frozen declaration: changing the one it was applied with reads as an
+   edited step. *)
+let () =
+  let v1 = T.(declare "metrics" Columns.["id", int64] ~row:Fn.id) in
+  let v2 = T.(declare "metrics"
+    Columns.["id", int64; "n", int32; "ratio", float64; "flag", bool; "big", int64]
+    ~row:(fun id n ratio flag big -> (id, n, ratio, flag, big))
+    ~constraints:(fun [_; n; ratio; flag; big] -> Constraint.[
+      default n (S.int32 (-5l)); default ratio (S.float64 Float.nan); default flag (S.bool true);
+      default big (S.int64 Int64.min_value) ])) in
+  let steps = M.[
+    step 1 "create metrics" (create v1);
+    step 2 "seed" (sql "INSERT INTO metrics VALUES (1)");
+    step 3 "add n" (add_column v2 (fun [_; n; _; _; _] -> Column n));
+    step 4 "add ratio" (add_column v2 (fun [_; _; ratio; _; _] -> Column ratio));
+    step 5 "add flag" (add_column v2 (fun [_; _; _; flag; _] -> Column flag));
+    step 6 "add big" (add_column v2 (fun [_; _; _; _; big] -> Column big)) ] in
+  connected (fun c ->
+    assert (versions (ok (M.apply c steps ~verify:M.[ table v2 ])) [ 1; 2; 3; 4; 5; 6 ]);
+    match ok (R.Session.collect c (T.select v2) D.Args.[]) with
+    | [ (1L, -5l, ratio, true, big) ] -> assert (Float.is_nan ratio && Int64.equal big Int64.min_value)
+    | _ -> failwith "typed defaults");
+  invalid "computed default" (fun () ->
+    let computed = T.(declare "metrics" Columns.["id", int64; "n", int32] ~row:(fun id n -> (id, n))
+      ~constraints:(fun [_; n] -> Constraint.[ default n S.(I32.(int32 1l + int32 2l)) ])) in
+    M.add_column computed (fun [_; n] -> M.Column n));
+  connected (fun c ->
+    ignore (ok (M.apply c M.[ step 1 "create metrics" (create v1) ]));
+    match M.apply c M.[ step 1 "create metrics" (create v2) ] with
+    | Error { D.Error.cause = Migration_mismatch { version = 1; _ }; _ } -> ()
+    | Error e -> failwith ("changed declaration: " ^ describe e)
+    | Ok _ -> failwith "changed declaration: accepted");
+  Stdlib.print_endline "migration: typed literal defaults in add_column, computed default rejected, frozen declarations=ok"

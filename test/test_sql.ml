@@ -205,3 +205,29 @@ let () =
   rejected "parameter" (fun () -> S.(query Params.[int64] (fun [_] -> from other (fun [id] ->
     select Exprs.[id] ~row:Fn.id ~where:(id = Option.value_exn !parameter)))));
   Stdlib.print_endline "sql: an expression from another query is rejected when built=ok"
+
+(* Review findings: a select list without an aggregate is not one row;
+   operands must share a codec, so a string literal cannot meet a BLOB and a
+   plain literal cannot meet a custom codec's column. *)
+let () =
+  let rejected name build = match build () with
+    | exception Invalid_argument _ -> ()
+    | (_ : (unit, _, _) R.t) -> failwith (name ^ ": accepted") in
+  rejected "aggregate without an aggregate" (fun () ->
+    S.(query Params.[] (fun [] -> from users (fun [_; _; _] -> aggregate Exprs.[int64 7L] ~row:Fn.id))));
+  let blobs = T.(declare "blobs" Columns.["b", blob] ~row:Fn.id) in
+  rejected "string literal against a BLOB" (fun () ->
+    S.(query Params.[] (fun [] -> from blobs (fun [b] -> select Exprs.[b] ~row:Fn.id ~where:(b = string "\\xAA")))));
+  let cents = D.Codec.Values.custom ~encode:(fun n -> Or_error.return (Int64.( * ) n 100L))
+    ~decode:(fun n -> Or_error.return (Int64.( / ) n 100L)) D.Codec.Values.int64 in
+  let prices = T.(declare "prices" Columns.["price", cents] ~row:Fn.id) in
+  rejected "plain literal against a custom codec" (fun () ->
+    S.(query Params.[] (fun [] -> from prices (fun [p] -> select Exprs.[p] ~row:Fn.id ~where:(p = int64 2L)))));
+  rejected "coalesce of a custom codec with a plain literal" (fun () ->
+    let nullable_prices = T.(declare "prices" Columns.["price", nullable cents] ~row:Fn.id) in
+    S.(query Params.[] (fun [] -> from nullable_prices (fun [p] ->
+      select Exprs.[coalesce p ~default:(int64 0L)] ~row:Fn.id))));
+  (* The same custom codec on both sides, through a parameter, is accepted. *)
+  ignore (S.(query Params.[cents] (fun [limit] -> from prices (fun [p] ->
+    select Exprs.[p] ~row:Fn.id ~where:(p <= param limit)))));
+  Stdlib.print_endline "sql: aggregate needs an aggregate; operands share a codec=ok"

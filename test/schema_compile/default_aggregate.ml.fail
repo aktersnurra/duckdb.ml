@@ -1,0 +1,5 @@
+module D = Duckdb
+module S = D.Sql
+module T = D.Table
+let t = T.(declare "t" Columns.["n", int64] ~row:(fun n -> n)
+  ~constraints:(fun [n] -> Constraint.[ default n S.count_star ]))

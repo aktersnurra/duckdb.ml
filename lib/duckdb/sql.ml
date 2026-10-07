@@ -11,7 +11,9 @@ type grouped = private Grouped_kind
 type node =
   | Column of { scope : int; name : string }
   | Param of { scope : int; index : int; sql_type : string }
-  | Literal of string
+  (* [constant]: the value as a quoted SQL string constant, which DuckDB casts
+     to a column's type; used where only constants are accepted. *)
+  | Literal of { sql : string; constant : string }
   | Apply of string * node list
   | Infix of string * node * node
   | Prefix of string * node
@@ -30,7 +32,7 @@ let rec render ?(qualifier = "t0.") ~columns ~params node =
   | Column { scope; name } -> if scope <> columns then foreign () else qualifier ^ Request.quote name
   | Param { scope; index; sql_type } ->
     if scope <> params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
-  | Literal sql -> sql
+  | Literal { sql; _ } -> sql
   | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
   | Infix (op, a, b) -> "(" ^ render a ^ " " ^ op ^ " " ^ render b ^ ")"
   | Prefix (op, a) -> "(" ^ op ^ " " ^ render a ^ ")"
@@ -107,7 +109,19 @@ let body exprs ~row ~where ~group_by ~having ~order_by ~limit ~offset =
 
 let select ?where ?having ?(order_by = []) ?limit ?offset exprs ~row =
   body exprs ~row ~where ~group_by:[] ~having ~order_by ~limit ~offset
+(* Whether a node computes an aggregate. A select list of only literals and
+   parameters has no GROUP BY and no aggregate, so it would return a row per
+   table row. *)
+let rec aggregates = function
+  | Count_star -> true
+  | Apply (("count" | "sum" | "min" | "max" | "avg"), _) -> true
+  | Apply (_, args) -> List.exists args ~f:aggregates
+  | Infix (_, a, b) -> aggregates a || aggregates b
+  | Prefix (_, a) | Postfix (a, _) | Cast (a, _) -> aggregates a
+  | Column _ | Param _ | Literal _ -> false
 let aggregate ?where exprs ~row =
+  if not (List.exists (nodes_of_exprs exprs) ~f:aggregates) then
+    invalid_arg "Duckdb.Sql.aggregate: the select list needs an aggregate";
   body exprs ~row ~where ~group_by:[] ~having:None ~order_by:[] ~limit:None ~offset:None
 let rec key_nodes : type s. s Keys.t -> node list = function
   | Keys.[] -> []
@@ -166,28 +180,55 @@ let param (p : (_, _) param) =
 let asc (e : _ expr) = { key = e.node; descending = false }
 let desc (e : _ expr) = { key = e.node; descending = true }
 
-let literal codec sql = { node = Literal sql; codec }
-let typed scalar text = Printf.sprintf "CAST(%s AS %s)" text (Scalar.name scalar)
+let literal codec ~sql ~constant = { node = Literal { sql; constant }; codec }
+let quote_string s = "'" ^ String.substr_replace_all s ~pattern:"'" ~with_:"''" ^ "'"
+(* [text] is a SQL numeric literal or a quoted string; the constant spelling
+   quotes it. *)
+let typed codec scalar text =
+  let constant = if String.is_prefix text ~prefix:"'" then text else quote_string text in
+  literal codec ~sql:(Printf.sprintf "CAST(%s AS %s)" text (Scalar.name scalar)) ~constant
 (* Doubles print with enough digits to round-trip; DuckDB parses the
    non-finite spellings from strings. *)
 let float_text f =
   if Float.is_nan f then "'nan'"
   else if Float.is_inf f then if Float.(f > 0.) then "'inf'" else "'-inf'"
   else "'" ^ Printf.sprintf "%.17g" f ^ "'"
-let bool b = literal Codec.Values.bool (if b then "TRUE" else "FALSE")
-let int8 v = literal Codec.Values.int8 (typed Scalar.Int8 (Int.to_string (Stdlib_stable.Int8.to_int v)))
-let int16 v = literal Codec.Values.int16 (typed Scalar.Int16 (Int.to_string (Stdlib_stable.Int16.to_int v)))
-let int32 v = literal Codec.Values.int32 (typed Scalar.Int32 (Int32.to_string v))
-let int64 v = literal Codec.Values.int64 (typed Scalar.Int64 (Int64.to_string v))
-let float32 v = literal Codec.Values.float32 (typed Scalar.Float32 (float_text (Stdlib_stable.Float32.to_float v)))
-let float64 v = literal Codec.Values.float64 (typed Scalar.Float64 (float_text v))
-let string s = literal Codec.Values.string ("'" ^ String.substr_replace_all s ~pattern:"'" ~with_:"''" ^ "'")
+let bool b = literal Codec.Values.bool ~sql:(if b then "TRUE" else "FALSE") ~constant:(if b then "'true'" else "'false'")
+let int8 v = typed Codec.Values.int8 Scalar.Int8 (Int.to_string (Stdlib_stable.Int8.to_int v))
+let int16 v = typed Codec.Values.int16 Scalar.Int16 (Int.to_string (Stdlib_stable.Int16.to_int v))
+let int32 v = typed Codec.Values.int32 Scalar.Int32 (Int32.to_string v)
+let int64 v = typed Codec.Values.int64 Scalar.Int64 (Int64.to_string v)
+let float32 v = typed Codec.Values.float32 Scalar.Float32 (float_text (Stdlib_stable.Float32.to_float v))
+let float64 v = typed Codec.Values.float64 Scalar.Float64 (float_text v)
+let string s = let q = quote_string s in literal Codec.Values.string ~sql:q ~constant:q
+
+(* The operands of one operator must cross the boundary the same way: the
+   same base scalar, and the same conversion. Their OCaml types cannot tell a
+   BLOB from a VARCHAR, or a custom codec's column from a plain literal of its
+   OCaml type; DuckDB would compare them after an implicit cast (a string
+   literal against a BLOB has its \xHH escapes decoded) or unencoded. A
+   custom codec matches only itself (the same codec value). *)
+let compatible : type a n. (a, n) Codec.t -> (a, n) Codec.t -> bool = fun a b ->
+  let same : type x. x Codec.plan -> x Codec.plan -> bool = fun p q ->
+    match p, q with
+    | Codec.Identity s, Codec.Identity t -> String.equal (Scalar.name s) (Scalar.name t)
+    | Codec.Plan _, Codec.Plan _ -> phys_equal p q
+    | _ -> false in
+  match a, b with
+  | Codec.Non_null p, Codec.Non_null q -> same p q
+  | Codec.Nullable p, Codec.Nullable q -> same p q
+let checked (a : _ expr) (b : _ expr) =
+  if not (compatible a.codec b.codec) then
+    invalid_arg "Duckdb.Sql: operands of different codecs (base types, or a custom codec and a plain value)"
 
 let nullable (e : (_, Codec.non_null, _) expr) = { node = e.node; codec = Codec.Values.nullable e.codec }
-let coalesce (e : _ expr) ~(default : _ expr) = { node = Apply ("coalesce", [e.node; default.node]); codec = default.codec }
+let coalesce (e : _ expr) ~(default : _ expr) =
+  if not (compatible e.codec (Codec.Values.nullable default.codec)) then
+    invalid_arg "Duckdb.Sql: operands of different codecs (base types, or a custom codec and a plain value)";
+  { node = Apply ("coalesce", [e.node; default.node]); codec = default.codec }
 let is_null (e : _ expr) = { node = Postfix (e.node, "IS NULL"); codec = Codec.Values.bool }
 let is_true (e : _ expr) = { node = Postfix (e.node, "IS TRUE"); codec = Codec.Values.bool }
-let like (a : _ expr) (b : _ expr) = { node = Infix ("LIKE", a.node, b.node); codec = Codec.Values.bool }
+let like (a : _ expr) (b : _ expr) = checked a b; { node = Infix ("LIKE", a.node, b.node); codec = Codec.Values.bool }
 
 let count_star = { node = Count_star; codec = Codec.Values.int64 }
 let count (e : _ expr) = { node = Apply ("count", [e.node]); codec = Codec.Values.int64 }
@@ -195,9 +236,9 @@ let extreme name (e : (_, Codec.non_null, _) expr) = { node = Apply (name, [e.no
 let null_extreme name (e : (_, Codec.nullable, _) expr) = { node = Apply (name, [e.node]); codec = e.codec }
 
 (* Arithmetic keeps the operand type: results are cast back to it. *)
-let arith op (a : _ expr) (b : _ expr) = { node = Cast (Infix (op, a.node, b.node), sql_type a.codec); codec = a.codec }
+let arith op (a : _ expr) (b : _ expr) = checked a b; { node = Cast (Infix (op, a.node, b.node), sql_type a.codec); codec = a.codec }
 let null_division op (a : (_, Codec.non_null, _) expr) (b : _ expr) =
-  { node = Cast (Infix (op, a.node, b.node), sql_type a.codec); codec = Codec.Values.nullable a.codec }
+  checked a b; { node = Cast (Infix (op, a.node, b.node), sql_type a.codec); codec = Codec.Values.nullable a.codec }
 let sum (e : (_, Codec.non_null, _) expr) =
   { node = Cast (Apply ("sum", [e.node]), sql_type e.codec); codec = Codec.Values.nullable e.codec }
 let null_sum (e : (_, Codec.nullable, _) expr) = { node = Cast (Apply ("sum", [e.node]), sql_type e.codec); codec = e.codec }
@@ -281,8 +322,9 @@ module F64 = Fractional
 module F32 = Fractional
 
 (* Defined last: these shadow Base's operators. *)
-let compare op (a : _ expr) (b : _ expr) = { node = Infix (op, a.node, b.node); codec = Codec.Values.bool }
+let compare op (a : _ expr) (b : _ expr) = checked a b; { node = Infix (op, a.node, b.node); codec = Codec.Values.bool }
 let null_compare op (a : _ expr) (b : _ expr) =
+  checked a b;
   { node = Infix (op, a.node, b.node); codec = Codec.Values.(nullable bool) }
 let ( = ) a b = compare "=" a b
 let ( <> ) a b = compare "<>" a b

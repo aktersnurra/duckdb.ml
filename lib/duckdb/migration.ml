@@ -2,8 +2,10 @@ open! Base
 open Failure
 
 (* A step's work: SQL statements, or OCaml code, in the step's transaction. *)
+(* [canonical] is what the checksum covers: the statements themselves, or a
+   declaration's structure for declaration-based steps. *)
 type kind =
-  | Statements of string list
+  | Statements of { statements : string list; canonical : string }
   | Run of ([ `Transaction ] Session.t @ local -> (unit, Failure.t) result)
 type step = { version : int; name : string; checksum : string; kind : kind }
 type column = Column : ('a, 'n) Table.column -> column
@@ -13,21 +15,22 @@ type table = Packed : (_, _, _) Table.t -> table
    step's checksum covers its name only. *)
 let step version name kind =
   let text = match kind with
-    | Statements statements -> String.concat ~sep:"\n" statements
+    | Statements { canonical; _ } -> canonical
     | Run _ -> name in
   { version; name; checksum = Stdlib.Digest.to_hex (Stdlib.Digest.string text); kind }
 
 let target ~schema name = Request.quote schema ^ "." ^ Request.quote name
-let sql statement = Statements [ statement ]
+let statements list = Statements { statements = list; canonical = String.concat ~sep:"\n" list }
+let sql statement = statements [ statement ]
 let run f = Run f
-let create table = Statements [ Table.ddl table ]
-let drop_table ?(schema = "main") name = Statements [ "DROP TABLE " ^ target ~schema name ]
+let create table = Statements { statements = [ Table.ddl table ]; canonical = "create " ^ Table.canonical table }
+let drop_table ?(schema = "main") name = statements [ "DROP TABLE " ^ target ~schema name ]
 let drop_column ?(schema = "main") ~table name =
-  Statements [ "ALTER TABLE " ^ target ~schema table ^ " DROP COLUMN " ^ Request.quote name ]
+  statements [ "ALTER TABLE " ^ target ~schema table ^ " DROP COLUMN " ^ Request.quote name ]
 let rename_table ?(schema = "main") from ~to_ =
-  Statements [ "ALTER TABLE " ^ target ~schema from ^ " RENAME TO " ^ Request.quote to_ ]
+  statements [ "ALTER TABLE " ^ target ~schema from ^ " RENAME TO " ^ Request.quote to_ ]
 let rename_column ?(schema = "main") ~table from ~to_ =
-  Statements [ "ALTER TABLE " ^ target ~schema table ^ " RENAME COLUMN " ^ Request.quote from
+  statements [ "ALTER TABLE " ^ target ~schema table ^ " RENAME COLUMN " ^ Request.quote from
                ^ " TO " ^ Request.quote to_ ]
 
 (* DuckDB adds no column with constraints: a non-null column is added with
@@ -46,13 +49,21 @@ let add_column (Request.Table_def t : (_, _, _) Table.t) pick =
     invalid_arg "Duckdb.Migration.add_column: DuckDB cannot add a column with a key, CHECK or foreign key";
   let sql_type, nullable = List.find_map_exn (Table.specs t.columns) ~f:(fun (n, ty, nullable) ->
     Option.some_if (String.equal n name) (ty, nullable)) in
+  (* DuckDB's statement extraction splits ADD COLUMN … DEFAULT <expression>
+     (CAST, TRUE, functions, operators) into several statements; a quoted
+     constant, cast to the column type, passes. *)
   let default = List.find_map t.constraints ~f:(function
-    | Table_constraint.Default { column; sql } when String.equal column name -> Some (" DEFAULT " ^ sql)
+    | Table_constraint.Default { column; constant; _ } when String.equal column name ->
+      (match constant with
+       | Some constant -> Some (" DEFAULT " ^ constant)
+       | None -> invalid_arg "Duckdb.Migration.add_column: the column's default must be a literal")
     | _ -> None) in
   let table = target ~schema:t.schema t.name in
-  Statements
-    (("ALTER TABLE " ^ table ^ " ADD COLUMN " ^ Request.quote name ^ " " ^ sql_type ^ Option.value default ~default:"")
-     :: if nullable then [] else [ "ALTER TABLE " ^ table ^ " ALTER COLUMN " ^ Request.quote name ^ " SET NOT NULL" ])
+  let canonical = Printf.sprintf "add column %s.%s %s %s %s%s" t.schema t.name name sql_type
+    (if nullable then "null" else "not null") (Option.value default ~default:"") in
+  Statements { canonical; statements =
+    ("ALTER TABLE " ^ table ^ " ADD COLUMN " ^ Request.quote name ^ " " ^ sql_type ^ Option.value default ~default:"")
+     :: if nullable then [] else [ "ALTER TABLE " ^ table ^ " ALTER COLUMN " ^ Request.quote name ^ " SET NOT NULL" ] }
 let table t = Packed t
 
 (* The bookkeeping table. Hand-written: its [applied_at] default is [now()],
@@ -82,18 +93,18 @@ let rec pending steps applied =
     else if String.equal s.name name && String.equal s.checksum checksum then pending steps rest
     else mismatch version name ~expected:(describe s.version s.name s.checksum) ~actual:(describe version name checksum)
 
-let rec statements (tx @ local) = function
+let rec run_statements (tx @ local) = function
   | [] -> Ok ()
   | statement :: rest ->
     match Request.Session.exec tx (Request.exec ~oneshot:true Fields.[] statement) Args.[] with
     | Error e -> Error e
-    | Ok () -> statements tx rest
+    | Ok () -> run_statements tx rest
 (* One step and its bookkeeping row in one transaction. *)
 let apply_step (c @ local) s =
   let within_step (e : Failure.t) = { e with context = Migration { version = s.version; name = s.name } } in
   Result.map_error ~f:within_step
     (Request.Session.with_transaction c ~f:(fun tx ->
-       let performed = match s.kind with Run f -> f tx | Statements list -> statements tx list in
+       let performed = match s.kind with Run f -> f tx | Statements { statements = list; _ } -> run_statements tx list in
        match performed with
        | Error e -> Error e
        | Ok () -> Request.Session.exec tx record Args.[Int64.of_int s.version; s.name; s.checksum]))

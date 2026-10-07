@@ -6,4 +6,7 @@ type t =
   | Unique of string list
   | Foreign_key of { columns : string list; table : string; references : string list }
   | Check of { sql : string; columns : string list }
-  | Default of { column : string; sql : string }
+  (* [constant]: a literal default as a quoted string constant, which
+     [Migration.add_column] needs (DuckDB's statement extraction rejects
+     other expressions in ADD COLUMN … DEFAULT). *)
+  | Default of { column : string; sql : string; constant : string option }

@@ -52,8 +52,9 @@ module Constraint = struct
     let referenced = key_columns (f (binders other.columns ~scope)) in
     if List.exists referenced ~f:(fun (s, _) -> s <> scope) then Sql.foreign ();
     let references = List.map referenced ~f:snd in
-    if not (List.exists (keys other.constraints) ~f:(same_set references)) then
-      invalid_arg "Duckdb.Table: a foreign key must reference a declared primary or unique key";
+    (* DuckDB matches the referenced columns in the key's declared order. *)
+    if not (List.exists (keys other.constraints) ~f:(List.equal String.equal references)) then
+      invalid_arg "Duckdb.Table: a foreign key must reference a declared primary or unique key, in its column order";
     Foreign_key { columns = key_columns key; table = other.schema ^ "\000" ^ other.name; references }
   let default (c : (_, _) column) (e : (_, _, _) Sql.expr) = Default { column = (c.scope, c.name); node = e.node }
   let check (e : (_, _, _) Sql.expr) = Check e.node
@@ -77,7 +78,8 @@ let resolve ~schema ~scope (constraints : Constraint.t list) =
     | Constraint.Default { column; node } ->
       if not (List.is_empty (Sql.mentioned node)) then
         invalid_arg "Duckdb.Table: a default cannot mention a column";
-      Table_constraint.Default { column = List.hd_exn (names [ column ]); sql = render node }) in
+      let constant = match node with Sql.Literal { constant; _ } -> Some constant | _ -> None in
+      Table_constraint.Default { column = List.hd_exn (names [ column ]); sql = render node; constant }) in
   if List.count resolved ~f:(function Table_constraint.Primary_key _ -> true | _ -> false) > 1 then
     invalid_arg "Duckdb.Table: at most one primary key";
   resolved
@@ -101,7 +103,7 @@ let rec specs : type l f r s. (l, f, r, s) Columns.t -> (string * string * bool)
 let quoted names = "(" ^ String.concat ~sep:", " (List.map names ~f:Request.quote) ^ ")"
 let ddl (Request.Table_def t : (_, _, _) t) =
   let default name = List.find_map t.constraints ~f:(function
-    | Table_constraint.Default { column; sql } when String.equal column name -> Some sql
+    | Table_constraint.Default { column; sql; _ } when String.equal column name -> Some sql
     | _ -> None) in
   let columns = List.map (specs t.columns) ~f:(fun (name, sql_type, nullable) ->
     Request.quote name ^ " " ^ sql_type ^ (if nullable then "" else " NOT NULL")
@@ -115,6 +117,23 @@ let ddl (Request.Table_def t : (_, _, _) t) =
     | Table_constraint.Check { sql; _ } -> Some ("CHECK (" ^ sql ^ ")")
     | Table_constraint.Default _ -> None) in
   "CREATE TABLE " ^ table t.name ^ " (" ^ String.concat ~sep:", " (columns @ constraints) ^ ")"
+(* The declaration's structure as text, for migration checksums: independent
+   of how the DDL is spelled, so a library change to quoting or clause syntax
+   does not change an applied checksum. Type names and expression rendering
+   remain part of it. *)
+let canonical (Request.Table_def t : (_, _, _) t) =
+  let listed names = String.concat ~sep:"," names in
+  String.concat ~sep:"\n"
+    ((Printf.sprintf "table %s.%s" t.schema t.name)
+     :: List.map (specs t.columns) ~f:(fun (name, sql_type, nullable) ->
+          Printf.sprintf "column %s %s %s" name sql_type (if nullable then "null" else "not null"))
+     @ List.map t.constraints ~f:(function
+         | Table_constraint.Primary_key names -> "primary key " ^ listed names
+         | Table_constraint.Unique names -> "unique " ^ listed names
+         | Table_constraint.Foreign_key { columns; table; references } ->
+           Printf.sprintf "foreign key %s references %s %s" (listed columns) table (listed references)
+         | Table_constraint.Check { sql; _ } -> "check " ^ sql
+         | Table_constraint.Default { column; sql; _ } -> Printf.sprintf "default %s %s" column sql))
 let create (s @ local) table = Request.Session.exec s (Request.exec ~oneshot:true Fields.[] (ddl table)) Args.[] [@nontail]
 
 (* Verification reads the catalog in the session's snapshot. *)
@@ -127,11 +146,14 @@ let catalog_constraints = Request.many Fields.[string; string] Fields.[int64; st
   "SELECT CAST(constraint_index AS BIGINT), constraint_type, coalesce(referenced_table, '') \
    FROM duckdb_constraints() WHERE database_name = current_database() AND schema_name = ? \
    AND table_name = ? AND constraint_type <> 'NOT NULL'"
+(* One row per listed name, in list order (a foreign key's two lists pair up
+   by position). *)
 let catalog_names list = Request.many Fields.[string; string] Fields.[int64; string]
   ~row:(fun index name -> (index, name))
-  ("SELECT CAST(constraint_index AS BIGINT), unnest(" ^ list ^ ") FROM duckdb_constraints() \
-    WHERE database_name = current_database() AND schema_name = ? AND table_name = ? \
-    AND constraint_type <> 'NOT NULL'")
+  ("SELECT index, name FROM (SELECT CAST(constraint_index AS BIGINT) AS index, \
+    unnest(range(1, len(" ^ list ^ ") + 1)) AS position, unnest(" ^ list ^ ") AS name \
+    FROM duckdb_constraints() WHERE database_name = current_database() AND schema_name = ? \
+    AND table_name = ? AND constraint_type <> 'NOT NULL') ORDER BY index, position")
 let catalog_columns_of = catalog_names "constraint_column_names"
 let catalog_references = catalog_names "referenced_column_names"
 
@@ -141,9 +163,13 @@ type shape = { kind : string; columns : string list; table : string; references 
 let describe { kind; columns; table; references } =
   kind ^ " " ^ quoted columns
   ^ if String.is_empty table then "" else " REFERENCES " ^ Request.quote table ^ " " ^ quoted references
+(* Key columns compare as sets; a foreign key compares its (column,
+   referenced column) pairs, so a permuted reference is a difference. *)
 let same a b =
-  String.equal a.kind b.kind && same_set a.columns b.columns && String.equal a.table b.table
-  && same_set a.references b.references
+  let pairs s = List.sort ~compare:Poly.compare (List.zip_exn s.columns s.references) in
+  String.equal a.kind b.kind && String.equal a.table b.table
+  && if String.equal a.kind "FOREIGN KEY" then List.equal Poly.equal (pairs a) (pairs b)
+     else same_set a.columns b.columns
 let declared_shapes constraints =
   List.filter_map constraints ~f:(function
     | Table_constraint.Primary_key columns -> Some { kind = "PRIMARY KEY"; columns; table = ""; references = [] }

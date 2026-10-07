@@ -235,6 +235,25 @@ Probed with the repository's OxCaml (scratch files, 2026-10-07):
    `aggregate` and `group_by`, not a `|>` pipeline; `aggregate` names the
    `one` case.
 
+## Fixes from the independent review
+
+- `aggregate` accepted a select list without any aggregate (only literals or
+  parameters), typed `one` but returning a row per table row; building such
+  a query now raises `Invalid_argument`.
+- Operators accepted operands whose OCaml types agree but whose codecs do
+  not: a string literal against a BLOB column (DuckDB casts the literal to
+  BLOB and decodes `\xHH` escapes, even through `CAST(… AS VARCHAR)`), or a
+  plain literal against a custom codec's column (compared unencoded).
+  Comparisons, arithmetic, `like` and `coalesce` now require both operands
+  to share a codec: the same base scalar, and for custom codecs the same
+  codec value; otherwise building the query raises `Invalid_argument`. A
+  custom-codec value enters as a parameter declared with that codec.
+- The claim that `~having` outside `group_by` is always rejected at prepare
+  was wrong: DuckDB accepts it when the select list holds only literals and
+  parameters (one group, 0 or 1 rows; `many` admits that).
+- Documented: a `string` literal containing NUL fails with `Embedded_nul`;
+  an empty select list and a negative `~limit`/`~offset` fail at prepare.
+
 ## Refinements found while prototyping
 
 - Arithmetic submodules are `I64` … `F32`, not `Int64` …: inside a local

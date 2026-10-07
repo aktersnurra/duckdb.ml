@@ -164,7 +164,10 @@ let start (c @ local) = M.apply c migrations ~verify:M.[ table users; table post
 (* : (int list, Error.t) result, the versions this call applied *)
 ```
 
-Other steps are `add_column` (a column picked from a declaration),
+`create` and `add_column` take the declaration as it was when the step was
+written: once a step is applied, keep its declaration as its own value
+(`users_v1`) and declare later shapes separately, or the step reads as
+edited. Other steps are `add_column` (a column picked from a declaration),
 `drop_table`, `drop_column`, `rename_table` and `rename_column`. Migrations
 go forward only. The applied history must match the start of the
 list (version, name, checksum of the SQL); an edited, renamed or missing step

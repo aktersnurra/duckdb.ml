@@ -72,8 +72,8 @@ let check (c @ local) = Table.verify c users
 |---|---|
 | `primary_key key` | At most one per declaration (`Invalid_argument` at `declare` otherwise) |
 | `unique key` | Any number |
-| `foreign_key cols ~references:(table, f)` | `f` binds the referenced table's columns and returns a key; its column types must equal `cols`' types (static). The referenced key must be that table's declared primary key or a declared unique key, and the table must be in the same schema (`Invalid_argument` at `declare`) |
-| `default col e` | `e : ('a, 'n, _) Sql.expr` at the column's own type and nullability, e.g. `Sql.(nullable (int32 18l))` for a nullable column. An `e` that mentions a column raises `Invalid_argument` at `declare` |
+| `foreign_key cols ~references:(table, f)` | `f` binds the referenced table's columns and returns a key; its column types must equal `cols`' types (static). The referenced key must be that table's declared primary key or a declared unique key, in its declared column order (DuckDB matches the order), and the table must be in the same schema (`Invalid_argument` at `declare`) |
+| `default col e` | `e : ('a, 'n, Sql.row) Sql.expr` (an aggregate does not type-check) at the column's own type and nullability, e.g. `Sql.(nullable (int32 18l))` for a nullable column. An `e` that mentions a column raises `Invalid_argument` at `declare` |
 | `check e` | `e : (bool, non_null, row) Sql.expr`: a NULL result fails the check, so a nullable condition is written with `is_true` |
 | `check_null e` | `e : (bool option, nullable, row) Sql.expr`: SQL's own rule, NULL passes |
 
@@ -127,11 +127,13 @@ session's snapshot and returns the first difference, in this order:
    `Type_mismatch`.
 3. Nullability, exactly: non-null codec ⇔ NOT NULL.
 4. PRIMARY KEY, UNIQUE, FOREIGN KEY: exactly the declared ones, both ways (a
-   missing constraint and an undeclared extra one are differences). Column
-   sets compare order-insensitively; a foreign key also compares the
-   referenced table and columns.
-5. CHECK, by presence: one catalog CHECK per declared CHECK over the same
-   column set.
+   missing constraint and an undeclared extra one are differences). Key
+   column sets compare order-insensitively; a foreign key compares the
+   referenced table and its (column, referenced column) pairs, so a
+   permuted reference is a difference.
+5. CHECK, by column set only: one catalog CHECK per declared CHECK over the
+   same columns; the expression is not compared (`CHECK (n < 0)` passes
+   against a declared `n >= 0`).
 6. DEFAULT, by presence: a column has a default exactly when one is declared.
 
 A difference other than 1 and 2 is `Constraint_mismatch { constraint_kind;
@@ -163,6 +165,24 @@ only when called.
 - `Table.lookup` builds its SQL and calls `Request.generated` with the key's
   `Fields`.
 - `Error.cause` gains `Unknown_table` and `Constraint_mismatch`.
+
+## Fixes from the independent review
+
+- `verify` compared a foreign key's columns and referenced columns as two
+  independent sets, so a permuted reference verified; it now compares the
+  pairs, reading the catalog lists in order.
+- `foreign_key` accepted a referenced key in another column order than the
+  declared key, which DuckDB then rejected at CREATE; it now requires the
+  declared order.
+- `default` accepted grouped expressions (`count_star`); it now takes row
+  expressions.
+
+Known limitations, documented rather than fixed: `verify` compares names
+byte-exactly, so a table created as `PK(ID …)` is `Unknown_table` for a
+declaration `"pk"` (DuckDB identifiers are case-insensitive); a `CREATE
+UNIQUE INDEX` is not a UNIQUE constraint to `verify`; `duckdb_columns()`
+lists views too. Keys and defaults unify OCaml types, not SQL types, so a
+VARCHAR foreign key to a BLOB key type-checks and fails at `create`.
 
 ## Refinements found while prototyping
 

@@ -21,8 +21,12 @@ Added:
   `test/migration_compile`.
 
 Forward only. A `run` step's checksum covers its name only, so editing one
-is not detected. Two processes migrating one database conflict on the
-bookkeeping key; the second fails and finds the steps applied on a rerun.
+is not detected. `create` and `add_column` take the declaration as it was
+when the step was written (a frozen copy); their checksums cover its
+structure. `add_column` accepts literal defaults only. Two connections
+migrating one database conflict on the bookkeeping key; the second fails and
+finds the steps applied on a rerun (DuckDB's file lock keeps a second process
+out).
 
 ### Schema declarations (sub-project 3a)
 
@@ -36,7 +40,7 @@ Added:
   from codecs; keys take non-null columns only.
 - `Table.create` (CREATE TABLE from the declaration), `Table.verify`
   (read-only catalog check: columns, types, nullability, keys and foreign
-  keys exactly, CHECK and DEFAULT by presence) and `Table.lookup` (by a
+  keys exactly, CHECK by column set and DEFAULT by presence) and `Table.lookup` (by a
   declared key, typed `zero_or_one`).
 - `Error.cause`: `Unknown_table` and `Constraint_mismatch`.
 - `Sql.column`: a declared table column as a row expression, for CHECK.
@@ -73,10 +77,13 @@ Changed (breaking):
   Declarations are written as before; annotations and adapter signatures
   name the extra parameter.
 
-Checked at run time: an expression used outside the query that bound it
-raises `Invalid_argument` when the query is built; on first prepare, a
-declared parameter the query never uses (`Parameter_count`) and `~having` on
-a `select` outside `group_by`.
+Checked at run time: building a query raises `Invalid_argument` for an
+expression used outside the query that bound it, operands of different
+codecs (e.g. a string literal against a BLOB, a plain literal against a
+custom codec), and an `aggregate` without any aggregate. On first prepare: a
+declared parameter the query never uses (`Parameter_count`), and `~having` on
+a `select` outside `group_by` unless its select list holds only literals and
+parameters.
 
 ### Performance (sub-project 1b)
 

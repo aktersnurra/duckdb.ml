@@ -29,16 +29,18 @@ evolved by the steps; running migrations through the Async/Eio adapters
 ```ocaml
 module M = D.Migration
 
+(* Each declaration-based step takes the declaration as it was when the step
+   was written: users_v1 has no "nick"; users_v2 = users_v1 plus "nick". *)
 let migrations = M.[
-  step 1 "create users" (create users);
+  step 1 "create users" (create users_v1);
   step 2 "create posts" (create posts);
-  step 3 "add nickname" (add_column users (fun [_; _; _; nick] -> Column nick));
+  step 3 "add nickname" (add_column users_v2 (fun [_; _; _; nick] -> Column nick));
   step 4 "backfill nicknames" (run (fun tx -> R.Session.exec tx backfill D.Args.[]));
   step 5 "drop legacy" (drop_table "legacy_users");
   step 6 "rename column" (rename_column ~table:"posts" "body" ~to_:"text");
   step 7 "index" (sql "CREATE INDEX posts_owner ON posts(owner)") ]
 
-let start (c @ local) = M.apply c migrations ~verify:M.[ table users; table posts ]
+let start (c @ local) = M.apply c migrations ~verify:M.[ table users_v2; table posts ]
 (* : (int list, Error.t) result, the versions this call applied *)
 ```
 
@@ -61,7 +63,11 @@ let start (c @ local) = M.apply c migrations ~verify:M.[ table users; table post
 `Table.lookup` does); `Column` hides its type. The column takes the
 declaration's type, nullability and default. DuckDB rejects constraints in
 `ADD COLUMN`, so a non-null column is added with its default and then set NOT
-NULL; without a declared default this succeeds only on an empty table (a
+NULL. DuckDB's statement extraction also splits `ADD COLUMN … DEFAULT
+<expression>` into several statements for any default other than a plain
+constant (`CAST(…)`, `TRUE`, functions, operators), so the default is
+written as a quoted constant cast to the column's type (`DEFAULT '5'`), and
+a default that is not a literal raises `Invalid_argument`; without a declared default this succeeds only on an empty table (a
 native error otherwise, rolling the step back). A column that is part of a
 declared PRIMARY KEY, UNIQUE, CHECK or FOREIGN KEY raises `Invalid_argument`
 when the step is built: DuckDB cannot add those to an existing table, so such
@@ -93,14 +99,27 @@ strictly increasing; a duplicate or decreasing version raises
 
 Returns the versions applied by this call (`[]` when up to date).
 
-**Checksums** are the MD5 hex digest of a step's SQL text; for a `run` step,
-of its name only (code cannot be hashed), so an edited `run` step is not
-detected.
+**Frozen declarations.** `create` and `add_column` take the declaration as
+it was when the step was written, kept as its own value (`users_v1`,
+`users_v2`, …), never the current one. A fresh database replays every step:
+`create users` with a current declaration that already has `nick`, followed
+by `add_column … nick`, fails ("column already exists"); and on an existing
+database a change to the declaration a step was applied with reads as an
+edited step (`Migration_mismatch`).
 
-**Concurrency.** Two processes migrating one database file insert the same
-bookkeeping key; DuckDB rejects the second transaction with a conflict, and
-that process's `apply` returns the native error. Rerunning it then finds the
-steps applied.
+**Checksums** are the MD5 hex digest of what a step does: the SQL text of
+`sql`, drop and rename steps; for `create` and `add_column`, the
+declaration's structure (schema, table, column names, type names,
+nullability, constraints with their rendered CHECK and DEFAULT
+expressions), not the DDL text, so a library change to DDL spelling does not
+change applied checksums; for a `run` step, its name only (code cannot be
+hashed), so an edited `run` step is not detected.
+
+**Concurrency.** DuckDB's file lock keeps a second read-write process from
+opening the database at all. Two connections of one process migrating
+concurrently insert the same bookkeeping key; DuckDB rejects the second
+transaction with a conflict, and that `apply` returns the native error.
+Rerunning it then finds the steps applied.
 
 ## Errors
 
@@ -119,6 +138,17 @@ steps applied.
 - `add_column` reads the picked column's codec, default and constraints from
   `Request.Table_def`.
 - `duckdb.mli`: `Migration` after `Table`.
+
+## Fixes from the independent review
+
+- `add_column` with any default other than a string failed with
+  `Unsupported_statement` (the extraction quirk above; the only test used a
+  string default). Defaults are now quoted constants; tests cover int32,
+  float `nan`, bool and `Int64.min_value` on a table with rows.
+- The API example built its steps from the current declarations; it now uses
+  frozen ones, and checksums cover a declaration's structure instead of its
+  DDL text.
+- The concurrency note said "two processes"; it is two connections.
 
 ## Refinements found while prototyping
 
