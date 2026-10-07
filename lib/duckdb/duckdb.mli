@@ -78,10 +78,13 @@ module Error : sig
     (** [actual] is the engine type's SQL name (["type <id>"] if unsupported). *)
     | Null of { column : int; row : int }
     (** A NULL in a non-null position. Rows are absolute within the result for
-        typed requests and adapter queries; chunk-relative for [Statement.column]. *)
+        typed requests, adapter queries and [Bulk.collect]; chunk-relative for
+        [Statement.column] and [Statement.Column.view]; the row within the
+        batch or input columns for [Table.append] and [append_columns]. *)
     | Index of { index : int; length : int }
     (** An out-of-range position. Only from the low-level statement API:
-        positional [bind] and chunk [column] access. *)
+        positional [bind], chunk [column] access, [Statement.Column.view],
+        and [Bulk.collect]/[collect_strings]. *)
     | Length_mismatch of { column : int; expected : int; actual : int }
     (** [Table.append_columns]: this zero-based column (or its NULL mask) has
         [actual] rows where the first column has [expected]. *)
@@ -471,8 +474,9 @@ module Table : sig
 
   (** One admission for a complete batch, validated before any native row
       mutation. A codec rejection rejects the batch without native work. An
-      engine error (including an automatic flush), interrupted native work, or
-      a [None] in a NOT NULL column poisons this appender and the transaction;
+      engine error (including an automatic flush), invalid UTF-8 in a VARCHAR
+      value, interrupted native work, or a [None] in a NOT NULL column poisons
+      this appender and the transaction;
       later operations return the first error. *)
   val append : ('columns, _) appender @ local -> 'columns Args.t list -> (unit, Error.t) result
 

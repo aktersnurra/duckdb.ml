@@ -74,7 +74,8 @@ val column_types : prepared -> (int array, error) result
 (* Cancellation checkpoint on the result's connection, for per-row loops. *)
 val result_checkpoint : query_result -> (unit, error) result
 
-(* [fold_chunks] after [validate] accepts the result's column types; a cleanup
-   exception is paired in [context]. *)
+(* [fold_chunks] after [validate] accepts the executed result's column types,
+   so an empty result is checked too; a cleanup exception is paired in
+   [context]. *)
 val fold_validated : context:Failure.context -> query_result -> validate:(int array -> (unit, error) result) -> init:'a ->
   f:(chunk @ local -> 'a -> ('a step, error) result) -> ('a, error) result

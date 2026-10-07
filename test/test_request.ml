@@ -378,3 +378,35 @@ let () =
       assert (Option.equal Int64.equal a (if Int64.(i = 7L) then None else Some Int64.(i * 2L)));
       assert (Int64.equal s i && Int64.equal ms i)));
   Stdlib.print_endline "request: fast path nullable custom and timestamps round-trip=ok"
+
+(* DuckDB prepares a parameterised table function's columns as one unresolved
+   column; typed rows are validated against the executed result's columns. *)
+let () =
+  let check ~oneshot c =
+    let doubled = R.many ~oneshot D.Fields.[int64] D.Fields.[int64; int64] ~row:(fun a b -> (a, b))
+      "SELECT i, i * 2 FROM range(?) t(i) ORDER BY i" in
+    let expected = List.init 5 ~f:(fun i -> let i = Int64.of_int i in (i, Int64.(i * 2L))) in
+    let pairs = List.equal (fun (a, b) (x, y) -> Int64.equal a x && Int64.equal b y) in
+    assert (pairs (ok (C.collect c doubled D.Args.[5L])) expected);
+    (* A re-run takes the cached statement when caching applies. *)
+    assert (pairs (ok (C.collect c doubled D.Args.[5L])) expected);
+    assert (List.is_empty (ok (C.collect c doubled D.Args.[0L])));
+    let cross = R.many ~oneshot D.Fields.[int64; int64] D.Fields.[int64; int64] ~row:(fun a b -> (a, b))
+      "SELECT a, b FROM generate_series(1, ?) t(a), range(?) u(b)" in
+    assert (List.length (ok (C.collect c cross D.Args.[3L; 4L])) = 12);
+    let mistyped = R.many ~oneshot D.Fields.[int64] D.Fields.[int64; string] ~row:(fun a b -> (a, b))
+      "SELECT i, i * 2 FROM range(?) t(i)" in
+    let type_mismatch (e : D.Error.t) = match e.cause with
+      | Type_mismatch { index = 1; expected = "VARCHAR"; actual = "BIGINT" } -> true | _ -> false in
+    ignore (failed "table function type" type_mismatch (C.collect c mistyped D.Args.[5L]) : D.Error.t);
+    ignore (failed "table function type, empty" type_mismatch (C.collect c mistyped D.Args.[0L]) : D.Error.t);
+    let wide = R.many ~oneshot D.Fields.[int64] D.Fields.[int64; int64; int64] ~row:(fun a b c -> (a, b, c))
+      "SELECT i, i * 2 FROM range(?) t(i)" in
+    let column_count (e : D.Error.t) = match e.cause with
+      | Column_count { expected = 3; actual = 2 } -> true | _ -> false in
+    ignore (failed "table function arity" column_count (C.collect c wide D.Args.[5L]) : D.Error.t);
+    ignore (failed "table function arity, cached" column_count (C.collect c wide D.Args.[5L]) : D.Error.t);
+    ignore (failed "table function arity, empty" column_count (C.collect c wide D.Args.[0L]) : D.Error.t) in
+  connected (fun c -> check ~oneshot:false c; check ~oneshot:true c);
+  connected ~statement_cache:0 (fun c -> check ~oneshot:false c);
+  Stdlib.print_endline "request: parameterised table functions validated against executed columns=ok"

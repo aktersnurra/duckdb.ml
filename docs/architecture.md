@@ -94,7 +94,10 @@ adapter's `Request.Generic`.
 A `Table` declaration drives typed appender rows, a typed SELECT and INSERT,
 and Parquet decoding, and is checked against the catalog by column name.
 It is the only append path: a batch is validated before any native row
-mutation.
+mutation. `append_columns` stages and appends slice by slice, so a staging
+failure in a later slice (invalid UTF-8, a kind mismatch) is found after
+earlier slices were appended; it poisons the appender, so the transaction
+rolls back and the operation stays atomic at the transaction level.
 
 Two native structures carry the fast paths. When a chunk is fetched, C
 records each column's data pointer, validity pointer and type in a per-chunk

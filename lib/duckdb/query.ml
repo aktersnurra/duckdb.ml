@@ -228,17 +228,17 @@ let fold_prepared ~lifting p ~init ~f =
   match execute_prepared p with
   | Error cause -> Error (lift lifting cause)
   | Ok r -> fold_chunks ~lifting r ~init ~f
+(* The executed result's columns: always resolved, unlike the prepared ones
+   of a parameterised statement, and what each chunk view checks. *)
+let fold_executed_validated ~lifting r ~validate ~init ~f =
+  fold_internal ~lifting r
+    (fun native -> validate (Array.init (F.column_count native) ~f:(F.column_type native))) ~init ~f
 let fold_prepared_validated ~lifting p ~validate ~init ~f =
   match execute_prepared p with
   | Error cause -> Error (lift lifting cause)
-  | Ok r ->
-    (* The executed result's columns: always resolved, unlike the prepared
-       ones of a parameterised statement, and what each chunk view checks. *)
-    fold_internal ~lifting r
-      (fun native -> validate (Array.init (F.column_count native) ~f:(F.column_type native))) ~init ~f
+  | Ok r -> fold_executed_validated ~lifting r ~validate ~init ~f
 let fold_validated ~context r ~validate ~init ~f =
-  fold_internal ~lifting:(Cause context) r
-    (fun native -> validate (F.prepared_column_types native)) ~init ~f
+  fold_executed_validated ~lifting:(Cause context) r ~validate ~init ~f
 let select_schema p = without_result p (fun () ->
   if F.prepared_kind p.native <> F.Statement_kind.select || not (Array.is_empty p.bound) then
     Error Unsupported_statement

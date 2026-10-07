@@ -43,6 +43,9 @@ Changed:
   (`view_*`) are added.
 - The documentation of `Encode_rejected` now states that its index is
   one-based, as it always was.
+- Typed requests over parameterised table functions (`range(?)`) no longer
+  fail with a spurious `Column_count`: declared rows are validated against
+  the executed result's columns.
 
 ### Changed (breaking)
 

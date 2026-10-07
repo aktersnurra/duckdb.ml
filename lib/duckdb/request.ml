@@ -103,11 +103,14 @@ let check_columns : type row. row rows -> int array -> (unit, error) Result.t = 
   | Rows (fields, _) ->
     check_types ~declared:(scalar_ids fields) ~actual
       ~count_error:(fun expected actual -> Column_count { expected; actual })
+(* A parameterised table function prepares as one unresolved column whatever
+   it returns; such rows are checked against the executed result alone. *)
 let validate r p =
   let Params params = r.params in
   let* () = check_parameters params p in
   let* columns = Query.column_types p in
-  check_columns r.rows columns
+  if (not (Array.is_empty columns)) && Array.for_all columns ~f:unresolved then Ok ()
+  else check_columns r.rows columns
 
 (* Decoding a borrowed row into an owned value through the declared codecs.
    Rows are reported absolute within the result: [seen] precede this chunk. *)

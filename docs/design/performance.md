@@ -11,7 +11,11 @@ would put unsafe casts in the safe API.
 
 All fast paths read through a per-chunk vector cache: when a chunk is fetched,
 C records each column's data pointer, validity pointer and type, so a read is
-one indirection instead of three DuckDB calls.
+one indirection instead of three DuckDB calls. Typed requests validate their
+declared rows against the executed result's column types, the ones the cache
+records, before the first chunk; a parameterised table function such as
+`range(?)` is prepared as one unresolved column, so the prepared types are not
+checked when every one of them is unresolved.
 
 ## Baseline
 
@@ -73,7 +77,7 @@ Same machine, query and settings as the baseline (1M rows, `taskset -c 0`,
 sub-project, from one run of
 `python3 bench/run_benchmarks.py --rows 1000000 --warmups 2 --samples 10`.
 The six paths rotate their order per sample. The machine's load average was
-about 3.1–3.7 during the run.
+about 3.1 during the run.
 
 | Path | Time | Minor words | Target | Baseline |
 |---|---|---|---|---|
@@ -345,7 +349,7 @@ val Table.append_columns : ('columns, _) appender @ local -> 'columns Bulk.Colum
 Usage with the README's `users` table:
 
 ```ocaml
-Table.append_columns a Bulk.Columns.[ Int64 (Int64, ids); Strings (String, names); Nullable (Int32 (Int32, ages), valid) ]
+Table.append_columns a Bulk.Columns.[ Int64 (Scalar.Int64, ids); Strings (Scalar.String, names); Nullable (Int32 (Scalar.Int32, ages), valid) ]
 ```
 
 - Compile time: missing, extra or reordered columns, a wrong element type, a
