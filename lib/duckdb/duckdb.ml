@@ -136,6 +136,7 @@ module Fields = Fields
 module Args = Args
 module Request = Request
 module Table = Table
+module Migration = Migration
 module Sql = Sql
 module Parquet = Parquet
 

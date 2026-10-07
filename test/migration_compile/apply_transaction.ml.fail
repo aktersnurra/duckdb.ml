@@ -1,0 +1,9 @@
+module D = Duckdb
+module R = D.Request
+module T = D.Table
+module M = D.Migration
+let users = T.(declare "users" Columns.["id", int64; "email", string] ~row:(fun id email -> (id, email)))
+let start (c : D.connection) = R.Session.with_transaction c ~f:(fun tx ->
+  match M.apply tx [ M.step 1 "create" (M.create users) ] with
+  | Ok _ -> Ok ()
+  | Error e -> Error e)

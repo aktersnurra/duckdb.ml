@@ -2,6 +2,7 @@ open! Base
 type context =
   | Database | Connection | Transaction
   | Query of string | Table of { schema : string; name : string } | Parquet of string
+  | Migration of { version : int; name : string }
 type cause =
   | Invalid_configuration of string | Embedded_nul | Closed | Busy | Cancelled
   | Native of string | Unsupported_statement | Effects_not_allowed
@@ -17,6 +18,7 @@ type cause =
   | Unknown_column of { name : string } | Missing_column of { name : string }
   | Unknown_table of { schema : string; name : string }
   | Constraint_mismatch of { constraint_kind : string; expected : string; actual : string }
+  | Migration_mismatch of { version : int; expected : string; actual : string }
   | Encode_rejected of { index : int; reason : Base.Error.t }
   | Decode_rejected of { column : int; row : int; reason : Base.Error.t }
   | Destination_exists | Unsupported_parquet_type of { column : int; actual : string }

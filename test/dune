@@ -238,3 +238,7 @@
 (rule (alias runtest)
  (deps check_schema_types.sh ../lib/duckdb/duckdb.mli (glob_files schema_compile/*))
  (action (run bash %{dep:check_schema_types.sh} %{ocamlc})))
+(test (name test_migration) (modules test_migration) (libraries base duckdb duckdb-ffi))
+(rule (alias runtest)
+ (deps check_migration_types.sh ../lib/duckdb/duckdb.mli (glob_files migration_compile/*))
+ (action (run bash %{dep:check_migration_types.sh} %{ocamlc})))

@@ -60,11 +60,13 @@ module Error : sig
   (** Where: [Transaction] is BEGIN/COMMIT/ROLLBACK of a scope, or admission of an adapter transaction;
       [Query] carries the statement's SQL (prepared statements, typed requests,
       raw queries); [Table] a declared table's appender or catalog check;
+      [Migration] a migration step;
       [Parquet] the file path involved ([path]'s argument; for a fold, the
       failing file; for an empty path list, ["read_parquet"]). *)
   type context =
     | Database | Connection | Transaction
     | Query of string | Table of { schema : string; name : string } | Parquet of string
+    | Migration of { version : int; name : string }
 
   type cause =
     | Invalid_configuration of string | Embedded_nul | Closed
@@ -110,6 +112,10 @@ module Error : sig
         ["FOREIGN KEY"], ["CHECK"], ["DEFAULT"] or ["NOT NULL"]) differs from
         the catalog. [expected] or [actual] is ["none"] for a constraint on one
         side only. *)
+    | Migration_mismatch of { version : int; expected : string; actual : string }
+    (** [Migration.apply]: the applied history differs from the step list at
+        this version; each side renders as ["<version> <name> (<checksum>)"]
+        or ["none"]. *)
     | Encode_rejected of { index : int; reason : Base.Error.t }
     (** A codec's encoder rejected the value at this one-based position: the
         parameter, or the column of an appended row or [append_columns]. *)
@@ -796,6 +802,60 @@ module Table : sig
 
   (** Explicit flush; an engine error poisons as [append]. *)
   val flush : (_, _) appender @ local -> (unit, Error.t) result
+end
+
+(** Versioned migrations: an ordered list of numbered steps, applied forward
+    only, each in its own transaction with its bookkeeping row in
+    ["main"."duckdb_ml_migrations"]. Run them on a synchronous connection,
+    e.g. at startup before opening an adapter pool. Two processes migrating
+    one database conflict on the bookkeeping key; the second gets the native
+    error and finds the steps applied when rerun. *)
+module Migration : sig
+  type kind
+  type step
+
+  (** A declaration's column, for [add_column]. *)
+  type column = Column : ('a, 'n) Table.column -> column
+
+  (** A declaration to verify after applying. *)
+  type table
+
+  (** [step version name kind]. Versions must be strictly increasing
+      ([Invalid_argument] from [apply]). The checksum covers a SQL step's
+      text and a [run] step's name only, so an edited [run] step is not
+      detected. *)
+  val step : int -> string -> kind -> step
+
+  (** The declaration's CREATE TABLE, as [Table.create]. *)
+  val create : (_, _, _) Table.t -> kind
+
+  (** ADD COLUMN with the declared type and default; a non-null column is
+      then set NOT NULL, which fails on a non-empty table without a default.
+      A column in a declared key, CHECK or foreign key raises
+      [Invalid_argument]: DuckDB cannot add one; recreate the table. *)
+  val add_column : (_, 'shape, _) Table.t -> ('shape Table.Binders.t -> column) -> kind
+
+  (** Name-based steps; identifiers are quoted, [schema] defaults to ["main"]. *)
+  val drop_table : ?schema:string -> string -> kind
+  val drop_column : ?schema:string -> table:string -> string -> kind
+  val rename_table : ?schema:string -> string -> to_:string -> kind
+  val rename_column : ?schema:string -> table:string -> string -> to_:string -> kind
+
+  (** One statement as written. *)
+  val sql : string -> kind
+
+  (** Code in the step's transaction, e.g. a data backfill. *)
+  val run : ([ `Transaction ] session @ local -> (unit, Error.t) result) -> kind
+
+  val table : (_, _, _) Table.t -> table
+
+  (** Creates the bookkeeping table if missing; checks that the applied
+      history is exactly a prefix of [steps] (version, name, checksum;
+      otherwise [Migration_mismatch]); applies the pending steps in order,
+      stopping at the first failure (context [Migration]); then verifies each
+      [verify] declaration with [Table.verify]. Returns the versions applied
+      by this call. *)
+  val apply : [ `Connection ] session @ local -> ?verify:table list -> step list -> (int list, Error.t) result
 end
 
 module Parquet : sig

@@ -1,0 +1,6 @@
+module D = Duckdb
+module R = D.Request
+module T = D.Table
+module M = D.Migration
+let users = T.(declare "users" Columns.["id", int64; "email", string] ~row:(fun id email -> (id, email)))
+let steps = M.[ step 1 "count" (run (fun tx -> R.Session.find tx (R.one D.Fields.[] D.Fields.[int64] ~row:Fun.id "SELECT 1") D.Args.[])) ]

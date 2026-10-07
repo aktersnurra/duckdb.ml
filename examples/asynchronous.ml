@@ -13,6 +13,7 @@ let cause_name : Duckdb.Error.cause -> string = function
   | Column_count _ -> "Column_count" | Parameter_schema_changed -> "Parameter_schema_changed"
   | Row_count _ -> "Row_count" | Unknown_column _ -> "Unknown_column" | Missing_column _ -> "Missing_column"
   | Unknown_table _ -> "Unknown_table" | Constraint_mismatch _ -> "Constraint_mismatch"
+  | Migration_mismatch _ -> "Migration_mismatch"
   | Encode_rejected _ -> "Encode_rejected" | Decode_rejected _ -> "Decode_rejected"
   | Destination_exists -> "Destination_exists" | Unsupported_parquet_type _ -> "Unsupported_parquet_type"
   | Rollback_failed _ -> "Rollback_failed"
@@ -21,6 +22,7 @@ let context_name : Duckdb.Error.context -> string = function
   | Database -> "database" | Connection -> "connection" | Transaction -> "transaction"
   | Query sql -> "query " ^ sql | Table { schema; name } -> "table " ^ schema ^ "." ^ name
   | Parquet path -> "Parquet " ^ path
+  | Migration { version; name } -> Printf.sprintf "migration %d %s" version name
 
 let core_error_name (e : Duckdb.Error.t) = cause_name e.cause ^ " in " ^ context_name e.context
 

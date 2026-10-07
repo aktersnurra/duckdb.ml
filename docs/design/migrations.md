@@ -1,6 +1,7 @@
 # Versioned migrations (sub-project 3b)
 
-Status: approved design, 2026-10-07. Completes roadmap row 3 of the
+Status: implemented, 2026-10-07; refined while prototyping (see
+[Refinements](#refinements-found-while-prototyping)). Completes roadmap row 3 of the
 [core redesign](core-redesign.md), building on
 [schema declarations](schema.md).
 
@@ -34,7 +35,7 @@ let migrations = M.[
   step 3 "add nickname" (add_column users (fun [_; _; _; nick] -> Column nick));
   step 4 "backfill nicknames" (run (fun tx -> R.Session.exec tx backfill D.Args.[]));
   step 5 "drop legacy" (drop_table "legacy_users");
-  step 6 "rename column" (rename_column ~table:"posts" ~from:"body" ~to_:"text");
+  step 6 "rename column" (rename_column ~table:"posts" "body" ~to_:"text");
   step 7 "index" (sql "CREATE INDEX posts_owner ON posts(owner)") ]
 
 let start (c @ local) = M.apply c migrations ~verify:M.[ table users; table posts ]
@@ -49,8 +50,8 @@ let start (c @ local) = M.apply c migrations ~verify:M.[ table users; table post
 | `add_column table pick` | `ALTER TABLE t ADD COLUMN "c" T [DEFAULT d]`; for a non-null column also `ALTER TABLE t ALTER COLUMN "c" SET NOT NULL` |
 | `drop_table ?schema name` | `DROP TABLE "s"."name"` |
 | `drop_column ?schema ~table name` | `ALTER TABLE "s"."table" DROP COLUMN "name"` |
-| `rename_table ?schema ~from ~to_` | `ALTER TABLE "s"."from" RENAME TO "to_"` |
-| `rename_column ?schema ~table ~from ~to_` | `ALTER TABLE "s"."table" RENAME COLUMN "from" TO "to_"` |
+| `rename_table ?schema from ~to_` | `ALTER TABLE "s"."from" RENAME TO "to_"` |
+| `rename_column ?schema ~table from ~to_` | `ALTER TABLE "s"."table" RENAME COLUMN "from" TO "to_"` |
 | `sql s` | `s` as written |
 | `run f` | `f : [ `Transaction ] session @ local -> (unit, Error.t) result` |
 
@@ -78,7 +79,7 @@ strictly increasing; a duplicate or decreasing version raises
 1. Creates the bookkeeping table if missing, in its own transaction:
    `"main"."duckdb_ml_migrations"(version BIGINT PRIMARY KEY, name VARCHAR
    NOT NULL, checksum VARCHAR NOT NULL, applied_at TIMESTAMPTZ NOT NULL
-   DEFAULT now())`, declared with `Table.declare`.
+   DEFAULT now())` (`CREATE TABLE IF NOT EXISTS`).
 2. Reads the applied rows by version and checks that they are exactly a
    prefix of the list: same version, name and checksum at each position. The
    first difference is `Migration_mismatch { version; expected; actual }`:
@@ -112,12 +113,26 @@ steps applied.
 
 - `lib/duckdb/migration.ml`: a step is `{ version; name; checksum; perform }`,
   `perform : [ `Transaction ] Session.t @ local -> (unit, Failure.t) result`;
-  SQL kinds render their SQL when built. The bookkeeping table is a
-  `Table.declare` value; history is read with a typed request and each row
-  inserted with `Table.insert` in the step's transaction.
+  SQL kinds render their SQL when built. The bookkeeping table is created by
+  hand-written SQL; history is read with a typed request and each row
+  inserted with a typed request in the step's transaction.
 - `add_column` reads the picked column's codec, default and constraints from
   `Request.Table_def`.
 - `duckdb.mli`: `Migration` after `Table`.
+
+## Refinements found while prototyping
+
+- `rename_table` and `rename_column` take the old name positionally
+  (`rename_table "a" ~to_:"b"`): an optional `?schema` needs a positional
+  argument after it to be erasable.
+- The bookkeeping table is created by hand-written SQL, not
+  `Table.declare`: its `applied_at` default is `now()`, which typed literals
+  cannot express.
+- History mismatches carry the context `Migration { version; name }` of the
+  differing position (the step's name, or the applied row's when the code
+  has no step there).
+- Adding `Migration` to `Error.context` extends exhaustive matches; the
+  examples and the request-types fixture match it.
 
 ## Verified DuckDB facts
 

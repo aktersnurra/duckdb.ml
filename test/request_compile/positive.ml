@@ -47,7 +47,7 @@ let parquet (c : D.connection) path =
     D.Parquet.fold c [path] D.Fields.[int64] ~row:(fun x -> x) ~init:0 ~f:(fun _ n -> Ok (D.Continue (n + 1))) in
   D.Parquet.fold_table c [path] example ~init:[] ~f:(fun r rs -> Ok (D.Continue (r :: rs)))
 let context (e : D.Error.t) = D.Error.(match e.context with
-  | Query sql | Parquet sql -> sql | Table { name; _ } -> name | Database | Connection | Transaction -> "") ^ R.query one
+  | Query sql | Parquet sql -> sql | Table { name; _ } | Migration { name; _ } -> name | Database | Connection | Transaction -> "") ^ R.query one
 
 (* Backend-generic code over the CONNECTION signature. *)
 module Count (B : R.CONNECTION) = struct
