@@ -504,6 +504,222 @@ module Table : sig
   val flush : (_, _) appender @ local -> (unit, Error.t) result
 end
 
+(** Typed single-table SELECT queries. A query is built from typed
+    expressions and compiles to an ordinary [Request.t]:
+
+    {[
+      let adults = Sql.(
+        query Params.[int32] (fun [min_age] ->
+          from users (fun [id; name; age] ->
+            select Exprs.[id; name] ~row:(fun id name -> (id, name))
+              ~where:(is_true Null.(age >= nullable (param min_age)))
+              ~order_by:[asc id] ~limit:100)))
+    ]}
+
+    Binder patterns such as [fun [id; name; age]] select their constructors
+    by type (warnings 40/42, off by default in Dune). A local open
+    [Sql.( … )] shadows the comparison and arithmetic operators. Checked at
+    run time, on first prepare: names against the catalog, an expression used
+    outside its own query, a declared parameter the query never uses
+    ([Parameter_count]), and [~having] on a [select] outside [group_by]. *)
+module Sql : sig
+  (** Expression kinds: a value per table row, or per group. *)
+  type row
+  type grouped
+
+  (** An expression decoding to ['a] when selected, with nullability ['n]
+      ([Codec.non_null] or [Codec.nullable]) and kind ['k]. *)
+  type ('a, 'n, +'k) expr
+
+  (** A bound query parameter; [param] makes it an expression of any kind. *)
+  type ('a, 'n) param
+  type 'k order
+
+  (** Parameter declarations, e.g. [Params.[int32; nullable string]]. *)
+  module Params : sig
+    include module type of Codec.Values
+    type ('list, 'shape) t =
+      | [] : (unit, unit) t
+      | (::) : ('a, 'n) Codec.t * ('list, 'shape) t -> ('a * 'list, ('a, 'n) Codec.slot * 'shape) t
+  end
+
+  (** Bound parameters, as [query] passes them to its callback. *)
+  module Bound : sig
+    type 'shape t =
+      | [] : unit t
+      | (::) : ('a, 'n) param * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+  end
+
+  (** Bound columns or group keys, as [from] and [group_by] pass them. *)
+  module Binders : sig
+    type ('shape, 'k) t =
+      | [] : (unit, 'k) t
+      | (::) : ('a, 'n, 'k) expr * ('shape, 'k) t -> (('a, 'n) Codec.slot * 'shape, 'k) t
+  end
+
+  (** [group_by] keys: row expressions. *)
+  module Keys : sig
+    type 'shape t =
+      | [] : unit t
+      | (::) : ('a, 'n, row) expr * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+  end
+
+  (** A select list; all elements share one kind. *)
+  module Exprs : sig
+    type ('list, 'fn, 'result, 'k) t =
+      | [] : (unit, 'result, 'result, 'k) t
+      | (::) : ('a, _, 'k) expr * ('list, 'fn, 'result, 'k) t -> ('a * 'list, 'a -> 'fn, 'result, 'k) t
+  end
+
+  (** What a [from] callback returns: rows ['row] of select-list kind ['k]
+      and multiplicity ['m]. *)
+  type ('row, 'k, 'm) body
+  type ('row, 'm) source
+
+  (** Parameters render as [$1], [$2], … in declaration order. *)
+  val query : ('params, 'shape) Params.t -> ('shape Bound.t -> ('row, 'm) source) -> ('params, 'row, 'm) Request.t
+
+  (** Binds the table's columns as row expressions, in declaration order. *)
+  val from : (_, 'shape, _) Table.t -> (('shape, row) Binders.t -> ('row, row, 'm) body) -> ('row, 'm) source
+
+  (** Any number of rows. [~where] filters rows; [~having] filters groups and
+      belongs inside [group_by]. *)
+  val select : ?where:(bool, Codec.non_null, row) expr -> ?having:(bool, Codec.non_null, grouped) expr ->
+    ?order_by:'k order list -> ?limit:int -> ?offset:int -> ('list, 'fn, 'row, 'k) Exprs.t -> row:'fn ->
+    ('row, 'k, Request.many) body
+
+  (** Aggregates without GROUP BY: exactly one row. *)
+  val aggregate : ?where:(bool, Codec.non_null, row) expr -> ('list, 'fn, 'row, grouped) Exprs.t -> row:'fn ->
+    ('row, row, Request.one) body
+
+  (** Rebinds the keys as grouped expressions for a grouped [select]. *)
+  val group_by : 'shape Keys.t -> (('shape, grouped) Binders.t -> ('row, grouped, Request.many) body) ->
+    ('row, row, Request.many) body
+
+  val param : ('a, 'n) param -> ('a, 'n, 'k) expr
+  val asc : (_, _, 'k) expr -> 'k order
+  val desc : (_, _, 'k) expr -> 'k order
+
+  (** Literals render as typed SQL. Values of custom-codec types enter a
+      query as parameters. *)
+  val bool : bool -> (bool, Codec.non_null, 'k) expr
+  val int8 : int8 -> (int8, Codec.non_null, 'k) expr
+  val int16 : int16 -> (int16, Codec.non_null, 'k) expr
+  val int32 : int32 -> (int32, Codec.non_null, 'k) expr
+  val int64 : int64 -> (int64, Codec.non_null, 'k) expr
+  val float32 : float32 -> (float32, Codec.non_null, 'k) expr
+  val float64 : float -> (float, Codec.non_null, 'k) expr
+  val string : string -> (string, Codec.non_null, 'k) expr
+
+  (** Comparisons of non-null operands; on a custom codec they compare the
+      base values. [Null] holds the three-valued versions. *)
+  val ( = ) : ('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( <> ) : ('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( < ) : ('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( <= ) : ('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( > ) : ('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( >= ) : ('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( && ) : (bool, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val ( || ) : (bool, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val not : (bool, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+  val like : (string, Codec.non_null, 'k) expr -> (string, Codec.non_null, 'k) expr -> (bool, Codec.non_null, 'k) expr
+
+  val nullable : ('a, Codec.non_null, 'k) expr -> ('a option, Codec.nullable, 'k) expr
+  val coalesce : ('a option, Codec.nullable, 'k) expr -> default:('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr
+  val is_null : (_ option, Codec.nullable, 'k) expr -> (bool, Codec.non_null, 'k) expr
+
+  (** SQL [IS TRUE]: NULL becomes false. *)
+  val is_true : (bool option, Codec.nullable, 'k) expr -> (bool, Codec.non_null, 'k) expr
+
+  (** Aggregates. [min], [max], [sum] and [avg] are NULL over no rows. *)
+  val count_star : (int64, Codec.non_null, grouped) expr
+  val count : (_, _, row) expr -> (int64, Codec.non_null, grouped) expr
+  val min : ('a, Codec.non_null, row) expr -> ('a option, Codec.nullable, grouped) expr
+  val max : ('a, Codec.non_null, row) expr -> ('a option, Codec.nullable, grouped) expr
+
+  (** Arithmetic keeps the operand type; overflow is a native error. Integer
+      [/] truncates, and a zero divisor yields NULL. *)
+  module type INTEGRAL = sig
+    type t
+    val ( + ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val ( - ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val ( * ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
+    val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+    module Null : sig
+      val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val ( * ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
+      val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    end
+  end
+
+  (** As [INTEGRAL], but [/] is IEEE division (a zero divisor gives an infinity or NaN). *)
+  module type FRACTIONAL = sig
+    type t
+    val ( + ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val ( - ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val ( * ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+    val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
+    val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+    module Null : sig
+      val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val ( * ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+      val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
+      val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    end
+  end
+  module I64 : INTEGRAL with type t := int64
+  module I32 : INTEGRAL with type t := int32
+  module I16 : INTEGRAL with type t := int16
+  module I8 : INTEGRAL with type t := int8
+  module F64 : FRACTIONAL with type t := float
+  module F32 : FRACTIONAL with type t := float32
+
+  (** [I64]'s arithmetic and aggregates, and [F64]'s arithmetic as [+.] …. *)
+  val ( + ) : (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr
+  val ( - ) : (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr
+  val ( * ) : (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr
+  val ( / ) : (int64, Codec.non_null, 'k) expr -> (int64, Codec.non_null, 'k) expr -> (int64 option, Codec.nullable, 'k) expr
+  val sum : (int64, Codec.non_null, row) expr -> (int64 option, Codec.nullable, grouped) expr
+  val avg : (int64, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  val ( +. ) : (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr
+  val ( -. ) : (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr
+  val ( *. ) : (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr
+  val ( /. ) : (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr -> (float, Codec.non_null, 'k) expr
+
+  (** Three-valued versions over nullable operands. *)
+  module Null : sig
+    val ( = ) : ('a option, Codec.nullable, 'k) expr -> ('a option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( <> ) : ('a option, Codec.nullable, 'k) expr -> ('a option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( < ) : ('a option, Codec.nullable, 'k) expr -> ('a option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( <= ) : ('a option, Codec.nullable, 'k) expr -> ('a option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( > ) : ('a option, Codec.nullable, 'k) expr -> ('a option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( >= ) : ('a option, Codec.nullable, 'k) expr -> ('a option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( && ) : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val ( || ) : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val not : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val min : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
+    val max : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
+    val ( + ) : (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr
+    val ( - ) : (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr
+    val ( * ) : (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr
+    val ( / ) : (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr
+    val sum : (int64 option, Codec.nullable, row) expr -> (int64 option, Codec.nullable, grouped) expr
+    val avg : (int64 option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    val ( +. ) : (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr
+    val ( -. ) : (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr
+    val ( *. ) : (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr
+    val ( /. ) : (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr -> (float option, Codec.nullable, 'k) expr
+  end
+end
+
 module Parquet : sig
 
 type path

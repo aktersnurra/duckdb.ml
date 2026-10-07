@@ -136,6 +136,7 @@ module Fields = Fields
 module Args = Args
 module Request = Request
 module Table = Table
+module Sql = Sql
 module Parquet = Parquet
 
 module Owned = struct

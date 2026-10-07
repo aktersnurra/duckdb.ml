@@ -2,5 +2,5 @@
  (flags (:standard -extension-universe beta))
  (ocamlopt_flags (:standard -zero-alloc-check default))
  (private_modules spine failure resource session query borrowed_chunk column bulk decode scalar appender parquet
-  codec fields columns args request table)
+  codec fields columns args request table sql)
  (libraries base threads stdlib_stable stdlib_upstream_compatible duckdb-ffi))

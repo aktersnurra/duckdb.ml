@@ -230,3 +230,7 @@
 (test (name test_bulk) (modules test_bulk) (libraries base duckdb duckdb-ffi))
 (test (name test_allocation) (modules test_allocation)
  (libraries base duckdb stdlib_upstream_compatible))
+(test (name test_sql) (modules test_sql) (libraries base duckdb duckdb-ffi))
+(rule (alias runtest)
+ (deps check_sql_types.sh ../lib/duckdb/duckdb.mli (glob_files sql_compile/*))
+ (action (run bash %{dep:check_sql_types.sh} %{ocamlc})))

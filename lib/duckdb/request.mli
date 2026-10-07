@@ -26,9 +26,15 @@ val many : ?oneshot:bool -> ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t 
   string -> ('params, 'row, many) t
 val query : (_, _, _) t -> string
 
+(* A request built by [Sql]; its multiplicity comes from the query's structure. *)
+val generated : ('params, _, _) Fields.t -> (_, 'fn, 'row) Fields.t -> row:'fn -> string -> ('params, 'row, 'm) t
+
 val declare_table : ?schema:string -> string -> ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn ->
   ('columns, 'shape, 'row) table
 val fields_of_columns : ('list, 'fn, 'result, _) Columns.t -> ('list, 'fn, 'result) Fields.t
+
+(* A double-quoted SQL identifier. *)
+val quote : string -> string
 
 type ('columns, 'row) appender
 val with_appender_transaction : transaction -> ('columns, _, 'row) table ->

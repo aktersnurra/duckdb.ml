@@ -1,0 +1,300 @@
+open! Base
+
+type row = private Row_kind
+type grouped = private Grouped_kind
+
+(* Expressions are untyped nodes; the phantom indices live in the interface. *)
+type node =
+  | Column of string
+  | Param of { index : int; sql_type : string }
+  | Literal of string
+  | Apply of string * node list
+  | Infix of string * node * node
+  | Prefix of string * node
+  | Postfix of node * string
+  | Cast of node * string
+  | Count_star
+
+let rec render = function
+  | Column quoted -> "t0." ^ quoted
+  | Param { index; sql_type } -> Printf.sprintf "CAST($%d AS %s)" index sql_type
+  | Literal sql -> sql
+  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
+  | Infix (op, a, b) -> "(" ^ render a ^ " " ^ op ^ " " ^ render b ^ ")"
+  | Prefix (op, a) -> "(" ^ op ^ " " ^ render a ^ ")"
+  | Postfix (a, op) -> "(" ^ render a ^ " " ^ op ^ ")"
+  | Cast (a, sql_type) -> "CAST(" ^ render a ^ " AS " ^ sql_type ^ ")"
+  | Count_star -> "count(*)"
+
+(* The SQL type a codec crosses the native boundary as. *)
+let sql_type : type a n. (a, n) Codec.t -> string = fun codec ->
+  let (Codec.Packed_scalar scalar) = match codec with
+    | Codec.Non_null plan -> Codec.plan_scalar plan
+    | Codec.Nullable plan -> Codec.plan_scalar plan in
+  Scalar.name scalar
+
+type ('a, 'n, 'k) expr = { node : node; codec : ('a, 'n) Codec.t }
+type ('a, 'n) param = { index : int; codec : ('a, 'n) Codec.t }
+type 'k order = { key : node; descending : bool }
+
+module Params = struct
+  include Codec.Values
+  type ('list, 'shape) t =
+    | [] : (unit, unit) t
+    | (::) : ('a, 'n) Codec.t * ('list, 'shape) t -> ('a * 'list, ('a, 'n) Codec.slot * 'shape) t
+end
+module Bound = struct
+  type 'shape t =
+    | [] : unit t
+    | (::) : ('a, 'n) param * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+end
+module Binders = struct
+  type ('shape, 'k) t =
+    | [] : (unit, 'k) t
+    | (::) : ('a, 'n, 'k) expr * ('shape, 'k) t -> (('a, 'n) Codec.slot * 'shape, 'k) t
+end
+module Keys = struct
+  type 'shape t =
+    | [] : unit t
+    | (::) : ('a, 'n, row) expr * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+end
+module Exprs = struct
+  type ('list, 'fn, 'result, 'k) t =
+    | [] : (unit, 'result, 'result, 'k) t
+    | (::) : ('a, _, 'k) expr * ('list, 'fn, 'result, 'k) t -> ('a * 'list, 'a -> 'fn, 'result, 'k) t
+end
+
+type ('row, 'k, 'm) body =
+  Body : { columns : (_, 'fn, 'row) Fields.t; row : 'fn; list : node list; where : node option;
+           group_by : node list; having : node option; order_by : 'k order list;
+           limit : int option; offset : int option } -> ('row, 'k, 'm) body
+type ('row, 'm) source = { target : string; body : ('row, row, 'm) body }
+
+let rec fields_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> (l, f, r) Fields.t = function
+  | Exprs.[] -> Fields.[]
+  | Exprs.(e :: rest) -> Fields.(e.codec :: fields_of_exprs rest)
+let rec nodes_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> node list = function
+  | Exprs.[] -> []
+  | Exprs.(e :: rest) -> e.node :: nodes_of_exprs rest
+let body exprs ~row ~where ~group_by ~having ~order_by ~limit ~offset =
+  Body { columns = fields_of_exprs exprs; row; list = nodes_of_exprs exprs;
+         where = Option.map where ~f:(fun (e : _ expr) -> e.node); group_by;
+         having = Option.map having ~f:(fun (e : _ expr) -> e.node); order_by; limit; offset }
+
+let select ?where ?having ?(order_by = []) ?limit ?offset exprs ~row =
+  body exprs ~row ~where ~group_by:[] ~having ~order_by ~limit ~offset
+let aggregate ?where exprs ~row =
+  body exprs ~row ~where ~group_by:[] ~having:None ~order_by:[] ~limit:None ~offset:None
+let rec key_nodes : type s. s Keys.t -> node list = function
+  | Keys.[] -> []
+  | Keys.(k :: rest) -> k.node :: key_nodes rest
+let rec rebind : type s. s Keys.t -> (s, grouped) Binders.t = function
+  | Keys.[] -> Binders.[]
+  | Keys.(k :: rest) -> Binders.({ node = k.node; codec = k.codec } :: rebind rest)
+let group_by keys f =
+  let (Body b) = f (rebind keys) in
+  Body { columns = b.columns; row = b.row; list = b.list; where = b.where; group_by = key_nodes keys;
+         having = b.having; order_by = List.map b.order_by ~f:(fun o -> { key = o.key; descending = o.descending });
+         limit = b.limit; offset = b.offset }
+
+let rec binders : type l f r s. (l, f, r, s) Columns.t -> (s, row) Binders.t = function
+  | Columns.[] -> Binders.[]
+  | Columns.((name, codec) :: rest) -> Binders.({ node = Column (Request.quote name); codec } :: binders rest)
+let from (Request.Table_def t : (_, _, _) Request.table) f =
+  { target = Request.quote t.schema ^ "." ^ Request.quote t.name; body = f (binders t.columns) }
+
+type 'l packed_fields = Packed_fields : ('l, _, _) Fields.t -> 'l packed_fields
+let rec fields_of_params : type l s. (l, s) Params.t -> l packed_fields = function
+  | Params.[] -> Packed_fields Fields.[]
+  | Params.(codec :: rest) ->
+    let (Packed_fields fields) = fields_of_params rest in
+    Packed_fields Fields.(codec :: fields)
+let rec bound : type l s. (l, s) Params.t -> index:int -> s Bound.t = fun params ~index ->
+  match params with
+  | Params.[] -> Bound.[]
+  | Params.(codec :: rest) -> Bound.({ index; codec } :: bound rest ~index:(index + 1))
+
+let render_select ~target (Body b) =
+  let clause keyword = function None -> "" | Some node -> " " ^ keyword ^ " " ^ render node in
+  let listed nodes = String.concat ~sep:", " (List.map nodes ~f:render) in
+  let group_by = match b.group_by with [] -> "" | keys -> " GROUP BY " ^ listed keys in
+  let order_by = match b.order_by with
+    | [] -> ""
+    | orders -> " ORDER BY " ^ String.concat ~sep:", " (List.map orders ~f:(fun o ->
+        render o.key ^ if o.descending then " DESC" else " ASC")) in
+  let number keyword = function None -> "" | Some n -> " " ^ keyword ^ " " ^ Int.to_string n in
+  "SELECT " ^ listed b.list ^ " FROM " ^ target ^ " AS t0" ^ clause "WHERE" b.where ^ group_by
+  ^ clause "HAVING" b.having ^ order_by ^ number "LIMIT" b.limit ^ number "OFFSET" b.offset
+
+let query params f =
+  let (Packed_fields fields) = fields_of_params params in
+  let { target; body = Body b as body } = f (bound params ~index:1) in
+  Request.generated fields b.columns ~row:b.row (render_select ~target body)
+
+(* Expressions. *)
+let param (p : (_, _) param) = { node = Param { index = p.index; sql_type = sql_type p.codec }; codec = p.codec }
+let asc (e : _ expr) = { key = e.node; descending = false }
+let desc (e : _ expr) = { key = e.node; descending = true }
+
+let literal codec sql = { node = Literal sql; codec }
+let typed scalar text = Printf.sprintf "CAST(%s AS %s)" text (Scalar.name scalar)
+(* Doubles print with enough digits to round-trip; DuckDB parses the
+   non-finite spellings from strings. *)
+let float_text f =
+  if Float.is_nan f then "'nan'"
+  else if Float.is_inf f then if Float.(f > 0.) then "'inf'" else "'-inf'"
+  else "'" ^ Printf.sprintf "%.17g" f ^ "'"
+let bool b = literal Codec.Values.bool (if b then "TRUE" else "FALSE")
+let int8 v = literal Codec.Values.int8 (typed Scalar.Int8 (Int.to_string (Stdlib_stable.Int8.to_int v)))
+let int16 v = literal Codec.Values.int16 (typed Scalar.Int16 (Int.to_string (Stdlib_stable.Int16.to_int v)))
+let int32 v = literal Codec.Values.int32 (typed Scalar.Int32 (Int32.to_string v))
+let int64 v = literal Codec.Values.int64 (typed Scalar.Int64 (Int64.to_string v))
+let float32 v = literal Codec.Values.float32 (typed Scalar.Float32 (float_text (Stdlib_stable.Float32.to_float v)))
+let float64 v = literal Codec.Values.float64 (typed Scalar.Float64 (float_text v))
+let string s = literal Codec.Values.string ("'" ^ String.substr_replace_all s ~pattern:"'" ~with_:"''" ^ "'")
+
+let nullable (e : (_, Codec.non_null, _) expr) = { node = e.node; codec = Codec.Values.nullable e.codec }
+let coalesce (e : _ expr) ~(default : _ expr) = { node = Apply ("coalesce", [e.node; default.node]); codec = default.codec }
+let is_null (e : _ expr) = { node = Postfix (e.node, "IS NULL"); codec = Codec.Values.bool }
+let is_true (e : _ expr) = { node = Postfix (e.node, "IS TRUE"); codec = Codec.Values.bool }
+let like (a : _ expr) (b : _ expr) = { node = Infix ("LIKE", a.node, b.node); codec = Codec.Values.bool }
+
+let count_star = { node = Count_star; codec = Codec.Values.int64 }
+let count (e : _ expr) = { node = Apply ("count", [e.node]); codec = Codec.Values.int64 }
+let extreme name (e : (_, Codec.non_null, _) expr) = { node = Apply (name, [e.node]); codec = Codec.Values.nullable e.codec }
+let null_extreme name (e : (_, Codec.nullable, _) expr) = { node = Apply (name, [e.node]); codec = e.codec }
+
+(* Arithmetic keeps the operand type: results are cast back to it. *)
+let arith op (a : _ expr) (b : _ expr) = { node = Cast (Infix (op, a.node, b.node), sql_type a.codec); codec = a.codec }
+let null_division op (a : (_, Codec.non_null, _) expr) (b : _ expr) =
+  { node = Cast (Infix (op, a.node, b.node), sql_type a.codec); codec = Codec.Values.nullable a.codec }
+let sum (e : (_, Codec.non_null, _) expr) =
+  { node = Cast (Apply ("sum", [e.node]), sql_type e.codec); codec = Codec.Values.nullable e.codec }
+let null_sum (e : (_, Codec.nullable, _) expr) = { node = Cast (Apply ("sum", [e.node]), sql_type e.codec); codec = e.codec }
+let avg (e : _ expr) = { node = Cast (Apply ("avg", [e.node]), "DOUBLE"); codec = Codec.Values.(nullable float64) }
+
+(* Arithmetic signatures, constrained per type by [I64] … [F32]. *)
+module type INTEGRAL = sig
+  type t
+  val ( + ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val ( - ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val ( * ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t option, Codec.nullable, 'k) expr
+  val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
+  val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  module Null : sig
+    val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val ( * ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
+    val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+  end
+end
+
+(** As [INTEGRAL], but [/] is IEEE division (a zero divisor gives an infinity or NaN). *)
+module type FRACTIONAL = sig
+  type t
+  val ( + ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val ( - ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val ( * ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
+  val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
+  val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  module Null : sig
+    val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val ( * ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
+    val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
+    val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+  end
+end
+module Integral = struct
+  let ( + ) a b = arith "+" a b
+  let ( - ) a b = arith "-" a b
+  let ( * ) a b = arith "*" a b
+  (* DuckDB's integer division; a zero divisor yields NULL. *)
+  let ( / ) a b = null_division "//" a b
+  let sum = sum
+  let avg = avg
+  module Null = struct
+    let ( + ) a b = arith "+" a b
+    let ( - ) a b = arith "-" a b
+    let ( * ) a b = arith "*" a b
+    let ( / ) a b = arith "//" a b
+    let sum = null_sum
+    let avg = avg
+  end
+end
+module Fractional = struct
+  let ( + ) a b = arith "+" a b
+  let ( - ) a b = arith "-" a b
+  let ( * ) a b = arith "*" a b
+  let ( / ) a b = arith "/" a b
+  let sum = sum
+  let avg = avg
+  module Null = struct
+    let ( + ) a b = arith "+" a b
+    let ( - ) a b = arith "-" a b
+    let ( * ) a b = arith "*" a b
+    let ( / ) a b = arith "/" a b
+    let sum = null_sum
+    let avg = avg
+  end
+end
+module I64 = Integral
+module I32 = Integral
+module I16 = Integral
+module I8 = Integral
+module F64 = Fractional
+module F32 = Fractional
+
+(* Defined last: these shadow Base's operators. *)
+let compare op (a : _ expr) (b : _ expr) = { node = Infix (op, a.node, b.node); codec = Codec.Values.bool }
+let null_compare op (a : _ expr) (b : _ expr) =
+  { node = Infix (op, a.node, b.node); codec = Codec.Values.(nullable bool) }
+let ( = ) a b = compare "=" a b
+let ( <> ) a b = compare "<>" a b
+let ( < ) a b = compare "<" a b
+let ( <= ) a b = compare "<=" a b
+let ( > ) a b = compare ">" a b
+let ( >= ) a b = compare ">=" a b
+let ( && ) a b = compare "AND" a b
+let ( || ) a b = compare "OR" a b
+let not (e : _ expr) = { node = Prefix ("NOT", e.node); codec = e.codec }
+let min e = extreme "min" e
+let max e = extreme "max" e
+let ( + ) = I64.( + )
+let ( - ) = I64.( - )
+let ( * ) = I64.( * )
+let ( / ) = I64.( / )
+let sum = I64.sum
+let avg = I64.avg
+let ( +. ) = F64.( + )
+let ( -. ) = F64.( - )
+let ( *. ) = F64.( * )
+let ( /. ) = F64.( / )
+module Null = struct
+  let ( = ) a b = null_compare "=" a b
+  let ( <> ) a b = null_compare "<>" a b
+  let ( < ) a b = null_compare "<" a b
+  let ( <= ) a b = null_compare "<=" a b
+  let ( > ) a b = null_compare ">" a b
+  let ( >= ) a b = null_compare ">=" a b
+  let ( && ) a b = null_compare "AND" a b
+  let ( || ) a b = null_compare "OR" a b
+  let not (e : _ expr) = { node = Prefix ("NOT", e.node); codec = e.codec }
+  let min e = null_extreme "min" e
+  let max e = null_extreme "max" e
+  let ( + ) = I64.Null.( + )
+  let ( - ) = I64.Null.( - )
+  let ( * ) = I64.Null.( * )
+  let ( / ) = I64.Null.( / )
+  let sum = I64.Null.sum
+  let avg = I64.Null.avg
+  let ( +. ) = F64.Null.( + )
+  let ( -. ) = F64.Null.( - )
+  let ( *. ) = F64.Null.( * )
+  let ( /. ) = F64.Null.( / )
+end

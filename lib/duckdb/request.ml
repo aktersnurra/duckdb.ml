@@ -26,6 +26,7 @@ let exec ?oneshot params sql = make ?oneshot params No_rows sql
 let one ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
 let zero_or_one ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
 let many ?oneshot params fields ~row sql = make ?oneshot params (Rows (fields, row)) sql
+let generated params fields ~row sql = make params (Rows (fields, row)) sql
 let query r = r.sql
 
 module type QUERY = sig
