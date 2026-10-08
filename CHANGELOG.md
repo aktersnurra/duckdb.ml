@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Review limitations closed
+
+- `Table.verify` ignores ASCII case in schema, table, column and referenced
+  names, as DuckDB does, and accepts a unique index over plain columns for a
+  declared UNIQUE.
+- `Table.Constraint.foreign_key` raises `Invalid_argument` when the key's
+  SQL types differ from the referenced key's (VARCHAR against BLOB).
+- `Sql.select` and `Sql.aggregate` require a non-empty select list by type;
+  a negative `~limit` or `~offset` raises `Invalid_argument`.
+- `Migration.apply` creates its bookkeeping table only when missing, so it
+  runs on an up-to-date read-only database.
+
 ### Versioned migrations (sub-project 3b)
 
 [Design](docs/design/migrations.md).

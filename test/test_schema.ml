@@ -180,3 +180,32 @@ let () =
       ~constraints:(fun [a; b] -> Constraint.[
         foreign_key Key.[a; b] ~references:(only_pk, fun [x; y] -> Key.[y; x]) ])));
   Stdlib.print_endline "schema: foreign keys pair columns in order, in verify and at declare=ok"
+
+(* Documented limitations, closed. verify compares identifiers as DuckDB
+   does, ignoring case. A unique index over plain columns satisfies a
+   declared UNIQUE; an expression index does not. A foreign key between
+   columns of different SQL types (BLOB and VARCHAR share OCaml's string)
+   is rejected when declared. *)
+let () =
+  connected (fun c ->
+    ddl c "CREATE TABLE \"Users\" (\"ID\" BIGINT PRIMARY KEY, \"Email\" VARCHAR NOT NULL UNIQUE, AGE INTEGER DEFAULT 18, \
+           CHECK (age >= 0))";
+    ok (T.verify c users));
+  let accounts = T.(declare "accounts" Columns.["id", int64; "email", string] ~row:(fun id email -> (id, email))
+    ~constraints:(fun [id; email] -> Constraint.[ primary_key Key.[id]; unique Key.[email] ])) in
+  connected (fun c ->
+    ddl c "CREATE TABLE accounts (id BIGINT PRIMARY KEY, email VARCHAR NOT NULL)";
+    ddl c "CREATE UNIQUE INDEX accounts_email ON accounts (\"EMAIL\")";
+    ok (T.verify c accounts));
+  connected (fun c ->
+    ddl c "CREATE TABLE accounts (id BIGINT PRIMARY KEY, email VARCHAR NOT NULL)";
+    ddl c "CREATE UNIQUE INDEX accounts_email ON accounts (lower(email))";
+    match T.verify c accounts with
+    | Error { D.Error.cause = Constraint_mismatch { constraint_kind = "UNIQUE"; _ }; _ } -> ()
+    | Error e -> failwith ("expression index: " ^ describe e)
+    | Ok () -> failwith "expression index: verified");
+  let blobs = T.(declare "blobs" Columns.["b", blob] ~row:Fn.id
+    ~constraints:(fun [b] -> Constraint.[ primary_key Key.[b] ])) in
+  invalid "foreign key from VARCHAR to BLOB" (fun () -> T.(declare "t" Columns.["s", string] ~row:Fn.id
+    ~constraints:(fun [s] -> Constraint.[ foreign_key Key.[s] ~references:(blobs, fun [b] -> Key.[b]) ])));
+  Stdlib.print_endline "schema: verify ignores identifier case, accepts unique indexes; typed foreign keys=ok"

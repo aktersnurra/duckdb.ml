@@ -1,0 +1,5 @@
+module D = Duckdb
+module S = D.Sql
+let users = D.Table.(declare "users" Columns.["id", int64; "name", string; "age", nullable int32]
+  ~row:(fun id name age -> (id, name, age)))
+let q = S.(query Params.[] (fun [] -> from users (fun [_; _; _] -> select Exprs.[] ~row:())))

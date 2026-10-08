@@ -542,15 +542,16 @@ module Sql : sig
   val from : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('row, row, 'm) body) -> ('row, 'm) source
 
   (** Any number of rows. [~where] filters rows; [~having] filters groups and
-      belongs inside [group_by]. *)
+      belongs inside [group_by]. The select list is non-empty (by type); a
+      negative [~limit] or [~offset] raises [Invalid_argument]. *)
   val select : ?where:(bool, Codec.non_null, row) expr -> ?having:(bool, Codec.non_null, grouped) expr ->
-    ?order_by:'k order list -> ?limit:int -> ?offset:int -> ('list, 'fn, 'row, 'k) Exprs.t -> row:'fn ->
+    ?order_by:'k order list -> ?limit:int -> ?offset:int -> ('a * 'list, 'fn, 'row, 'k) Exprs.t -> row:'fn ->
     ('row, 'k, Request.many) body
 
   (** Aggregates without GROUP BY: exactly one row. A select list without
       any aggregate raises [Invalid_argument] when built (it would return a
       row per table row). *)
-  val aggregate : ?where:(bool, Codec.non_null, row) expr -> ('list, 'fn, 'row, grouped) Exprs.t -> row:'fn ->
+  val aggregate : ?where:(bool, Codec.non_null, row) expr -> ('a * 'list, 'fn, 'row, grouped) Exprs.t -> row:'fn ->
     ('row, row, Request.one) body
 
   (** Rebinds the keys as grouped expressions for a grouped [select]. *)

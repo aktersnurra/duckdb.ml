@@ -67,7 +67,11 @@ let add_column (Request.Table_def t : (_, _, _) Table.t) pick =
 let table t = Packed t
 
 (* The bookkeeping table. Hand-written: its [applied_at] default is [now()],
-   which typed literals cannot express. *)
+   which typed literals cannot express. Created only when missing, so an
+   up-to-date read-only database migrates (to nothing). *)
+let history_exists = Request.one Fields.[] Fields.[bool] ~row:Fn.id
+  "SELECT count(*) > 0 FROM duckdb_tables() WHERE database_name = current_database() \
+   AND schema_name = 'main' AND table_name = 'duckdb_ml_migrations'"
 let create_history = Request.exec ~oneshot:true Fields.[]
   "CREATE TABLE IF NOT EXISTS \"main\".\"duckdb_ml_migrations\" (\"version\" BIGINT PRIMARY KEY, \
    \"name\" VARCHAR NOT NULL, \"checksum\" VARCHAR NOT NULL, \
@@ -128,7 +132,11 @@ let rec check_versions = function
 
 let apply (c @ local) ?(verify = []) steps =
   check_versions steps;
-  match Request.Session.exec c create_history Args.[] with
+  let created = match Request.Session.find c history_exists Args.[] with
+    | Error e -> Error e
+    | Ok true -> Ok ()
+    | Ok false -> Request.Session.exec c create_history Args.[] in
+  match created with
   | Error e -> Error e
   | Ok () ->
     match Request.Session.collect c read_history Args.[] with

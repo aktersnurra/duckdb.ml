@@ -36,7 +36,7 @@ val fields_of_columns : ('list, 'fn, 'result, _) Columns.t -> ('list, 'fn, 'resu
 
 (* Matches declared names to catalog [(name, has_default)] rows: the catalog
    position of each declared name, or [Unknown_column]/[Missing_column]. *)
-val check_declaration : string list -> (string * bool) list -> (int list, Failure.cause) Result.t
+val check_declaration : ?equal:(string -> string -> bool) -> string list -> (string * bool) list -> (int list, Failure.cause) Result.t
 
 (* A double-quoted SQL identifier. *)
 val quote : string -> string

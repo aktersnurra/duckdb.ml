@@ -251,8 +251,11 @@ Probed with the repository's OxCaml (scratch files, 2026-10-07):
 - The claim that `~having` outside `group_by` is always rejected at prepare
   was wrong: DuckDB accepts it when the select list holds only literals and
   parameters (one group, 0 or 1 rows; `many` admits that).
-- Documented: a `string` literal containing NUL fails with `Embedded_nul`;
-  an empty select list and a negative `~limit`/`~offset` fail at prepare.
+- Documented: a `string` literal containing NUL fails with `Embedded_nul`.
+- Follow-up (2026-10-08): `select` and `aggregate` take a non-empty
+  `Exprs` list by type (`('a * 'list, …) Exprs.t`; fixture
+  `sql_compile/empty_select`), and a negative `~limit` or `~offset` raises
+  `Invalid_argument` when the query is built.
 
 ## Refinements found while prototyping
 

@@ -82,7 +82,7 @@ strictly increasing; a duplicate or decreasing version raises
 `apply : [ `Connection ] session @ local -> ?verify:table list -> step list ->
 (int list, Error.t) result`:
 
-1. Creates the bookkeeping table if missing, in its own transaction:
+1. Creates the bookkeeping table if `duckdb_tables()` lacks it:
    `"main"."duckdb_ml_migrations"(version BIGINT PRIMARY KEY, name VARCHAR
    NOT NULL, checksum VARCHAR NOT NULL, applied_at TIMESTAMPTZ NOT NULL
    DEFAULT now())` (`CREATE TABLE IF NOT EXISTS`).
@@ -130,9 +130,11 @@ Rerunning it then finds the steps applied.
 
 ## Internals
 
-- `lib/duckdb/migration.ml`: a step is `{ version; name; checksum; perform }`,
-  `perform : [ `Transaction ] Session.t @ local -> (unit, Failure.t) result`;
-  SQL kinds render their SQL when built. The bookkeeping table is created by
+- `lib/duckdb/migration.ml`: a step is `{ version; name; checksum; kind }`,
+  `kind = Statements { statements; canonical } | Run f` with
+  `f : [ `Transaction ] Session.t @ local -> (unit, Failure.t) result`;
+  SQL kinds render their SQL when built, and the checksum covers
+  `canonical`. The bookkeeping table is created by
   hand-written SQL; history is read with a typed request and each row
   inserted with a typed request in the step's transaction.
 - `add_column` reads the picked column's codec, default and constraints from
@@ -149,6 +151,11 @@ Rerunning it then finds the steps applied.
   frozen ones, and checksums cover a declaration's structure instead of its
   DDL text.
 - The concurrency note said "two processes"; it is two connections.
+- Follow-up (2026-10-08): `apply` creates the bookkeeping table only when
+  `duckdb_tables()` lacks it. `CREATE TABLE IF NOT EXISTS` is rejected on a
+  read-only database even when the table exists ("Cannot execute statement
+  of type CREATE … read-only mode"), so an up-to-date database opened
+  read-only could not be checked; now it applies nothing and verifies.
 
 ## Refinements found while prototyping
 

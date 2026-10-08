@@ -288,13 +288,13 @@ let typed_failure = Native "Typed table operation failed; transaction must roll 
 let catalog_columns = many Fields.[string; string] Fields.[string; bool] ~row:(fun name default -> name, default)
   "SELECT column_name, column_default IS NOT NULL FROM duckdb_columns() \
    WHERE database_name = current_database() AND schema_name = ? AND table_name = ? ORDER BY column_index"
-let check_declaration names catalog =
-  let position name = List.findi catalog ~f:(fun _ (catalog_name, _) -> String.equal name catalog_name) in
+let check_declaration ?(equal = String.equal) names catalog =
+  let position name = List.findi catalog ~f:(fun _ (catalog_name, _) -> equal name catalog_name) in
   match List.find names ~f:(fun name -> Option.is_none (position name)) with
   | Some name -> Error (Unknown_column { name })
   | None ->
     match List.find catalog ~f:(fun (name, has_default) ->
-      not has_default && not (List.mem names name ~equal:String.equal)) with
+      not has_default && not (List.mem names name ~equal)) with
     | Some (name, _) -> Error (Missing_column { name })
     | None -> Ok (List.map names ~f:(fun name -> fst (Option.value_exn (position name))))
 let open_typed tx (Table_def t as table) =

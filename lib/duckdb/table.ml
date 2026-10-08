@@ -23,6 +23,9 @@ let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> s Binders
 let rec key_columns : type k. k Key.t -> (int * string) list = function
   | Key.[] -> []
   | Key.(c :: rest) -> (c.Sql.scope, c.name) :: key_columns rest
+let rec key_types : type k. k Key.t -> string list = function
+  | Key.[] -> []
+  | Key.(c :: rest) -> Sql.sql_type c.Sql.codec :: key_types rest
 let rec key_fields : type k. k Key.t -> k Sql.packed_fields = function
   | Key.[] -> Sql.Packed_fields Fields.[]
   | Key.(c :: rest) ->
@@ -49,12 +52,16 @@ module Constraint = struct
   let unique key = Unique (key_columns key)
   let foreign_key key ~references:((Request.Table_def other : (_, _, _) Request.table), f) =
     let scope = Sql.fresh_scope () in
-    let referenced = key_columns (f (binders other.columns ~scope)) in
+    let target = f (binders other.columns ~scope) in
+    let referenced = key_columns target in
     if List.exists referenced ~f:(fun (s, _) -> s <> scope) then Sql.foreign ();
     let references = List.map referenced ~f:snd in
     (* DuckDB matches the referenced columns in the key's declared order. *)
     if not (List.exists (keys other.constraints) ~f:(List.equal String.equal references)) then
       invalid_arg "Duckdb.Table: a foreign key must reference a declared primary or unique key, in its column order";
+    (* One OCaml type can stand for several SQL types (string: VARCHAR, BLOB). *)
+    if not (List.equal String.equal (key_types key) (key_types target)) then
+      invalid_arg "Duckdb.Table: a foreign key's columns must have the SQL types of the referenced key";
     Foreign_key { columns = key_columns key; table = other.schema ^ "\000" ^ other.name; references }
   let default (c : (_, _) column) (e : (_, _, _) Sql.expr) = Default { column = (c.scope, c.name); node = e.node }
   let check (e : (_, _, _) Sql.expr) = Check e.node
@@ -140,22 +147,41 @@ let create (s @ local) table = Request.Session.exec s (Request.exec ~oneshot:tru
 let catalog_columns = Request.many Fields.[string; string] Fields.[string; bool; bool]
   ~row:(fun name nullable default -> (name, nullable, default))
   "SELECT column_name, is_nullable, column_default IS NOT NULL FROM duckdb_columns() \
-   WHERE database_name = current_database() AND schema_name = ? AND table_name = ? ORDER BY column_index"
+   WHERE database_name = current_database() AND lower(schema_name) = lower(?) AND lower(table_name) = lower(?) \
+   ORDER BY column_index"
 let catalog_constraints = Request.many Fields.[string; string] Fields.[int64; string; string]
   ~row:(fun index kind table -> (index, kind, table))
   "SELECT CAST(constraint_index AS BIGINT), constraint_type, coalesce(referenced_table, '') \
-   FROM duckdb_constraints() WHERE database_name = current_database() AND schema_name = ? \
-   AND table_name = ? AND constraint_type <> 'NOT NULL'"
+   FROM duckdb_constraints() WHERE database_name = current_database() AND lower(schema_name) = lower(?) \
+   AND lower(table_name) = lower(?) AND constraint_type <> 'NOT NULL'"
 (* One row per listed name, in list order (a foreign key's two lists pair up
    by position). *)
 let catalog_names list = Request.many Fields.[string; string] Fields.[int64; string]
   ~row:(fun index name -> (index, name))
   ("SELECT index, name FROM (SELECT CAST(constraint_index AS BIGINT) AS index, \
     unnest(range(1, len(" ^ list ^ ") + 1)) AS position, unnest(" ^ list ^ ") AS name \
-    FROM duckdb_constraints() WHERE database_name = current_database() AND schema_name = ? \
-    AND table_name = ? AND constraint_type <> 'NOT NULL') ORDER BY index, position")
+    FROM duckdb_constraints() WHERE database_name = current_database() AND lower(schema_name) = lower(?) \
+    AND lower(table_name) = lower(?) AND constraint_type <> 'NOT NULL') ORDER BY index, position")
 let catalog_columns_of = catalog_names "constraint_column_names"
 let catalog_references = catalog_names "referenced_column_names"
+(* Unique (non-primary) indexes, one row per indexed expression in order.
+   [expressions] is a VARCHAR rendering of the list; each element is SQL
+   text: a column (quoted when it needs quoting) or an expression. *)
+let catalog_unique_indexes = Request.many Fields.[string; string] Fields.[string; string]
+  ~row:(fun index expression -> (index, expression))
+  "SELECT index_name, expression FROM (SELECT index_name, \
+   unnest(range(1, len(CAST(expressions AS VARCHAR[])) + 1)) AS position, \
+   unnest(CAST(expressions AS VARCHAR[])) AS expression FROM duckdb_indexes() \
+   WHERE database_name = current_database() AND lower(schema_name) = lower(?) \
+   AND lower(table_name) = lower(?) AND is_unique AND NOT is_primary) ORDER BY index_name, position"
+(* An index expression as a column name: a bare identifier, or a quoted one
+   unquoted. Other expressions are no column. *)
+let index_column expression =
+  let n = String.length expression in
+  if n >= 2 && Char.equal expression.[0] '"' && Char.equal expression.[n - 1] '"' then
+    Some (String.substr_replace_all (String.sub expression ~pos:1 ~len:(n - 2)) ~pattern:"\"\"" ~with_:"\"")
+  else if String.for_all expression ~f:(fun c -> Char.is_alphanum c || Char.equal c '_') then Some expression
+  else None
 
 (* A constraint as verification compares it: kind, column set, and for a
    foreign key the referenced table and column set. *)
@@ -164,12 +190,14 @@ let describe { kind; columns; table; references } =
   kind ^ " " ^ quoted columns
   ^ if String.is_empty table then "" else " REFERENCES " ^ Request.quote table ^ " " ^ quoted references
 (* Key columns compare as sets; a foreign key compares its (column,
-   referenced column) pairs, so a permuted reference is a difference. *)
+   referenced column) pairs, so a permuted reference is a difference.
+   Identifiers compare as DuckDB resolves them, ignoring (ASCII) case. *)
 let same a b =
-  let pairs s = List.sort ~compare:Poly.compare (List.zip_exn s.columns s.references) in
-  String.equal a.kind b.kind && String.equal a.table b.table
+  let lower = List.map ~f:String.lowercase in
+  let pairs s = List.sort ~compare:Poly.compare (List.zip_exn (lower s.columns) (lower s.references)) in
+  String.equal a.kind b.kind && String.Caseless.equal a.table b.table
   && if String.equal a.kind "FOREIGN KEY" then List.equal Poly.equal (pairs a) (pairs b)
-     else same_set a.columns b.columns
+     else same_set (lower a.columns) (lower b.columns)
 let declared_shapes constraints =
   List.filter_map constraints ~f:(function
     | Table_constraint.Primary_key columns -> Some { kind = "PRIMARY KEY"; columns; table = ""; references = [] }
@@ -187,12 +215,12 @@ let rec unmatched expected actual =
     | Some (i, _) -> unmatched rest (List.filteri actual ~f:(fun j _ -> j <> i))
 
 (* Compares the declaration with catalog rows read by [verify]. *)
-let compare_catalog (Request.Table_def t : (_, _, _) t) ~catalog ~kinds ~columns ~references =
+let compare_catalog (Request.Table_def t : (_, _, _) t) ~catalog ~kinds ~columns ~references ~indexes =
   let context = Table { schema = t.schema; name = t.name } in
   let mismatch constraint_kind ~expected ~actual =
     Error { context; cause = Constraint_mismatch { constraint_kind; expected; actual } } in
   let nullability = List.find_map (specs t.columns) ~f:(fun (name, _, nullable) ->
-    match List.find catalog ~f:(fun (n, _, _) -> String.equal n name) with
+    match List.find catalog ~f:(fun (n, _, _) -> String.Caseless.equal n name) with
     | Some (_, actual, _) when Bool.( <> ) actual nullable ->
       let show n = Request.quote name ^ if n then " nullable" else " NOT NULL" in
       Some (show nullable, show actual)
@@ -205,15 +233,23 @@ let compare_catalog (Request.Table_def t : (_, _, _) t) ~catalog ~kinds ~columns
     let actual = List.map kinds ~f:(fun (index, kind, table) ->
       { kind; columns = of_index columns index; table; references = of_index references index }) in
     let declared = declared_shapes t.constraints in
-    match unmatched declared actual, unmatched actual declared with
+    (* A unique index over plain columns enforces a declared UNIQUE; indexes
+       are not declared, so an extra one is no difference. *)
+    let indexed = List.filter_map (List.dedup_and_sort ~compare:String.compare (List.map indexes ~f:fst))
+      ~f:(fun index ->
+        let columns = List.filter_map indexes ~f:(fun (i, e) -> Option.some_if (String.equal i index) e) in
+        let names = List.filter_map columns ~f:index_column in
+        Option.some_if (List.length names = List.length columns)
+          { kind = "UNIQUE"; columns = names; table = ""; references = [] }) in
+    match unmatched declared (actual @ indexed), unmatched actual declared with
     | Some e, _ -> mismatch e.kind ~expected:(describe e) ~actual:"none"
     | None, Some a -> mismatch a.kind ~expected:"none" ~actual:(describe a)
     | None, None ->
       let defaulted name = List.exists t.constraints ~f:(function
-        | Table_constraint.Default { column; _ } -> String.equal column name
+        | Table_constraint.Default { column; _ } -> String.Caseless.equal column name
         | _ -> false) in
       match List.find catalog ~f:(fun (name, _, default) ->
-        List.mem (Columns.names t.columns) name ~equal:String.equal && Bool.( <> ) default (defaulted name)) with
+        List.mem (Columns.names t.columns) name ~equal:String.Caseless.equal && Bool.( <> ) default (defaulted name)) with
       | Some (name, _, true) -> mismatch "DEFAULT" ~expected:"none" ~actual:("DEFAULT on " ^ Request.quote name)
       | Some (name, _, false) -> mismatch "DEFAULT" ~expected:("DEFAULT on " ^ Request.quote name) ~actual:"none"
       | None -> Ok ()
@@ -225,7 +261,7 @@ let verify (s @ local) (Request.Table_def t as table : (_, _, _) t) =
   | Error e -> Error e
   | Ok [] -> Error { context; cause = Unknown_table { schema = t.schema; name = t.name } }
   | Ok catalog ->
-    match Request.check_declaration (Columns.names t.columns)
+    match Request.check_declaration ~equal:String.Caseless.equal (Columns.names t.columns)
             (List.map catalog ~f:(fun (name, _, default) -> (name, default))) with
     | Error cause -> Error { context; cause }
     | Ok (_ : int list) ->
@@ -244,7 +280,10 @@ let verify (s @ local) (Request.Table_def t as table : (_, _, _) t) =
           | Ok columns ->
             match Request.Session.collect s catalog_references args with
             | Error e -> Error e
-            | Ok references -> compare_catalog table ~catalog ~kinds ~columns ~references
+            | Ok references ->
+              match Request.Session.collect s catalog_unique_indexes args with
+              | Error e -> Error e
+              | Ok indexes -> compare_catalog table ~catalog ~kinds ~columns ~references ~indexes
 
 let lookup (Request.Table_def t : (_, _, _) t) f =
   let scope = Sql.fresh_scope () in

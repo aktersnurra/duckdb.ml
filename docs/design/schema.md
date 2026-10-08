@@ -177,12 +177,22 @@ only when called.
 - `default` accepted grouped expressions (`count_star`); it now takes row
   expressions.
 
-Known limitations, documented rather than fixed: `verify` compares names
-byte-exactly, so a table created as `PK(ID …)` is `Unknown_table` for a
-declaration `"pk"` (DuckDB identifiers are case-insensitive); a `CREATE
-UNIQUE INDEX` is not a UNIQUE constraint to `verify`; `duckdb_columns()`
-lists views too. Keys and defaults unify OCaml types, not SQL types, so a
-VARCHAR foreign key to a BLOB key type-checks and fails at `create`.
+Known limitations, closed in a follow-up (2026-10-08):
+
+- `verify` compares schema, table, column and referenced names as DuckDB
+  resolves them, ignoring ASCII case (catalog lookups use `lower()`);
+  non-ASCII identifiers that differ only in case are not unified.
+- A unique, non-primary index over plain columns (`CREATE UNIQUE INDEX …`)
+  satisfies a declared UNIQUE of the same columns; an expression index does
+  not, and an undeclared index is no difference. Index columns come from
+  `duckdb_indexes().expressions`, a VARCHAR that casts to `VARCHAR[]` of SQL
+  text (`"Email Addr"` quoted, `n` bare, `(lower(e))` an expression).
+- `foreign_key` compares the SQL types of the key and the referenced key
+  (OCaml `string` stands for VARCHAR and BLOB) and raises `Invalid_argument`
+  when they differ, instead of failing at `create`.
+
+Still open: `duckdb_columns()` lists views too, so `verify` on a view checks
+its columns and finds no constraints.
 
 ## Refinements found while prototyping
 

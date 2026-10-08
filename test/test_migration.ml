@@ -176,3 +176,20 @@ let () =
     | Error e -> failwith ("changed declaration: " ^ describe e)
     | Ok _ -> failwith "changed declaration: accepted");
   Stdlib.print_endline "migration: typed literal defaults in add_column, computed default rejected, frozen declarations=ok"
+
+(* Documented limitation, closed: an up-to-date database opened read-only
+   applies nothing and verifies (the bookkeeping table is created only when
+   missing). *)
+let () =
+  let path = Stdlib.Filename.temp_file "migration-" ".duckdb" in
+  Stdlib.Sys.remove path;
+  let with_db access f =
+    let db = ok (D.Owned.open_database (ok (D.Config.create ~access (File path)))) in
+    Exn.protect ~finally:(fun () -> ok (D.Owned.close_database db)) ~f:(fun () ->
+      let c = ok (D.Owned.connect db) in
+      Exn.protect ~finally:(fun () -> ok (D.Owned.close_connection c)) ~f:(fun () -> f c)) in
+  Exn.protect ~finally:(fun () -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path) ~f:(fun () ->
+    with_db Read_write (fun c -> ignore (ok (M.apply c base)));
+    with_db Read_only (fun c -> assert (versions (ok (M.apply c base ~verify:M.[ table users ])) [])));
+  clean ();
+  Stdlib.print_endline "migration: up-to-date read-only database=ok"

@@ -46,3 +46,4 @@ expect find_select '"Duckdb.Request.many"' '[< `One ]'
 expect args_type 'type "string"' 'type "int64"'
 expect args_arity '"unit D.Args.t"' "\"('a * 'b) D.Args.t\""
 expect binder_arity 'Type "unit" is not compatible with type' 'Duckdb.Sql.Binders.t'
+expect empty_select 'Type "unit" is not compatible with type' 'Duckdb.Sql.Exprs.t'

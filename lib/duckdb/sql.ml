@@ -108,6 +108,10 @@ let body exprs ~row ~where ~group_by ~having ~order_by ~limit ~offset =
          having = Option.map having ~f:(fun (e : _ expr) -> e.node); order_by; limit; offset }
 
 let select ?where ?having ?(order_by = []) ?limit ?offset exprs ~row =
+  let non_negative name = Option.iter ~f:(fun n ->
+    if n < 0 then invalid_arg ("Duckdb.Sql.select: a negative " ^ name)) in
+  non_negative "limit" limit;
+  non_negative "offset" offset;
   body exprs ~row ~where ~group_by:[] ~having ~order_by ~limit ~offset
 (* Whether a node computes an aggregate. A select list of only literals and
    parameters has no GROUP BY and no aggregate, so it would return a row per

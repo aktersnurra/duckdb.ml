@@ -231,3 +231,16 @@ let () =
   ignore (S.(query Params.[cents] (fun [limit] -> from prices (fun [p] ->
     select Exprs.[p] ~row:Fn.id ~where:(p <= param limit)))));
   Stdlib.print_endline "sql: aggregate needs an aggregate; operands share a codec=ok"
+
+(* Documented limitations, closed: a negative limit or offset is rejected
+   when the query is built, not when DuckDB prepares it. *)
+let () =
+  let rejected name build = match build () with
+    | exception Invalid_argument _ -> ()
+    | (_ : (unit, _, _) R.t) -> failwith (name ^ ": accepted") in
+  rejected "negative limit" (fun () ->
+    S.(query Params.[] (fun [] -> from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id ~limit:(-1)))));
+  rejected "negative offset" (fun () ->
+    S.(query Params.[] (fun [] -> from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id ~offset:(-1)))));
+  ignore (S.(query Params.[] (fun [] -> from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id ~limit:0 ~offset:0))));
+  Stdlib.print_endline "sql: negative limit and offset rejected when built=ok"
