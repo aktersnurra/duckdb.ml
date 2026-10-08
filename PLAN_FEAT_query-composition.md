@@ -41,7 +41,7 @@ scope → alias of every enclosing table; `render` of a `Column` looks its
 scope up there (absent: `foreign ()`), the table qualifier path passes an
 empty map plus `~qualifier:""`.
 
-### Task 1: Aliases, joins, outer, distinct
+### Task 1: Aliases, joins, outer, distinct — DONE
 
 - [ ] Tests: inner join of users/posts (SQL text `… FROM "main"."users" AS t0 INNER JOIN "main"."posts" AS t1 ON (t1."owner" = t0."id") …` and rows); left join where a user has no post decodes `None` through `outer`; `Null.outer` of a nullable column; cross join count; three nested joins (users ⋈ posts ⟕ comments); `~distinct:true`; the same query built twice renders the same text; a binder of a join used in another query raises `Invalid_argument`.
 - [ ] Implement: alias map rendering; `join`, `left_join`, `cross_join`, `Outer`, `outer`, `Null.outer`; `select ?distinct`.

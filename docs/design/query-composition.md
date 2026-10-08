@@ -81,9 +81,9 @@ booleans and strings as the existing literals, BLOB with every byte
 escaped, dates and timestamps through epoch functions. The result carries
 the codec, so `value cents 2L = price` passes the operand codec check that a
 plain `int64 2L` fails. An encode error raises `Invalid_argument`. As a
-table DEFAULT, a numeric, boolean or string `value` is a constant (usable by
-`Migration.add_column`); a BLOB, date or timestamp `value` is an expression,
-which `create` accepts and `add_column` rejects.
+table DEFAULT, a numeric, boolean, string or BLOB `value` is a constant
+(usable by `Migration.add_column`); a date or timestamp `value` is an
+expression, which `create` accepts and `add_column` rejects.
 
 ### Subqueries
 

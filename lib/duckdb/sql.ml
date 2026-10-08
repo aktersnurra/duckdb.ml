@@ -12,8 +12,9 @@ type node =
   | Column of { scope : int; name : string }
   | Param of { scope : int; index : int; sql_type : string }
   (* [constant]: the value as a quoted SQL string constant, which DuckDB casts
-     to a column's type; used where only constants are accepted. *)
-  | Literal of { sql : string; constant : string }
+     to a column's type; used where only constants are accepted. Dates and
+     timestamps have none: they are built by functions. *)
+  | Literal of { sql : string; constant : string option }
   | Apply of string * node list
   | Infix of string * node * node
   | Prefix of string * node
@@ -245,27 +246,63 @@ let param (p : (_, _) param) =
 let asc (e : _ expr) = { key = e.node; descending = false }
 let desc (e : _ expr) = { key = e.node; descending = true }
 
-let literal codec ~sql ~constant = { node = Literal { sql; constant }; codec }
 let quote_string s = "'" ^ String.substr_replace_all s ~pattern:"'" ~with_:"''" ^ "'"
 (* [text] is a SQL numeric literal or a quoted string; the constant spelling
    quotes it. *)
-let typed codec scalar text =
+let typed_node scalar text =
   let constant = if String.is_prefix text ~prefix:"'" then text else quote_string text in
-  literal codec ~sql:(Printf.sprintf "CAST(%s AS %s)" text (Scalar.name scalar)) ~constant
+  Literal { sql = Printf.sprintf "CAST(%s AS %s)" text (Scalar.name scalar); constant = Some constant }
+let typed codec scalar text = { node = typed_node scalar text; codec }
 (* Doubles print with enough digits to round-trip; DuckDB parses the
    non-finite spellings from strings. *)
 let float_text f =
   if Float.is_nan f then "'nan'"
   else if Float.is_inf f then if Float.(f > 0.) then "'inf'" else "'-inf'"
   else "'" ^ Printf.sprintf "%.17g" f ^ "'"
-let bool b = literal Codec.Values.bool ~sql:(if b then "TRUE" else "FALSE") ~constant:(if b then "'true'" else "'false'")
+let bool_node b = Literal { sql = (if b then "TRUE" else "FALSE"); constant = Some (if b then "'true'" else "'false'") }
+let bool b = { node = bool_node b; codec = Codec.Values.bool }
 let int8 v = typed Codec.Values.int8 Scalar.Int8 (Int.to_string (Stdlib_stable.Int8.to_int v))
 let int16 v = typed Codec.Values.int16 Scalar.Int16 (Int.to_string (Stdlib_stable.Int16.to_int v))
 let int32 v = typed Codec.Values.int32 Scalar.Int32 (Int32.to_string v)
 let int64 v = typed Codec.Values.int64 Scalar.Int64 (Int64.to_string v)
 let float32 v = typed Codec.Values.float32 Scalar.Float32 (float_text (Stdlib_stable.Float32.to_float v))
 let float64 v = typed Codec.Values.float64 Scalar.Float64 (float_text v)
-let string s = let q = quote_string s in literal Codec.Values.string ~sql:q ~constant:q
+let string_node s = let q = quote_string s in Literal { sql = q; constant = Some q }
+let string s = { node = string_node s; codec = Codec.Values.string }
+(* Every byte escaped: DuckDB decodes \xNN in a string cast to BLOB. *)
+let blob_node s =
+  let q = "'" ^ String.concat_map s ~f:(fun c -> Printf.sprintf "\\x%02X" (Char.to_int c)) ^ "'" in
+  Literal { sql = "CAST(" ^ q ^ " AS BLOB)"; constant = Some q }
+(* Built from the epoch value; exact under any session time zone (casting a
+   TIMESTAMP to TIMESTAMPTZ would read it as local time). *)
+let function_node sql = Literal { sql; constant = None }
+let scalar_node : type b. b Scalar.t -> b -> node = fun scalar v ->
+  let int64 n = Printf.sprintf "CAST(%s AS BIGINT)" (Int64.to_string n) in
+  match scalar with
+  | Scalar.Bool -> bool_node v
+  | Scalar.Int8 -> typed_node scalar (Int.to_string (Stdlib_stable.Int8.to_int v))
+  | Scalar.Int16 -> typed_node scalar (Int.to_string (Stdlib_stable.Int16.to_int v))
+  | Scalar.Int32 -> typed_node scalar (Int32.to_string v)
+  | Scalar.Int64 -> typed_node scalar (Int64.to_string v)
+  | Scalar.Float32 -> typed_node scalar (float_text (Stdlib_stable.Float32.to_float v))
+  | Scalar.Float64 -> typed_node scalar (float_text v)
+  | Scalar.String -> string_node v
+  | Scalar.Blob -> blob_node v
+  | Scalar.Date -> function_node (Printf.sprintf "CAST(DATE '1970-01-01' + CAST(%s AS INTEGER) AS DATE)" (Int32.to_string v))
+  | Scalar.Timestamp_us -> function_node ("make_timestamp(" ^ int64 v ^ ")")
+  | Scalar.Timestamp_ms -> function_node ("CAST(epoch_ms(" ^ int64 v ^ ") AS TIMESTAMP_MS)")
+  | Scalar.Timestamp_s -> function_node ("CAST(make_timestamp(" ^ int64 v ^ " * 1000000) AS TIMESTAMP_S)")
+  | Scalar.Timestamp_ns -> function_node ("make_timestamp_ns(" ^ int64 v ^ ")")
+  | Scalar.Timestamp_tz -> function_node ("(to_timestamp(0) + to_microseconds(" ^ int64 v ^ "))")
+let value (type a) (codec : (a, Codec.non_null) Codec.t) (v : a) =
+  let (Codec.Non_null plan) = codec in
+  let node = match plan with
+    | Codec.Identity scalar -> scalar_node scalar v
+    | Codec.Plan p ->
+      match p.encode v with
+      | Ok b -> scalar_node p.scalar b
+      | Error e -> invalid_arg ("Duckdb.Sql.value: the codec rejected the value: " ^ Error.to_string_hum e) in
+  { node; codec }
 
 (* The operands of one operator must cross the boundary the same way: the
    same base scalar, and the same conversion. Their OCaml types cannot tell a

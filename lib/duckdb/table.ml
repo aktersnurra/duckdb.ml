@@ -85,7 +85,7 @@ let resolve ~schema ~scope (constraints : Constraint.t list) =
     | Constraint.Default { column; node } ->
       if not (List.is_empty (Sql.mentioned node)) then
         invalid_arg "Duckdb.Table: a default cannot mention a column";
-      let constant = match node with Sql.Literal { constant; _ } -> Some constant | _ -> None in
+      let constant = match node with Sql.Literal { constant; _ } -> constant | _ -> None in
       Table_constraint.Default { column = List.hd_exn (names [ column ]); sql = render node; constant }) in
   if List.count resolved ~f:(function Table_constraint.Primary_key _ -> true | _ -> false) > 1 then
     invalid_arg "Duckdb.Table: at most one primary key";

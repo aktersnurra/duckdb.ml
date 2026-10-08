@@ -588,10 +588,9 @@ module Sql : sig
   val asc : (_, _, 'k) expr -> 'k order
   val desc : (_, _, 'k) expr -> 'k order
 
-  (** Literals render as typed SQL ([CAST(… AS …)]). Values of custom-codec
-      types enter a query as parameters: comparing a custom-codec column with
-      a literal of its OCaml type compares the unencoded literal with the
-      encoded column. A [string] containing NUL fails with [Embedded_nul];
+  (** Literals render as typed SQL ([CAST(… AS …)]). A plain literal does
+      not meet a custom-codec column (its operands' codecs differ); use
+      [value] or a parameter of that codec. A [string] containing NUL fails with [Embedded_nul];
       pass such values as parameters. *)
   val bool : bool -> (bool, Codec.non_null, 'k) expr
   val int8 : int8 -> (int8, Codec.non_null, 'k) expr
@@ -601,6 +600,14 @@ module Sql : sig
   val float32 : float32 -> (float32, Codec.non_null, 'k) expr
   val float64 : float -> (float, Codec.non_null, 'k) expr
   val string : string -> (string, Codec.non_null, 'k) expr
+
+  (** A literal of any codec: encoded when built (an encode error raises
+      [Invalid_argument]) and rendered by its base scalar; dates and
+      timestamps through epoch functions, exactly under any session time
+      zone. It carries the codec, so it meets a column of that codec. As a
+      table DEFAULT, a date or timestamp value is an expression, which
+      [Migration.add_column] rejects. *)
+  val value : ('a, Codec.non_null) Codec.t -> 'a -> ('a, Codec.non_null, 'k) expr
 
   (** Comparisons of non-null operands; on a custom codec they compare the
       base values. [Null] holds the three-valued versions. *)

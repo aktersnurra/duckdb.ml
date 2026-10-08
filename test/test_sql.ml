@@ -8,6 +8,12 @@ let rec describe (e : D.Error.t) = match e.cause with
   | Parameter_count { expected; actual } -> Printf.sprintf "Parameter_count %d/%d" expected actual
   | Column_count _ -> "Column_count" | Type_mismatch { expected; actual; _ } -> "Type_mismatch " ^ expected ^ "/" ^ actual
   | Rollback_failed { primary; _ } -> "Rollback_failed: " ^ describe primary
+  | Null { column; row } -> Printf.sprintf "Null column %d row %d" column row
+  | Unknown_column { name } -> "Unknown_column " ^ name
+  | Constraint_mismatch { constraint_kind; expected; actual } ->
+    Printf.sprintf "Constraint_mismatch %s: expected %s, actual %s" constraint_kind expected actual
+  | Decode_rejected { column; _ } -> Printf.sprintf "Decode_rejected column %d" column
+  | Unsupported_statement -> "Unsupported_statement"
   | _ -> "other cause"
 let ok = function Ok x -> x | Error e -> failwith ("unexpected error: " ^ describe e)
 let core_ok = function Ok x -> x | Error e -> failwith ("unexpected core error: " ^ describe e)
@@ -324,3 +330,42 @@ let () =
    | exception Invalid_argument _ -> ()
    | _ -> failwith "leaked join binder accepted");
   Stdlib.print_endline "sql: inner, left (outer), cross and nested joins; distinct; stable aliases=ok"
+
+(* value: literals of any codec, encoded when built; a custom codec's value
+   meets its column; an encode error is rejected when built. Dates and
+   timestamps: test_sql_time_zone.ml, run under a non-UTC TZ. *)
+let () =
+  let module V = D.Codec.Values in
+  let cents = V.custom ~encode:(fun n -> Or_error.return (Int64.( * ) n 100L))
+    ~decode:(fun n -> Or_error.return (Int64.( / ) n 100L)) V.int64 in
+  let prices = T.(declare "prices" Columns.["price", cents] ~row:Fn.id) in
+  let cheap = S.(query Params.[] (fun [] -> from prices (fun [p] -> select Exprs.[p] ~row:Fn.id ~where:(p = value cents 2L)))) in
+  expect_sql "cheap" cheap
+    "SELECT t0.\"price\" FROM \"main\".\"prices\" AS t0 WHERE (t0.\"price\" = CAST(200 AS BIGINT))";
+  connected (fun c ->
+    ddl c "CREATE TABLE prices(price BIGINT NOT NULL)";
+    ddl c "INSERT INTO prices VALUES (200), (300)";
+    match ok (R.Session.collect c cheap D.Args.[]) with [ 2L ] -> () | _ -> failwith "cheap");
+  let refusing = V.custom ~encode:(fun (_ : int64) -> Or_error.error_string "no") ~decode:Or_error.return V.int64 in
+  (match S.value refusing 1L with
+   | exception Invalid_argument _ -> ()
+   | (_ : (int64, D.Codec.non_null, S.row) S.expr) -> failwith "encode error accepted");
+  (* As a table default: a timestamp value is an expression (create accepts
+     it; add_column, which needs a constant, rejects it); a blob value is a
+     constant. *)
+  let events = T.(declare "events" Columns.["id", int64; "at", timestamp_us; "tag", blob]
+    ~row:(fun id at tag -> (id, at, tag))
+    ~constraints:(fun [_; at; tag] -> Constraint.[
+      default at (S.value V.timestamp_us 1700000000123456L); default tag (S.value V.blob "\x01'") ])) in
+  connected (fun c ->
+    ok (T.create c events);
+    ddl c "INSERT INTO events (id) VALUES (1)";
+    (match ok (R.Session.collect c (T.select events) D.Args.[]) with
+     | [ (1L, 1700000000123456L, "\x01'") ] -> ()
+     | _ -> failwith "event defaults");
+    ok (T.verify c events));
+  (match D.Migration.add_column events (fun [_; at; _] -> D.Migration.Column at) with
+   | exception Invalid_argument _ -> ()
+   | _ -> failwith "add_column with an expression default accepted");
+  ignore (D.Migration.add_column events (fun [_; _; tag] -> D.Migration.Column tag));
+  Stdlib.print_endline "sql: value literals of every scalar and custom codecs=ok"
