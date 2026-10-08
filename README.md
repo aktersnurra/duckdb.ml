@@ -159,6 +159,25 @@ let posting = S.(
 (* : (unit, string * int64 option, many) Request.t *)
 ```
 
+Positional binders keep type-checking when two columns of one type are
+swapped in a declaration. `Table.fields` names them once, next to the
+declaration, and callbacks project by handle; `.%?` reads a LEFT JOIN's
+`outer` value:
+
+```ocaml
+let S.Named.[uid; _; _] = D.Table.fields users
+let S.Named.[_; owner; title] = D.Table.fields posts
+
+let with_posts = S.(
+  query Params.[] (fun [] ->
+    from users (fun u ->
+      left_join posts ~on:(fun p -> p.%(owner) = u.%(uid)) (fun p ->
+        select Exprs.[u.%(uid); outer p.%?(title)] ~row:(fun i t -> (i, t))))))
+```
+
+The same handles work in `join`, `update`, `delete`, `insert` and
+`update_on`'s proposed row ([design](docs/design/named-binders.md)).
+
 Also: `join`, `cross_join`, `select ~distinct:true`, `in_` (three-valued),
 `union`, `union_all`, `intersect`, `except_`, and `value` for literals of any
 codec (dates, timestamps, blobs, custom codecs).

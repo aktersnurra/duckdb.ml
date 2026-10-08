@@ -570,6 +570,20 @@ module Sql : sig
     ('shape Outer.t -> ('list, 'row, row, _) body) -> ('list, 'row, row, Request.many) body
   val outer : ('a, Codec.non_null) outer -> ('a option, Codec.nullable, row) expr
 
+  (** A named column of a table of shape ['shape], from [Table.fields]:
+      [let Sql.Named.[id; name] = Table.fields users]. [b.%(f)] is the
+      binder [f] names; [o.%?(f)] the [outer] value in a [left_join] body.
+      Handles are typed by shape: on another table of the identical shape a
+      handle names the same position. *)
+  type ('shape, 'a, 'n) field
+  module Named : sig
+    type ('whole, 'rest) t =
+      | [] : (_, unit) t
+      | (::) : ('whole, 'a, 'n) field * ('whole, 'rest) t -> ('whole, ('a, 'n) Codec.slot * 'rest) t
+  end
+  val ( .%() ) : ('shape, 'k) Binders.t -> ('shape, 'a, 'n) field -> ('a, 'n, 'k) expr
+  val ( .%?() ) : 'shape Outer.t -> ('shape, 'a, 'n) field -> ('a, 'n) outer
+
   (** Any number of rows. [~where] filters rows; [~having] filters groups and
       belongs inside [group_by]. The select list is non-empty (by type); a
       negative [~limit] or [~offset] raises [Invalid_argument].
@@ -960,6 +974,10 @@ module Table : sig
       [~constraints] binds the columns and lists the table's constraints. *)
   val declare : ?schema:string -> ?constraints:('shape Binders.t -> Constraint.t list) -> string ->
     ('columns, 'fn, 'row, 'shape) Columns.t -> row:'fn -> ('columns, 'shape, 'row) t
+
+  (** The declaration's columns as named handles for [Sql] callbacks, in
+      declaration order. *)
+  val fields : (_, 'shape, _) t -> ('shape, 'shape) Sql.Named.t
 
   (** SELECT of exactly the declared columns, decoded by the declared row. *)
   val select : (_, _, 'row) t -> (unit, 'row, Request.many) Request.t

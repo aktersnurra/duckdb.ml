@@ -91,6 +91,14 @@ let resolve ~schema ~scope (constraints : Constraint.t list) =
     invalid_arg "Duckdb.Table: at most one primary key";
   resolved
 
+(* Re-indexes a tail's fields against the whole shape. *)
+type ('whole, 'rest) embed = { embed : 'a 'n. ('rest, 'a, 'n) Sql.field -> ('whole, 'a, 'n) Sql.field }
+let rec named : type l f r s w. (l, f, r, s) Columns.t -> (w, s) embed -> (w, s) Sql.Named.t = fun columns e ->
+  match columns with
+  | Columns.[] -> Sql.Named.[]
+  | Columns.(_ :: rest) -> Sql.Named.(e.embed Here :: named rest { embed = (fun f -> e.embed (Next f)) })
+let fields (Request.Table_def t : (_, _, _) t) = named t.columns { embed = Fn.id }
+
 let declare ?(schema = "main") ?constraints name columns ~row =
   let constraints = match constraints with
     | None -> []

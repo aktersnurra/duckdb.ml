@@ -1,0 +1,6 @@
+module D = Duckdb
+module S = D.Sql
+let users = D.Table.(declare "users" Columns.["id", int64; "name", string] ~row:(fun id name -> (id, name)))
+let S.Named.[id; name] = D.Table.fields users
+let q = S.(query Params.[] (fun [] -> from users (fun u ->
+  left_join users ~on:(fun v -> v.%(id) = u.%(id)) (fun v -> select Exprs.[v.%(name)] ~row:(fun n -> n)))))

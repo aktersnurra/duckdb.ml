@@ -1,0 +1,7 @@
+module D = Duckdb
+module S = D.Sql
+let users = D.Table.(declare "users" Columns.["id", int64; "name", string] ~row:(fun id name -> (id, name)))
+let posts = D.Table.(declare "posts" Columns.["id", int64; "title", string; "owner", int64]
+  ~row:(fun id title owner -> (id, title, owner)))
+let S.Named.[_; name] = D.Table.fields users
+let q = S.(query Params.[] (fun [] -> from posts (fun p -> select Exprs.[p.%(name)] ~row:(fun n -> n))))

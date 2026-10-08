@@ -189,3 +189,24 @@ let () =
     insert keyed (fun [uid; uname; _] -> values [uid := int64 1L; uname := string "x"]
       ~on_conflict:(nothing_on Keys.[Option.value_exn !leaked])))));
   Stdlib.print_endline "dml: on conflict do nothing / do update with excluded and where, on select_into=ok"
+
+(* Named binders in UPDATE and an upsert's proposed row. *)
+let S.Named.[k_id; k_name; _] = T.fields keyed
+let rename_named = S.(command Params.[int64; string] (fun [id; name] ->
+  update keyed (fun u -> set [u.%(k_name) := param name] ~where:(u.%(k_id) = param id))))
+let upsert_named = S.(command Params.[int64; string] (fun [id; name] ->
+  insert keyed (fun u ->
+    values [u.%(k_id) := param id; u.%(k_name) := param name]
+      ~on_conflict:(update_on Keys.[u.%(k_id)] (fun proposed -> [u.%(k_name) := proposed.%(k_name)])))))
+let () =
+  expect_sql "rename_named" rename_named (R.query rename);
+  expect_sql "upsert_named" upsert_named (R.query upsert);
+  connected (fun c ->
+    seed c;
+    let name id = ok (R.Session.find c (R.one D.Fields.[int64] D.Fields.[string] ~row:Fn.id
+      "SELECT name FROM users WHERE id = ?") D.Args.[id]) in
+    assert (Int64.equal (ok (R.Session.find c rename_named D.Args.[1L; "ada b."])) 1L);
+    assert (String.equal (name 1L) "ada b.");
+    assert (Int64.equal (ok (R.Session.find c upsert_named D.Args.[1L; "ada c."])) 1L);
+    assert (String.equal (name 1L) "ada c."));
+  Stdlib.print_endline "dml: named binders in update and on conflict match positional=ok"

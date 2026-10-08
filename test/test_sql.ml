@@ -456,3 +456,28 @@ let () =
              (from tags (fun [tag] -> select Exprs.[tag] ~row:Fn.id))) with
   | exception Invalid_argument _ -> Stdlib.print_endline "sql: union, union all, intersect, except; nesting; codecs match=ok"
   | _ -> failwith "union of VARCHAR and BLOB accepted"
+
+(* Named binders: [Table.fields] handles name the same binders as positional
+   patterns, so each named query renders the positional text and rows. *)
+let S.Named.[u_id; u_name; _] = T.fields users
+let S.Named.[p_id; p_owner; p_title; p_score] = T.fields posts
+let titles_named = S.(
+  query Params.[] (fun [] ->
+    from users (fun u ->
+      join posts ~on:(fun p -> p.%(p_owner) = u.%(u_id)) (fun p ->
+        select Exprs.[u.%(u_name); p.%(p_title)] ~row:(fun n t -> (n, t)) ~order_by:[asc p.%(p_id)]))))
+let with_posts_named = S.(
+  query Params.[] (fun [] ->
+    from users (fun u ->
+      left_join posts ~on:(fun p -> p.%(p_owner) = u.%(u_id)) (fun p ->
+        select Exprs.[u.%(u_name); outer p.%?(p_title); Null.outer p.%?(p_score)] ~row:(fun n t s -> (n, t, s))
+          ~order_by:[asc u.%(u_id); asc (outer p.%?(p_id))]))))
+let () =
+  expect_sql "titles_named" titles_named (R.query titles);
+  expect_sql "with_posts_named" with_posts_named (R.query with_posts);
+  connected (fun c ->
+    seed_posts c;
+    assert (Poly.equal (ok (R.Session.collect c titles_named D.Args.[])) (ok (R.Session.collect c titles D.Args.[])));
+    assert (Poly.equal (ok (R.Session.collect c with_posts_named D.Args.[]))
+              (ok (R.Session.collect c with_posts D.Args.[]))));
+  Stdlib.print_endline "sql: named binders in from, join and left join match positional=ok"

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Named binders
+
+[Design](docs/design/named-binders.md).
+
+Added: `Table.fields` returns a table's columns as named handles
+(`let Sql.Named.[id; name; age] = Table.fields users`); `Sql.( .%() )`
+projects a handle from `from`, join and DML binders and `Sql.( .%?() )`
+from a `left_join` body's `outer` binders. Additive: positional binders are
+unchanged.
+
 ## 0.2.0 (2026-10-09)
 
 Everything since the `v0.1.0` tag (2026-09-09), which had no changelog. The

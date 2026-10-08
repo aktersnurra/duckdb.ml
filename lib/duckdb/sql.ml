@@ -198,6 +198,26 @@ let left_join (Request.Table_def t as table : (_, _, _) Request.table) ~on f =
 let outer (Outer e : (_, Codec.non_null) outer) = { node = e.node; codec = Codec.Values.nullable e.codec }
 let null_outer (Outer e : (_, Codec.nullable) outer) = e
 
+(* A named column: a typed index into a table's shape. *)
+type ('shape, 'a, 'n) field =
+  | Here : (('a, 'n) Codec.slot * 'rest, 'a, 'n) field
+  | Next : ('rest, 'a, 'n) field -> (_ * 'rest, 'a, 'n) field
+module Named = struct
+  type ('whole, 'rest) t =
+    | [] : (_, unit) t
+    | (::) : ('whole, 'a, 'n) field * ('whole, 'rest) t -> ('whole, ('a, 'n) Codec.slot * 'rest) t
+end
+let rec ( .%() ) : type s a n k. (s, k) Binders.t -> (s, a, n) field -> (a, n, k) expr = fun binders field ->
+  match binders, field with
+  | Binders.(e :: _), Here -> e
+  | Binders.(_ :: rest), Next field -> rest.%(field)
+  | Binders.[], _ -> .
+let rec ( .%?() ) : type s a n. s Outer.t -> (s, a, n) field -> (a, n) outer = fun binders field ->
+  match binders, field with
+  | Outer.(e :: _), Here -> e
+  | Outer.(_ :: rest), Next field -> rest.%?(field)
+  | Outer.[], _ -> .
+
 type 'l packed_fields = Packed_fields : ('l, _, _) Fields.t -> 'l packed_fields
 let rec fields_of_params : type l s. (l, s) Params.t -> l packed_fields = function
   | Params.[] -> Packed_fields Fields.[]
