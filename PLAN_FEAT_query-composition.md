@@ -43,21 +43,21 @@ empty map plus `~qualifier:""`.
 
 ### Task 1: Aliases, joins, outer, distinct — DONE
 
-- [ ] Tests: inner join of users/posts (SQL text `… FROM "main"."users" AS t0 INNER JOIN "main"."posts" AS t1 ON (t1."owner" = t0."id") …` and rows); left join where a user has no post decodes `None` through `outer`; `Null.outer` of a nullable column; cross join count; three nested joins (users ⋈ posts ⟕ comments); `~distinct:true`; the same query built twice renders the same text; a binder of a join used in another query raises `Invalid_argument`.
-- [ ] Implement: alias map rendering; `join`, `left_join`, `cross_join`, `Outer`, `outer`, `Null.outer`; `select ?distinct`.
-- [ ] Green: `./tools/run exec test/test_sql.exe`; all earlier `sql:` lines still `=ok`; `./tools/run exec test/test_schema.exe` (CHECK rendering unchanged).
+- [x] Tests: inner join of users/posts (SQL text `… FROM "main"."users" AS t0 INNER JOIN "main"."posts" AS t1 ON (t1."owner" = t0."id") …` and rows); left join where a user has no post decodes `None` through `outer`; `Null.outer` of a nullable column; cross join count; three nested joins (users ⋈ posts ⟕ comments); `~distinct:true`; the same query built twice renders the same text; a binder of a join used in another query raises `Invalid_argument`.
+- [x] Implement: alias map rendering; `join`, `left_join`, `cross_join`, `Outer`, `outer`, `Null.outer`; `select ?distinct`.
+- [x] Green: `./tools/run exec test/test_sql.exe`; all earlier `sql:` lines still `=ok`; `./tools/run exec test/test_schema.exe` (CHECK rendering unchanged).
 
 ### Task 2: `value` — DONE
 
-- [ ] Tests: custom-codec `value` compared with its column (accepted; rows); `value` of `date`, `timestamp_us`, `timestamp_ms`, `timestamp_s`, `timestamp_ns`, `timestamp_tz` and `blob` selected and decoded equal to the input (with `SET TimeZone='America/New_York'` for TZ); an encode error raises `Invalid_argument`; a timestamp `value` as `Table` default is accepted by `create` and rejected by `Migration.add_column`.
-- [ ] Implement per the spec's rendering table.
-- [ ] Green as above, plus `./tools/run exec test/test_migration.exe`.
+- [x] Tests: custom-codec `value` compared with its column (accepted; rows); `value` of `date`, `timestamp_us`, `timestamp_ms`, `timestamp_s`, `timestamp_ns`, `timestamp_tz` and `blob` selected and decoded equal to the input (with `SET TimeZone='America/New_York'` for TZ); an encode error raises `Invalid_argument`; a timestamp `value` as `Table` default is accepted by `create` and rejected by `Migration.add_column`.
+- [x] Implement per the spec's rendering table.
+- [x] Green as above, plus `./tools/run exec test/test_migration.exe`.
 
 ### Task 3: Subqueries — DONE (with Task 4)
 
-- [ ] Tests: correlated `exists`; `in_` true / NULL (subquery with a NULL) / false; `scalar` over `aggregate count_star` correlated; `Null.scalar` over `max` of a nullable column; `Invalid_argument` for `in_` of two columns, `scalar` over a nullable column, `Null.scalar` over a non-null column, `in_` with incompatible codecs (BLOB vs VARCHAR).
-- [ ] Implement nodes, rendering with continued aliases, the checks.
-- [ ] Green.
+- [x] Tests: correlated `exists`; `in_` true / NULL (subquery with a NULL) / false; `scalar` over `aggregate count_star` correlated; `Null.scalar` over `max` of a nullable column; `Invalid_argument` for `in_` of two columns, `scalar` over a nullable column, `Null.scalar` over a non-null column, `in_` with incompatible codecs (BLOB vs VARCHAR).
+- [x] Implement nodes, rendering with continued aliases, the checks.
+- [x] Green.
 
 ### Task 4: Set operations — DONE
 
@@ -70,17 +70,17 @@ tests; each runtime check was then mutation-tested (disabled → its test
 fails). Rendering binds pieces with `let` in textual order (`^` evaluates
 right to left), so aliases number left to right.
 
-- [ ] Tests: `union`, `union_all`, `intersect`, `except_` results; each side keeps its own ORDER BY/LIMIT; nesting; a set operation as an `in_` subquery; `Invalid_argument` for different column counts and incompatible codecs.
-- [ ] Implement.
-- [ ] Green.
+- [x] Tests: `union`, `union_all`, `intersect`, `except_` results; each side keeps its own ORDER BY/LIMIT; nesting; a set operation as an `in_` subquery; `Invalid_argument` for different column counts and incompatible codecs.
+- [x] Implement.
+- [x] Green.
 
 ### Task 5: Compile fixtures — DONE
 
-- [ ] `positive.ml` gains a join, a left join with `outer`, subqueries and a union.
-- [ ] Fixtures: `outer_unlifted`, `outer_nullable`, `null_outer_non_null`, `scalar_many`, `in_type`, `union_rows`, `find_join`; expectations in `check_sql_types.sh`.
-- [ ] `./tools/run runtest --force` exit 0.
+- [x] `positive.ml` gains a join, a left join with `outer`, subqueries and a union.
+- [x] Fixtures: `outer_unlifted`, `outer_nullable`, `null_outer_non_null`, `scalar_many`, `in_type`, `union_rows`, `find_join`; expectations in `check_sql_types.sh`.
+- [x] `./tools/run runtest --force` exit 0.
 
 ### Task 6: Documentation — DONE
 
-- [ ] README "Typed SQL" join/subquery example compiled and run; CHANGELOG; core-redesign roadmap rows 4a–4c; design note status and refinements; mli doc comments.
-- [ ] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.
+- [x] README "Typed SQL" join/subquery example compiled and run; CHANGELOG; core-redesign roadmap rows 4a–4c; design note status and refinements; mli doc comments.
+- [x] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Typed INSERT, UPDATE and DELETE (sub-project 4b)
+
+[Design](docs/design/dml.md).
+
+Added to `Sql`:
+- `command`, building write statements as `query` builds SELECTs: `update …
+  (set [c := v] ?where)`, `delete … (filter e | all)`, `insert … (values
+  [c := v] | select_into Targets.[…] source)`. Without `returning` a
+  statement returns the affected-row count (`int64`, `one`); `returning
+  Exprs.[…] ~row` returns rows (`many`).
+- `nothing_on` / `update_on` (ON CONFLICT on a declared key, `excluded`
+  binders typed by the table).
+- `test/test_sql_dml.ml`; 7 fixtures in `test/dml_compile`.
+
+Inside `S.( … )`, `:=` now shadows reference assignment.
+
 ### Query composition (sub-project 4a)
 
 [Design](docs/design/query-composition.md).

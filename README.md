@@ -139,10 +139,36 @@ let posting = S.(
 
 Also: `join`, `cross_join`, `select ~distinct:true`, `in_` (three-valued),
 `union`, `union_all`, `intersect`, `except_`, and `value` for literals of any
-codec (dates, timestamps, blobs, custom codecs). Write statements and window
-functions are not covered yet; write those as SQL requests. See
-[typed SQL](docs/design/typed-sql.md) and
-[query composition](docs/design/query-composition.md).
+codec (dates, timestamps, blobs, custom codecs).
+
+`command` builds INSERT, UPDATE and DELETE the same way. Without `returning`
+a statement returns the affected-row count; upserts are keyed by a declared
+primary or unique key:
+
+```ocaml
+let users_by_id = D.Table.(declare "users"
+  Columns.["id", int64; "name", string; "age", nullable int32]
+  ~row:(fun id name age -> (id, name, age))
+  ~constraints:(fun [id; _; _] -> Constraint.[ primary_key Key.[id] ]))
+
+let rename = S.(command Params.[int64; string] (fun [id; name] ->
+  update users_by_id (fun [uid; uname; _] -> set [uname := param name] ~where:(uid = param id))))
+(* : (int64 * (string * unit), int64, one) Request.t, the rows changed *)
+
+let save = S.(command Params.[int64; string] (fun [id; name] ->
+  insert users_by_id (fun [uid; uname; _] ->
+    values [uid := param id; uname := param name]
+      ~on_conflict:(update_on Keys.[uid] (fun [_; proposed; _] -> [uname := proposed]))
+    |> returning Exprs.[uid; uname] ~row:(fun i n -> (i, n)))))
+(* : (int64 * (string * unit), int64 * string, many) Request.t *)
+```
+
+Also `delete … (filter …)`, `values []` (DEFAULT VALUES), `select_into`
+(INSERT … SELECT) and `nothing_on`. Inside `S.( … )`, `:=` is assignment;
+write `Stdlib.( := )` for references. Window functions are not covered
+yet; write those as SQL requests. See [typed SQL](docs/design/typed-sql.md),
+[query composition](docs/design/query-composition.md) and
+[typed DML](docs/design/dml.md).
 
 ## Schema
 

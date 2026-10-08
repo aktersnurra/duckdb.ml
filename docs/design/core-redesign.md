@@ -21,7 +21,7 @@ plan and implementation:
 | 2 | Typed SQL | GADT expressions and a query builder that compile to `Request.t` ([Appendix A](#appendix-a-typed-sql-end-state-sketch)). Done: [typed SQL](typed-sql.md) |
 | 3 | Schema and migrations | Constraints on table declarations, then versioned migrations. Done: [schema](schema.md) (3a) and [migrations](migrations.md) (3b) |
 | 4a | Query composition | Joins, DISTINCT, literals of any codec, subqueries, set operations. Done: [query composition](query-composition.md) |
-| 4b | DML builders | Typed INSERT, UPDATE, DELETE |
+| 4b | DML builders | Typed INSERT, UPDATE, DELETE. Done: [typed DML](dml.md) |
 | 4c | Window functions | `OVER (PARTITION BY … ORDER BY …)` |
 | later | `[@@deriving duckdb]` | Optional ppx that generates `Columns`/row declarations. Added only if hand-written declarations turn out to be tedious; nothing in 1–3 depends on it |
 

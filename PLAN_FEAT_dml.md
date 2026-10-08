@@ -22,30 +22,30 @@
 | `test/dml_compile/`, `test/check_dml_types.sh` | Compile fixtures |
 | docs | README, CHANGELOG, roadmap row 4b, design note |
 
-### Task 1: `command`, UPDATE, DELETE, `returning`
+### Task 1: `command`, UPDATE, DELETE, `returning` — DONE
 
-- [ ] Tests: `rename` renders `UPDATE "main"."users" AS t0 SET "name" = CAST($2 AS VARCHAR) WHERE (t0."id" = CAST($1 AS BIGINT))` and returns count 1 / 0; update with a correlated `exists` WHERE; `delete … filter` count; `delete … all` count; `returning` on update (new values) and delete (old rows); `Invalid_argument` for a non-column target, a column of another table, a duplicate target, an empty `set`, codec mismatch (custom codec column := plain literal).
-- [ ] Implement statement types, `command`, `:=`, `set`, `filter`, `all`, `update`, `delete`, `returning`.
-- [ ] Green.
+- [x] Tests: `rename` renders `UPDATE "main"."users" AS t0 SET "name" = CAST($2 AS VARCHAR) WHERE (t0."id" = CAST($1 AS BIGINT))` and returns count 1 / 0; update with a correlated `exists` WHERE; `delete … filter` count; `delete … all` count; `returning` on update (new values) and delete (old rows); `Invalid_argument` for a non-column target, a column of another table, a duplicate target, an empty `set`, codec mismatch (custom codec column := plain literal).
+- [x] Implement statement types, `command`, `:=`, `set`, `filter`, `all`, `update`, `delete`, `returning`.
+- [x] Green.
 
-### Task 2: INSERT values, defaults, `select_into`
+### Task 2: INSERT values, defaults, `select_into` — DONE
 
-- [ ] Tests: partial insert with defaults (rendered without alias), `values []` → `DEFAULT VALUES`, `returning` the generated id (sequence default), `select_into` from a source with a WHERE; NOT NULL violation as `Error (Native _)`; `Invalid_argument` for a value mentioning the table's columns, a `Targets` element of another table.
-- [ ] Implement.
-- [ ] Green.
+- [x] Tests: partial insert with defaults (rendered without alias), `values []` → `DEFAULT VALUES`, `returning` the generated id (sequence default), `select_into` from a source with a WHERE; NOT NULL violation as `Error (Native _)`; `Invalid_argument` for a value mentioning the table's columns, a `Targets` element of another table.
+- [x] Implement.
+- [x] Green.
 
-### Task 3: ON CONFLICT
+### Task 3: ON CONFLICT — DONE
 
-- [ ] Tests: `nothing_on` keeps the row (count 0); `update_on` with `excluded` changes it (count 1), with `~where` not matching keeps it; renders `AS t0` and `ON CONFLICT ("id") DO UPDATE SET "name" = excluded."name"`; with `returning`; `select_into` with `nothing_on`; `Invalid_argument` for an undeclared key and a key from another table.
-- [ ] Implement.
-- [ ] Green.
+- [x] Tests: `nothing_on` keeps the row (count 0); `update_on` with `excluded` changes it (count 1), with `~where` not matching keeps it; renders `AS t0` and `ON CONFLICT ("id") DO UPDATE SET "name" = excluded."name"`; with `returning`; `select_into` with `nothing_on`; `Invalid_argument` for an undeclared key and a key from another table.
+- [x] Implement.
+- [x] Green.
 
-### Task 4: Compile fixtures
+### Task 4: Compile fixtures — DONE
 
-- [ ] `test/dml_compile/positive.ml` (the design examples), fixtures `assign_type`, `assign_nullable`, `select_into_types`, `find_returning`, `returning_twice`, `conflict_shape`; `check_dml_types.sh`; dune rule.
-- [ ] `./tools/run runtest --force` exit 0.
+- [x] `test/dml_compile/positive.ml` (the design examples), fixtures `assign_type`, `assign_nullable`, `select_into_types`, `find_returning`, `returning_twice`, `conflict_shape`; `check_dml_types.sh`; dune rule.
+- [x] `./tools/run runtest --force` exit 0.
 
-### Task 5: Documentation
+### Task 5: Documentation — DONE
 
-- [ ] README "Typed SQL" DML example compiled and run; CHANGELOG; roadmap row 4b done; design note status/refinements; mli docs.
-- [ ] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.
+- [x] README "Typed SQL" DML example compiled and run; CHANGELOG; roadmap row 4b done; design note status/refinements; mli docs.
+- [x] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.

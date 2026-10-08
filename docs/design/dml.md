@@ -1,6 +1,7 @@
 # Typed INSERT, UPDATE and DELETE (sub-project 4b)
 
-Status: approved, 2026-10-08. Extends [typed SQL](typed-sql.md) and
+Status: implemented, 2026-10-08; refined while implementing (see
+[Refinements](#refinements-found-while-implementing)). Extends [typed SQL](typed-sql.md) and
 [query composition](query-composition.md); roadmap row 4b of the
 [core redesign](core-redesign.md).
 
@@ -142,6 +143,20 @@ unqualified column names, as SQL requires. `excluded` columns render
   `excluded` when rendering its assignments and WHERE.
 - Rendering reuses the 4a context (aliases in textual order, scope → alias
   map, parameters' scope).
+
+## Refinements found while implementing
+
+- A body is also indexed by its statement kind: `('shape, 'kind, 'row, 'm)
+  change`, with `` [ `Update ] `` for `set`, `` [ `Delete ] `` for `filter`
+  and `all`, `` [ `Insert ] `` for `values` and `select_into`; `update`,
+  `delete` and `insert` require theirs, so `update t (fun _ -> values …)`
+  is a compile error (fixture `kind_mismatch`), not a check when built.
+- `:=` shadows reference assignment inside `S.( … )`; code there writes
+  `Stdlib.( := )` (as the comparison operators already shadow Base's).
+- INSERT and ON CONFLICT were implemented with Task 1, before their tests;
+  each check when built was then mutation-tested (disabled → its test
+  fails). `:=`'s own column check is backed by the statement's table check
+  (a non-column target is rejected either way).
 
 ## Errors
 
