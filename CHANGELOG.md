@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Query composition (sub-project 4a)
+
+[Design](docs/design/query-composition.md).
+
+Added to `Sql`:
+- `join`, `left_join`, `cross_join`, nested to any depth. A LEFT JOIN's body
+  binds `outer` values, lifted by `outer`/`Null.outer` to options.
+- `select ~distinct`.
+- `value codec v`: literals of any codec (custom codecs, dates, timestamps,
+  blobs), encoded when built.
+- `exists`, `in_` (three-valued), `scalar`/`Null.scalar` (one-row sources)
+  subqueries, correlated or not.
+- `union`, `union_all`, `intersect`, `except_`.
+- `test/test_sql_time_zone.ml` (run with `TZ=America/New_York`); 7 compile
+  fixtures.
+
+Changed: `Sql.body` and `Sql.source` are indexed by their column types
+(`('list, 'row, 'k, 'm) body`, `('list, 'row, 'm) source`). Tables are
+aliased `t0`, `t1`, … in order of appearance.
+
 ### Review limitations closed
 
 - `Table.verify` ignores ASCII case in schema, table, column and referenced

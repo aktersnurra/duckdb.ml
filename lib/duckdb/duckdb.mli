@@ -452,7 +452,7 @@ module Request : sig
     with type 'k owner = 'k session and type error = Error.t and type 'a future = 'a
 end
 
-(** Typed single-table SELECT queries. A query is built from typed
+(** Typed SELECT queries: joins, subqueries and set operations. A query is built from typed
     expressions and compiles to an ordinary [Request.t]:
 
     {[
@@ -471,8 +471,7 @@ end
     reference) raises [Invalid_argument] when the other query is built.
     Checked on first prepare: names against the catalog, a declared parameter
     the query never uses ([Parameter_count]), operators the base type does
-    not support (a custom codec over another type, or a BLOB), an empty
-    select list, and a negative [~limit] or [~offset]. [~having] on a
+    not support (a custom codec over another type, or a BLOB). [~having] on a
     [select] outside [group_by] is rejected there too unless the select list
     holds only literals and parameters, in which case DuckDB treats the table
     as one group (0 or 1 rows, which [many] admits). *)

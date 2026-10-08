@@ -1,6 +1,7 @@
 # Query composition (sub-project 4a)
 
-Status: approved, 2026-10-08. Extends [typed SQL](typed-sql.md) (roadmap row
+Status: implemented, 2026-10-08; refined while implementing (see
+[Refinements](#refinements-found-while-implementing)). Extends [typed SQL](typed-sql.md) (roadmap row
 2 of the [core redesign](core-redesign.md)); first of 4a (query composition),
 4b (DML builders), 4c (window functions).
 
@@ -172,6 +173,27 @@ operations nest and may be used as subqueries.
 Each spelling round-trips its epoch value exactly under a non-UTC session
 time zone (`America/New_York`). Casting a TIMESTAMP to TIMESTAMPTZ does not:
 it reads the timestamp as local time.
+
+## Refinements found while implementing
+
+- `body` and `source` are indexed by their column value types:
+  `('list, 'row, 'k, 'm) body`, `('list, 'row, 'm) source`. A `~row`
+  function can map a column to any type, so the row type alone cannot type
+  `in_`'s or `scalar`'s column: decoding a scalar subquery through a
+  mapped row type would be unsound. With the index, `in_` takes
+  `('a * unit, _, _) source` and `scalar` `('a * unit, _, one) source`
+  (one column of the operand's type, by type), and set operations require
+  the same `'list` on both sides; only codec identity (BLOB vs VARCHAR,
+  custom codecs) and `scalar`'s nullability remain checks when built.
+- `in_` of a non-null operand against a nullable column is a type error
+  (`'a` against `'a option`); lift the operand with `nullable`.
+- Rendering binds each piece with `let` in textual order: `^` evaluates its
+  right operand first, which numbered subquery aliases right to left.
+- The time-zone round trip is its own executable, run by dune with
+  `TZ=America/New_York`: the library refuses `SET`, and DuckDB's ICU reads
+  `TZ` once at startup (`putenv` in the process has no effect).
+- A BLOB `value` has a quoted constant (`'\xNN…'`), so it is usable as an
+  `add_column` default; only dates and timestamps are expressions.
 
 ## Errors
 

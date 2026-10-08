@@ -22,7 +22,9 @@ parameters; comparisons, arithmetic, booleans, `is_null`, `coalesce`, `like`;
 aggregates `count_star`, `count`, `sum`, `min`, `max`, `avg`.
 
 Out (later): joins, subqueries, `INSERT`/`UPDATE`/`DELETE` builders, literals
-of custom-codec types, window functions, `DISTINCT`, set operations. Static
+of custom-codec types, window functions, `DISTINCT`, set operations. (Joins,
+subqueries, custom-codec literals, `DISTINCT` and set operations:
+[query composition](query-composition.md).) Static
 detection of scope leaks (an expression used outside its query) stays out.
 Unlike Appendix A assumed, DuckDB would not always reject one: every query
 aliases its table `t0` and numbers parameters from `$1`, so a leaked column

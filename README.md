@@ -76,8 +76,8 @@ when you opt into manually managed handles through `Owned`.
 
 ## Typed SQL
 
-`Duckdb.Sql` builds single-table queries from typed expressions. A query is
-an ordinary `Request.t`, run, cached and validated like hand-written SQL:
+`Duckdb.Sql` builds queries from typed expressions. A query is an ordinary
+`Request.t`, run, cached and validated like hand-written SQL:
 
 ```ocaml
 module S = D.Sql
@@ -109,8 +109,40 @@ group_by Keys.[name] (fun [name] -> select Exprs.[name; id] …)  (* id is not g
 R.Session.find c adults D.Args.[18l]                             (* a select is many rows *)
 ```
 
-Joins, subqueries and write statements are not covered yet; write those as
-SQL requests. See [typed SQL](docs/design/typed-sql.md).
+Joins nest as callbacks. A LEFT JOIN's right columns can be NULL, so its body
+binds them as `outer` values, usable only once lifted to options by `outer`
+(or `Null.outer` for an already nullable column). Subqueries are ordinary
+`from …` sources and may refer to the enclosing query's columns:
+
+```ocaml
+let posts = D.Table.(declare "posts"
+  Columns.["id", int64; "owner", int64; "title", string]
+  ~row:(fun id owner title -> (id, owner, title)))
+
+let with_posts = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      left_join posts ~on:(fun [_; owner; _] -> owner = uid) (fun [_; _; title] ->
+        select Exprs.[name; outer title] ~row:(fun n t -> (n, t))))))
+(* : (unit, string * string option, many) Request.t *)
+
+let posting = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      select Exprs.[name; scalar (from posts (fun [_; owner; _] ->
+                             aggregate Exprs.[count_star] ~row:Fn.id ~where:(owner = uid)))]
+        ~row:(fun n c -> (n, c))
+        ~where:(exists (from posts (fun [_; owner; _] ->
+                  select Exprs.[owner] ~row:Fn.id ~where:(owner = uid)))))))
+(* : (unit, string * int64 option, many) Request.t *)
+```
+
+Also: `join`, `cross_join`, `select ~distinct:true`, `in_` (three-valued),
+`union`, `union_all`, `intersect`, `except_`, and `value` for literals of any
+codec (dates, timestamps, blobs, custom codecs). Write statements and window
+functions are not covered yet; write those as SQL requests. See
+[typed SQL](docs/design/typed-sql.md) and
+[query composition](docs/design/query-composition.md).
 
 ## Schema
 
@@ -262,6 +294,7 @@ Local DuckDB databases and typed local Parquet reads and exports are
 supported. Remote storage and credentials are out of scope. Done: the
 performance work (columnar bulk reads, unboxed numbers, allocation-free
 decoding; see [performance](docs/design/performance.md)) and the typed SQL
-layer ([typed SQL](docs/design/typed-sql.md)), schema declarations with
+layer ([typed SQL](docs/design/typed-sql.md), with joins, subqueries and set
+operations: [query composition](docs/design/query-composition.md)), schema declarations with
 constraints ([schema](docs/design/schema.md)) and versioned migrations
 ([migrations](docs/design/migrations.md)). See the [core redesign](docs/design/core-redesign.md) note.

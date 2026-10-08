@@ -80,7 +80,7 @@ right to left), so aliases number left to right.
 - [ ] Fixtures: `outer_unlifted`, `outer_nullable`, `null_outer_non_null`, `scalar_many`, `in_type`, `union_rows`, `find_join`; expectations in `check_sql_types.sh`.
 - [ ] `./tools/run runtest --force` exit 0.
 
-### Task 6: Documentation
+### Task 6: Documentation — DONE
 
 - [ ] README "Typed SQL" join/subquery example compiled and run; CHANGELOG; core-redesign roadmap rows 4a–4c; design note status and refinements; mli doc comments.
 - [ ] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.
