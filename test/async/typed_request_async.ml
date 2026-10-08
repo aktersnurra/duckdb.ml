@@ -73,6 +73,7 @@ let main () =
   ok (A.completion busy) >>| ok >>= fun () ->
   ok (A.shutdown pool) >>| ok >>| fun () ->
   require "resources released" (Duckdb_ffi.live_resources () = 0);
-  print_endline "async request: generic instance ops/errors/transaction/ingest, reentrancy, cancellable submit, generated SQL=ok"
+  (* Stdlib: Async's buffered stdout may not flush before the process exits. *)
+  Stdlib.print_endline "async request: generic instance ops/errors/transaction/ingest, reentrancy, cancellable submit, generated SQL=ok"
 
 let () = Thread_safe.block_on_async_exn main
