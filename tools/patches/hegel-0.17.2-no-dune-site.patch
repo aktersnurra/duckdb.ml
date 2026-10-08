@@ -1,0 +1,55 @@
+--- a/lib/dune
++++ b/lib/dune
+@@ -1,6 +1,5 @@
+ (library
+  (name hegel)
+- (public_name hegel)
+  (libraries hegel_ffi ipaddr sexplib0 threads.posix unix yojson)
+  (private_modules
+   generators_core
+@@ -9,6 +8,4 @@
+   generators_combinators
+   generators_functions)
+  (preprocess
+-  (pps ppx_js_style))
+- (instrumentation
+-  (backend bisect_ppx)))
++  (pps ppx_js_style)))
+--- a/lib/ffi/dune
++++ b/lib/ffi/dune
+@@ -6,15 +6,4 @@
+ 
+ (library
+  (name hegel_ffi)
+- (package hegel)
+- (libraries ctypes ctypes-foreign unix dune-site))
+-
+-; Generates the `Hegel_sites` module exposing `Hegel_sites.Sites.libhegel`: the
+-; directories of the `libhegel` site. Release tarballs install the matching
+-; prebuilt libhegel there (see prebuilt/dune, added to the tarball by CI), so
+-; the loader finds it without a download. In a dev checkout the site is empty
+-; and the loader falls back to the sibling checkout / download.
+-
+-(generate_sites_module
+- (module hegel_sites)
+- (sites hegel))
++ (libraries ctypes ctypes-foreign unix))
+--- a/lib/ffi/loader.ml
++++ b/lib/ffi/loader.ml
+@@ -155,13 +155,9 @@
+    the matching-platform binary into the [libhegel] dune-site under the fixed
+    name [libhegel_bundled] (the loader opens it by path, so the missing
+    extension is irrelevant to [dlopen]). *)
+-let from_site () =
+-  List.find_opt
+-    is_file
+-    (List.map
+-       (fun dir -> Filename.concat dir "libhegel_bundled")
+-       Hegel_sites.Sites.libhegel)
+-;;
++(* Vendored by duckdb.ml without dune-site: the engine is found through
++   [$HEGEL_LIBHEGEL_PATH], which tools/run sets. *)
++let from_site () = None
+ 
+ (* 3. Sibling hegel-rust checkout relative to the working directory. *)
+ let from_sibling ext =

@@ -1,1 +1,3 @@
+; Hegel, vendored by tools/bootstrap.py for the property tests.
+(vendored_dirs vendor)
 (install (section doc) (package duckdb-ffi) (files docs/native-dependency.md))

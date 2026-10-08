@@ -1,0 +1,11 @@
+; Property-based tests with Hegel (vendored by tools/bootstrap.py; tools/run
+; points it at the vendored engine).
+(library
+ (name prop_support)
+ (modules prop_support)
+ (libraries base hegel sexplib0 duckdb duckdb-ffi))
+
+(tests
+ (names prop_codec)
+ (modules prop_codec)
+ (libraries base hegel sexplib0 duckdb duckdb-ffi prop_support))

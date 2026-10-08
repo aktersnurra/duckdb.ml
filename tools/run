@@ -11,6 +11,9 @@ os.chdir(ROOT)
 environment = local_environment()
 environment["DUCKDB_NATIVE_DIR"] = str(ROOT / ".deps/duckdb")
 environment["DUCKDB_INCLUDE_DIR"] = str(ROOT / ".deps/duckdb")
+# Hegel's engine: the vendored copy only, never a download (tools/bootstrap.py).
+environment["HEGEL_LIBHEGEL_PATH"] = str(ROOT / "vendor/hegel/libhegel.so")
+environment["HEGEL_LIBHEGEL_NO_DOWNLOAD"] = "1"
 for variable in ("LIBRARY_PATH", "LD_LIBRARY_PATH"):
     environment[variable] = str(ROOT / ".deps/duckdb") + os.pathsep + environment.get(variable, "")
 os.execve("/usr/bin/opam", ["opam", "exec", "--", "dune", *sys.argv[1:]], environment)

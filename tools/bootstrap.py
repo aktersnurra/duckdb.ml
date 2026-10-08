@@ -17,6 +17,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".local/upstream"
 REPOS = ROOT / ".deps/repos"
+HEGEL = ROOT / "vendor/hegel"
+HEGEL_PATCH = ROOT / "tools/patches/hegel-0.17.2-no-dune-site.patch"
+# The engine binaries bundled in Hegel's release tarball, by platform.
+LIBHEGEL = {
+    ("Linux", "x86_64"): "libhegel-linux-amd64.so",
+    ("Linux", "aarch64"): "libhegel-linux-arm64.so",
+    ("Darwin", "arm64"): "libhegel-darwin-arm64.dylib",
+}
 
 
 def verify_sha256(path, expected):
@@ -32,7 +40,7 @@ def validate_lock(lock):
     for field in ("compiler_package", "packages", "archives"):
         if field not in lock:
             raise ValueError(f"missing {field}")
-    for name in ("ox", "default", "compiler", "eio", "duckdb"):
+    for name in ("ox", "default", "compiler", "eio", "duckdb", "hegel"):
         archive = lock["archives"].get(name, {})
         for field in ("url", "filename", "sha256"):
             if not archive.get(field):
@@ -41,7 +49,8 @@ def validate_lock(lock):
             raise ValueError(f"{name}.url must use https")
         if not re.fullmatch(r"[0-9a-f]{64}", archive["sha256"]):
             raise ValueError(f"invalid {name}.sha256")
-        if name != "duckdb" and not re.fullmatch(
+        # Release assets (duckdb, hegel) are pinned by checksum alone.
+        if name not in ("duckdb", "hegel") and not re.fullmatch(
             r"[0-9a-f]{40}", archive.get("revision", "")
         ):
             raise ValueError(f"invalid {name}.revision")
@@ -185,11 +194,48 @@ def prepare(lock):
         if count != 1:
             raise ValueError(f"expected one url stanza: {path}")
         path.write_text(text)
+    vendor_hegel(CACHE / lock["archives"]["hegel"]["filename"], HEGEL)
     native = ROOT / ".deps/duckdb"
     native.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(CACHE / lock["archives"]["duckdb"]["filename"]) as archive:
         for name in ("duckdb.h", "libduckdb.so"):
             (native / name).write_bytes(archive.read(name))
+
+
+def vendor_hegel(archive, destination, system=None, machine=None, patch=HEGEL_PATCH):
+    """Extract Hegel's library, licence and this platform's engine into
+    [destination], replacing any previous copy, then apply [patch]: Hegel
+    becomes private libraries of this project, without dune-site (whose
+    libraries conflict with the OxCaml LSP build)."""
+    platform_key = (system or platform.system(), machine or platform.machine())
+    engine = LIBHEGEL.get(platform_key)
+    if engine is None:
+        raise RuntimeError(f"no bundled libhegel for {platform_key}")
+    destination = Path(destination)
+    if destination.exists():
+        shutil.rmtree(destination)
+    unpack = destination.with_name(destination.name + "-unpack")
+    if unpack.exists():
+        shutil.rmtree(unpack)
+    unpack.mkdir(parents=True)
+    with tarfile.open(archive) as source:
+        source.extractall(unpack, filter="data")
+    children = list(unpack.iterdir())
+    if len(children) != 1:
+        raise ValueError("unexpected hegel archive layout")
+    root = children[0]
+    destination.mkdir(parents=True)
+    # lib/jane is Hegel's Core integration, which this project does not use.
+    shutil.copytree(
+        root / "lib",
+        destination / "lib",
+        ignore=lambda directory, _: {"jane"} if Path(directory) == root / "lib" else set(),
+    )
+    shutil.copy(root / "LICENSE", destination / "LICENSE")
+    shutil.copy(root / "prebuilt" / engine, destination / "libhegel.so")
+    shutil.rmtree(unpack)
+    if patch is not None:
+        subprocess.run(["patch", "-p1", "--forward", "--quiet", "-d", str(destination), "-i", str(patch)], check=True)
 
 
 def install(lock):

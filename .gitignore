@@ -1,6 +1,7 @@
 _build/
 _opam/
 .deps/
+vendor/
 .local/
 *.log
 __pycache__/
