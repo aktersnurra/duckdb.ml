@@ -490,6 +490,171 @@ let union_all left right = set_operation "UNION ALL" left right
 let intersect left right = set_operation "INTERSECT" left right
 let except_ left right = set_operation "EXCEPT" left right
 
+(* Write statements. A body is indexed by its table's shape (so an upsert's
+   [excluded] binders are typed by the inserted table) and by its statement
+   kind. *)
+type assignment = { scope : int; column : string; value : node }
+let ( := ) (target : (_, _, _) expr) (value : (_, _, _) expr) =
+  checked target value;
+  match target.node with
+  | Column { scope; name } -> { scope; column = name; value = value.node }
+  | _ -> invalid_arg "Duckdb.Sql.( := ): the target must be a column of the statement's table"
+
+type ('row, 'm) result =
+  | Count : (int64, Request.one) result
+  | Returning : { columns : (_, 'fn, 'row) Fields.t; row : 'fn; list : node list } -> ('row, Request.many) result
+type 'shape conflict =
+  { key : node list;
+    action : [ `Nothing | `Update of node option * (('shape, row) Binders.t -> assignment list) ] }
+type 'shape kind =
+  | Set of { assignments : assignment list; where : node option }
+  | Filter of node option
+  | Values of { assignments : assignment list; conflict : 'shape conflict option }
+  | Select_into of { columns : node list; source : packed_source; conflict : 'shape conflict option }
+type ('shape, 'kind, 'row, 'm) change = Change : { kind : 'shape kind; result : ('row, 'm) result } -> ('shape, 'kind, 'row, 'm) change
+module Targets = struct
+  type 'list t =
+    | [] : unit t
+    | (::) : ('a, _, row) expr * 'list t -> ('a * 'list) t
+end
+let rec target_nodes : type l. l Targets.t -> node list = function
+  | Targets.[] -> []
+  | Targets.(e :: rest) -> e.node :: target_nodes rest
+
+let set ?where assignments =
+  if List.is_empty assignments then invalid_arg "Duckdb.Sql.set: no assignment";
+  Change { kind = Set { assignments; where = Option.map where ~f:(fun (e : _ expr) -> e.node) }; result = Count }
+let filter (e : _ expr) = Change { kind = Filter (Some e.node); result = Count }
+let all = Change { kind = Filter None; result = Count }
+let values ?on_conflict assignments = Change { kind = Values { assignments; conflict = on_conflict }; result = Count }
+let select_into ?on_conflict targets source =
+  Change { kind = Select_into { columns = target_nodes targets; source = Packed source; conflict = on_conflict };
+           result = Count }
+let returning exprs ~row (Change { kind; result = Count }) =
+  Change { kind; result = Returning { columns = fields_of_exprs exprs; row; list = nodes_of_exprs exprs } }
+let nothing_on keys = { key = key_nodes keys; action = `Nothing }
+let update_on ?where keys f =
+  { key = key_nodes keys; action = `Update (Option.map where ~f:(fun (e : _ expr) -> e.node), f) }
+
+(* A statement, resolved against its table: assignments checked, the
+   conflict's excluded binders bound. *)
+type resolved_conflict = { names : string list; update : (int * assignment list * node option) option }
+type statement_kind =
+  | Update_statement of { assignments : assignment list; where : node option }
+  | Delete_statement of node option
+  | Insert_values of { assignments : assignment list; conflict : resolved_conflict option }
+  | Insert_select of { columns : string list; source : packed_source; conflict : resolved_conflict option }
+type ('row, 'm) statement =
+  Statement : { target : string; scope : int; kind : statement_kind; result : ('row, 'm) result } -> ('row, 'm) statement
+
+let own_column ~scope = function
+  | Column { scope = s; name } when s = scope -> name
+  | _ -> invalid_arg "Duckdb.Sql: a column of another table"
+let own_assignments ~scope assignments =
+  let names = List.map assignments ~f:(fun (a : assignment) ->
+    if a.scope <> scope then invalid_arg "Duckdb.Sql: an assignment to a column of another table";
+    a.column) in
+  if List.contains_dup names ~compare:String.compare then invalid_arg "Duckdb.Sql: a column assigned twice";
+  assignments
+let declared_keys (Request.Table_def t : (_, _, _) Request.table) =
+  List.filter_map t.constraints ~f:(function
+    | Table_constraint.Primary_key names | Table_constraint.Unique names -> Some names
+    | _ -> None)
+let resolve_conflict (Request.Table_def t as table : (_, _, _) Request.table) ~scope (c : _ conflict) =
+  let names = List.map c.key ~f:(own_column ~scope) in
+  let sorted = List.sort ~compare:String.compare in
+  if not (List.exists (declared_keys table) ~f:(fun key -> List.equal String.equal (sorted key) (sorted names))) then
+    invalid_arg "Duckdb.Sql: the conflict key must be the declared primary key or a declared unique key";
+  let update = match c.action with
+    | `Nothing -> None
+    | `Update (where, f) ->
+      let excluded = fresh_scope () in
+      Some (excluded, own_assignments ~scope (f (binders t.columns ~scope:excluded)), where) in
+  { names; update }
+
+let update (Request.Table_def t as table : (_, _, _) Request.table) f =
+  let scope = fresh_scope () in
+  let (Change { kind; result }) = f (binders t.columns ~scope) in
+  match kind with
+  | Set { assignments; where } ->
+    Statement { target = target_of table; scope; result;
+                kind = Update_statement { assignments = own_assignments ~scope assignments; where } }
+  | _ -> assert false (* excluded by the kind index *)
+let delete (Request.Table_def t as table : (_, _, _) Request.table) f =
+  let scope = fresh_scope () in
+  let (Change { kind; result }) = f (binders t.columns ~scope) in
+  match kind with
+  | Filter where -> Statement { target = target_of table; scope; result; kind = Delete_statement where }
+  | _ -> assert false (* excluded by the kind index *)
+let insert (Request.Table_def t as table : (_, _, _) Request.table) f =
+  let scope = fresh_scope () in
+  let (Change { kind; result }) = f (binders t.columns ~scope) in
+  let conflict = Option.map ~f:(resolve_conflict table ~scope) in
+  let kind = match kind with
+    | Values { assignments; conflict = c } ->
+      Insert_values { assignments = own_assignments ~scope assignments; conflict = conflict c }
+    | Select_into { columns; source; conflict = c } ->
+      let names = List.map columns ~f:(own_column ~scope) in
+      if List.contains_dup names ~compare:String.compare then invalid_arg "Duckdb.Sql: a column assigned twice";
+      Insert_select { columns = names; source; conflict = conflict c }
+    | _ -> assert false (* excluded by the kind index *) in
+  Statement { target = target_of table; scope; result; kind }
+
+let render_statement : type r m. context -> (r, m) statement -> string =
+  fun context (Statement { target; scope; kind; result }) ->
+  let listed context nodes = String.concat ~sep:", " (List.map nodes ~f:(render context)) in
+  let assigned context assignments = String.concat ~sep:", " (List.map assignments ~f:(fun (a : assignment) ->
+    Request.quote a.column ^ " = " ^ render context a.value)) in
+  let clause context keyword = function None -> "" | Some node -> " " ^ keyword ^ " " ^ render context node in
+  let returning context = match result with
+    | Count -> ""
+    | Returning { list; _ } -> " RETURNING " ^ listed context list in
+  let aliased () =
+    let a = alias context in
+    (a, { context with aliases = (scope, a) :: context.aliases }) in
+  match kind with
+  | Update_statement { assignments; where } ->
+    let a, inner = aliased () in
+    let set = assigned inner assignments in
+    let where = clause inner "WHERE" where in
+    "UPDATE " ^ target ^ " AS " ^ a ^ " SET " ^ set ^ where ^ returning inner
+  | Delete_statement where ->
+    let a, inner = aliased () in
+    let where = clause inner "WHERE" where in
+    "DELETE FROM " ^ target ^ " AS " ^ a ^ where ^ returning inner
+  | Insert_values { conflict; _ } | Insert_select { conflict; _ } ->
+    (* DuckDB resolves an INSERT's alias in RETURNING only with ON CONFLICT;
+       without one the target's columns render unqualified. Values and the
+       source see no target row. *)
+    let alias, inner = match conflict with
+      | Some _ -> let a, inner = aliased () in (" AS " ^ a, inner)
+      | None -> ("", { context with aliases = (scope, "") :: context.aliases }) in
+    let quoted names = "(" ^ String.concat ~sep:", " (List.map names ~f:Request.quote) ^ ")" in
+    let body = match kind with
+      | Insert_values { assignments = []; _ } -> " DEFAULT VALUES"
+      | Insert_values { assignments; _ } ->
+        let names = List.map assignments ~f:(fun (a : assignment) -> a.column) in
+        " " ^ quoted names ^ " VALUES (" ^ listed context (List.map assignments ~f:(fun (a : assignment) -> a.value)) ^ ")"
+      | Insert_select { columns; source = Packed source; _ } -> " " ^ quoted columns ^ " " ^ render_source context source
+      | _ -> assert false in
+    let on_conflict = match conflict with
+      | None -> ""
+      | Some { names; update = None } -> " ON CONFLICT " ^ quoted names ^ " DO NOTHING"
+      | Some { names; update = Some (excluded, assignments, where) } ->
+        let inner = { inner with aliases = (excluded, "excluded") :: inner.aliases } in
+        let set = assigned inner assignments in
+        " ON CONFLICT " ^ quoted names ^ " DO UPDATE SET " ^ set ^ clause inner "WHERE" where in
+    "INSERT INTO " ^ target ^ alias ^ body ^ on_conflict ^ returning inner
+
+let command (type r m) params (f : _ -> (r, m) statement) : (_, r, m) Request.t =
+  let (Packed_fields fields) = fields_of_params params in
+  let scope = fresh_scope () in
+  let (Statement { result; _ } as statement) = f (bound params ~scope ~index:1) in
+  let sql = render_statement { aliases = []; params = scope; next = ref 0 } statement in
+  match result with
+  | Count -> Request.generated fields Fields.[Codec.Values.int64] ~row:Fn.id sql
+  | Returning { columns; row; _ } -> Request.generated fields columns ~row sql
+
 (* Defined last: these shadow Base's operators. *)
 let compare op (a : _ expr) (b : _ expr) = checked a b; { node = Infix (op, a.node, b.node); codec = Codec.Values.bool }
 let null_compare op (a : _ expr) (b : _ expr) =

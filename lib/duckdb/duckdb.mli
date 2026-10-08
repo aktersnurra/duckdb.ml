@@ -605,6 +605,73 @@ module Sql : sig
   val intersect : ('list, 'row, _) source -> ('list, 'row, _) source -> ('list, 'row, Request.many) source
   val except_ : ('list, 'row, _) source -> ('list, 'row, _) source -> ('list, 'row, Request.many) source
 
+  (** {2 Write statements}
+
+      [command] builds UPDATE, DELETE and INSERT requests as [query] builds
+      SELECTs. A body is indexed by its table's ['shape] and its statement
+      kind; without [returning] the request returns the affected-row count,
+      with it the select list's rows:
+
+      {[
+        let rename = Sql.(command Params.[int64; string] (fun [id; name] ->
+          update users (fun [uid; uname; _] -> set [uname := param name] ~where:(uid = param id))))
+        (* : (int64 * (string * unit), int64, one) Request.t *)
+      ]}
+
+      Raised as [Invalid_argument] when built: an assignment or [Targets]
+      element that is not a column of the statement's table, one column
+      assigned twice, an empty [set], a value of another codec than its
+      column, a value or [select_into] source mentioning the inserted table's
+      columns, a conflict key that is not the declared primary key or a
+      declared unique key (as a set). *)
+  type ('shape, 'kind, 'row, 'm) change
+  type ('row, 'm) statement
+  type assignment
+  type 'shape conflict
+
+  val command : ('params, 'shape) Params.t -> ('shape Bound.t -> ('row, 'm) statement) -> ('params, 'row, 'm) Request.t
+
+  (** [column := value]: SET targets and inserted columns. *)
+  val ( := ) : ('a, 'n, row) expr -> ('a, 'n, row) expr -> assignment
+
+  (** UPDATE and DELETE alias the table [t0]; INSERT renders it unqualified
+      (aliased only with ON CONFLICT: DuckDB resolves an INSERT's alias in
+      RETURNING only then). *)
+  val update : (_, 'shape, _) Request.table ->
+    (('shape, row) Binders.t -> ('shape, [ `Update ], 'row, 'm) change) -> ('row, 'm) statement
+  val delete : (_, 'shape, _) Request.table ->
+    (('shape, row) Binders.t -> ('shape, [ `Delete ], 'row, 'm) change) -> ('row, 'm) statement
+  val insert : (_, 'shape, _) Request.table ->
+    (('shape, row) Binders.t -> ('shape, [ `Insert ], 'row, 'm) change) -> ('row, 'm) statement
+
+  val set : ?where:(bool, Codec.non_null, row) expr -> assignment list -> (_, [ `Update ], int64, Request.one) change
+  val filter : (bool, Codec.non_null, row) expr -> (_, [ `Delete ], int64, Request.one) change
+
+  (** Every row. *)
+  val all : (_, [ `Delete ], int64, Request.one) change
+
+  (** The named columns; the others take their defaults. [values []] is
+      DEFAULT VALUES. *)
+  val values : ?on_conflict:'shape conflict -> assignment list -> ('shape, [ `Insert ], int64, Request.one) change
+
+  (** Targets for [select_into], typed as the source's columns. *)
+  module Targets : sig
+    type 'list t =
+      | [] : unit t
+      | (::) : ('a, _, row) expr * 'list t -> ('a * 'list) t
+  end
+  val select_into : ?on_conflict:'shape conflict -> 'list Targets.t -> ('list, _, _) source ->
+    ('shape, [ `Insert ], int64, Request.one) change
+  val returning : ('a * 'list, 'fn, 'row, row) Exprs.t -> row:'fn -> ('shape, 'kind, int64, Request.one) change ->
+    ('shape, 'kind, 'row, Request.many) change
+
+  (** ON CONFLICT on a declared key: DO NOTHING, or DO UPDATE whose callback
+      binds the proposed row ([excluded]); the table's binders are the
+      existing row. *)
+  val nothing_on : _ Keys.t -> _ conflict
+  val update_on : ?where:(bool, Codec.non_null, row) expr -> _ Keys.t ->
+    (('shape, row) Binders.t -> assignment list) -> 'shape conflict
+
   val param : ('a, 'n) param -> ('a, 'n, 'k) expr
   val asc : (_, _, 'k) expr -> 'k order
   val desc : (_, _, 'k) expr -> 'k order

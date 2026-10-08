@@ -200,7 +200,7 @@ let () =
 let () =
   let leaked = ref None and parameter = ref None in
   ignore (S.(query Params.[int64] (fun [p] -> from users (fun [id; _; _] ->
-    leaked := Some id; parameter := Some (param p); select Exprs.[id] ~row:Fn.id))));
+    Stdlib.(leaked := Some id; parameter := Some (param p)); select Exprs.[id] ~row:Fn.id))));
   let other = T.(declare "others" Columns.["id", int64] ~row:Fn.id) in
   let rejected name build =
     match build () with
@@ -324,7 +324,7 @@ let () =
   let leaked = ref None in
   ignore (S.(query Params.[] (fun [] -> from users (fun [uid; _; _] ->
     join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [pid; _; _; _] ->
-      leaked := Some pid; select Exprs.[pid] ~row:Fn.id)))));
+      Stdlib.(leaked := Some pid); select Exprs.[pid] ~row:Fn.id)))));
   (match S.(query Params.[] (fun [] -> from users (fun [id; _; _] ->
      select Exprs.[id] ~row:Fn.id ~where:(id = Option.value_exn !leaked)))) with
    | exception Invalid_argument _ -> ()
