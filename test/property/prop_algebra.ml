@@ -33,8 +33,39 @@ let expect name equal actual expected = if not (equal actual expected) then fail
 let ints = List.equal Int64.equal
 let sorted = List.sort ~compare:Poly.compare
 
+(* Built once: their cached statements are reused across cases and data
+   (DuckDB's stale-statistics bug showed why that path needs covering). *)
+let distinct = S.(query Params.[] (fun [] -> from items (fun [_; k; _; _] -> select Exprs.[k] ~distinct:true ~row:Fn.id)))
+let grouped = S.(query Params.[] (fun [] -> from items (fun [_; k; v; n] ->
+  group_by Keys.[k] (fun [k] ->
+    select Exprs.[k; count_star; count n; sum v; min v; max v; Null.max n; avg v]
+      ~row:(fun k c cn s lo hi hn a -> (k, c, cn, s, lo, hi, hn, a)) ~order_by:[asc k]))))
+let inner = S.(query Params.[] (fun [] -> from items (fun [id; k; _; _] ->
+  join tags ~on:(fun [_; tk; _] -> tk = k) (fun [tid; _; _] -> select Exprs.[id; tid] ~row:(fun a b -> (a, b))))))
+let left = S.(query Params.[] (fun [] -> from items (fun [id; k; _; _] ->
+  left_join tags ~on:(fun [_; tk; _] -> tk = k) (fun [tid; _; _] ->
+    select Exprs.[id; outer tid] ~row:(fun a b -> (a, b))))))
+let values_of = S.(from items (fun [_; _; v; _] -> select Exprs.[v] ~row:Fn.id))
+let weights_of = S.(from tags (fun [_; _; w] -> select Exprs.[w] ~row:Fn.id))
+let set_queries = S.[ ("union all", query Params.[] (fun [] -> union_all values_of weights_of));
+                      ("union", query Params.[] (fun [] -> union values_of weights_of));
+                      ("intersect", query Params.[] (fun [] -> intersect values_of weights_of));
+                      ("except", query Params.[] (fun [] -> except_ values_of weights_of)) ]
+
+let ordered = S.(query Params.[] (fun [] -> from items (fun [id; _; v; _] ->
+  select Exprs.[id; v] ~row:(fun a b -> (a, b)) ~order_by:[asc id])))
+
 let () =
   let c = Lazy.force connection in
+  (* One cached statement over data of any range: DuckDB's compressed
+     materialization, if enabled, corrupts values outside the statistics
+     seen when the statement was prepared. *)
+  property "a cached ordered select over changing data" (fun tc ->
+    let rows = List.init (Hegel.draw ~label:"items" tc (Hegel.integers ~min_value:0 ~max_value:8 ())) ~f:(fun i ->
+      { id = Int64.of_int i; k = 0L; v = Hegel.draw ~label:"v" tc int64s; n = None }) in
+    load c rows [];
+    expect "ordered" (List.equal Poly.equal) (ok (R.Session.collect c ordered D.Args.[]))
+      (List.map rows ~f:(fun r -> (r.id, r.v))));
   property "where, order by, limit, offset" (fun tc ->
     let rows = draw_items tc in
     load c rows [];
@@ -52,16 +83,11 @@ let () =
   property "distinct" (fun tc ->
     let rows = draw_items tc in
     load c rows [];
-    let q = S.(query Params.[] (fun [] -> from items (fun [_; k; _; _] -> select Exprs.[k] ~distinct:true ~row:Fn.id))) in
-    expect "distinct" ints (sorted (ok (R.Session.collect c q D.Args.[])))
+    expect "distinct" ints (sorted (ok (R.Session.collect c distinct D.Args.[])))
       (List.dedup_and_sort (List.map rows ~f:(fun r -> r.k)) ~compare:Int64.compare));
   property "group by with aggregates" (fun tc ->
     let rows = draw_items tc in
     load c rows [];
-    let q = S.(query Params.[] (fun [] -> from items (fun [_; k; v; n] ->
-      group_by Keys.[k] (fun [k] ->
-        select Exprs.[k; count_star; count n; sum v; min v; max v; Null.max n; avg v]
-          ~row:(fun k c cn s lo hi hn a -> (k, c, cn, s, lo, hi, hn, a)) ~order_by:[asc k])))) in
     let expected = rows
       |> List.map ~f:(fun r -> r.k) |> List.dedup_and_sort ~compare:Int64.compare
       |> List.map ~f:(fun k ->
@@ -74,15 +100,10 @@ let () =
     let same (k, c, cn, s, lo, hi, hn, a) (k', c', cn', s', lo', hi', hn', a') =
       Int64.equal k k' && Int64.equal c c' && Int64.equal cn cn' && Poly.equal (s, lo, hi, hn) (s', lo', hi', hn')
       && Option.equal (fun x y -> Float.(abs (x - y) < 1e-9)) a a' in
-    expect "grouped" (List.equal same) (ok (R.Session.collect c q D.Args.[])) expected);
+    expect "grouped" (List.equal same) (ok (R.Session.collect c grouped D.Args.[])) expected);
   property "inner and left joins" (fun tc ->
     let rows = draw_items tc and tag_rows = draw_tags tc in
     load c rows tag_rows;
-    let inner = S.(query Params.[] (fun [] -> from items (fun [id; k; _; _] ->
-      join tags ~on:(fun [_; tk; _] -> tk = k) (fun [tid; _; _] -> select Exprs.[id; tid] ~row:(fun a b -> (a, b)))))) in
-    let left = S.(query Params.[] (fun [] -> from items (fun [id; k; _; _] ->
-      left_join tags ~on:(fun [_; tk; _] -> tk = k) (fun [tid; _; _] ->
-        select Exprs.[id; outer tid] ~row:(fun a b -> (a, b)))))) in
     let matches r = List.filter tag_rows ~f:(fun t -> Int64.equal t.tk r.k) in
     expect "inner" (List.equal Poly.equal) (sorted (ok (R.Session.collect c inner D.Args.[])))
       (sorted (List.concat_map rows ~f:(fun r -> List.map (matches r) ~f:(fun t -> (r.id, t.tid)))));
@@ -95,12 +116,10 @@ let () =
     let rows = draw_items tc and tag_rows = draw_tags tc in
     load c rows tag_rows;
     let vs = List.map rows ~f:(fun r -> r.v) and ws = List.map tag_rows ~f:(fun t -> t.w) in
-    let left = S.(from items (fun [_; _; v; _] -> select Exprs.[v] ~row:Fn.id)) in
-    let right = S.(from tags (fun [_; _; w] -> select Exprs.[w] ~row:Fn.id)) in
-    let run source = sorted (ok (R.Session.collect c S.(query Params.[] (fun [] -> source)) D.Args.[])) in
+    let run name = sorted (ok (R.Session.collect c (List.Assoc.find_exn set_queries name ~equal:String.equal) D.Args.[])) in
     let set l = List.dedup_and_sort l ~compare:Int64.compare in
     let mem l x = List.mem l x ~equal:Int64.equal in
-    expect "union all" ints (run S.(union_all left right)) (sorted (vs @ ws));
-    expect "union" ints (run S.(union left right)) (set (vs @ ws));
-    expect "intersect" ints (run S.(intersect left right)) (set (List.filter vs ~f:(mem ws)));
-    expect "except" ints (run S.(except_ left right)) (set (List.filter vs ~f:(fun v -> not (mem ws v)))))
+    expect "union all" ints (run "union all") (sorted (vs @ ws));
+    expect "union" ints (run "union") (set (vs @ ws));
+    expect "intersect" ints (run "intersect") (set (List.filter vs ~f:(mem ws)));
+    expect "except" ints (run "except") (set (List.filter vs ~f:(fun v -> not (mem ws v)))))

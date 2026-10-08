@@ -6,6 +6,6 @@
  (libraries base hegel sexplib0 duckdb duckdb-ffi))
 
 (tests
- (names prop_codec prop_semantics prop_algebra)
- (modules prop_codec prop_semantics prop_algebra)
+ (names prop_codec prop_semantics prop_algebra prop_dml)
+ (modules prop_codec prop_semantics prop_algebra prop_dml)
  (libraries base hegel sexplib0 duckdb duckdb-ffi prop_support))
