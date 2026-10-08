@@ -89,3 +89,46 @@ let () =
     update prices (fun [p] -> set [p := int64 2L]))));
   ignore (S.(command Params.[] (fun [] -> update prices (fun [p] -> set [p := value cents 2L]))));
   Stdlib.print_endline "dml: update and delete counts, returning, correlated where, misuse rejected=ok"
+
+(* INSERT: named columns (others take defaults), DEFAULT VALUES, RETURNING
+   the generated key, INSERT … SELECT; unqualified without ON CONFLICT. *)
+let archive = T.(declare "archive" Columns.["id", int64; "name", string] ~row:(fun id name -> (id, name)))
+let add = S.(command Params.[string] (fun [name] ->
+  insert users (fun [uid; uname; _] -> values [uname := param name] |> returning Exprs.[uid] ~row:Fn.id)))
+let anonymous = S.(command Params.[] (fun [] ->
+  insert users (fun [uid; uname; _] -> values [] |> returning Exprs.[uid; uname] ~row:(fun i n -> (i, n)))))
+let with_age = S.(command Params.[int64; int32] (fun [id; age] ->
+  insert users (fun [uid; _; uage] -> values [uid := param id; uage := nullable (param age)])))
+let copy = S.(command Params.[int32] (fun [min_age] ->
+  insert archive (fun [aid; aname] -> select_into Targets.[aid; aname]
+    (from users (fun [uid; uname; uage] ->
+      select Exprs.[uid; uname] ~row:(fun i n -> (i, n)) ~where:(is_true Null.(uage >= nullable (param min_age))))))))
+let named = S.(command Params.[int64; string] (fun [id; name] ->
+  insert users (fun [uid; uname; _] -> values [uid := param id; uname := param name])))
+let () =
+  expect_sql "add" add "INSERT INTO \"main\".\"users\" (\"name\") VALUES (CAST($1 AS VARCHAR)) RETURNING \"id\"";
+  expect_sql "anonymous" anonymous "INSERT INTO \"main\".\"users\" DEFAULT VALUES RETURNING \"id\", \"name\"";
+  expect_sql "copy" copy
+    "INSERT INTO \"main\".\"archive\" (\"id\", \"name\") SELECT t0.\"id\", t0.\"name\" FROM \"main\".\"users\" AS t0 \
+     WHERE ((t0.\"age\" >= CAST($1 AS INTEGER)) IS TRUE)";
+  connected (fun c ->
+    seed c;
+    ddl c "CREATE TABLE archive(id BIGINT NOT NULL, name VARCHAR NOT NULL)";
+    (match ok (R.Session.collect c add D.Args.["dee"]) with [ 10L ] -> () | _ -> failwith "add");
+    (match ok (R.Session.collect c anonymous D.Args.[]) with [ (11L, "anon") ] -> () | _ -> failwith "anonymous");
+    assert (Int64.equal (ok (R.Session.find c with_age D.Args.[20L; 40l])) 1L);
+    assert (Int64.equal (count c "SELECT count(*) FROM users WHERE id = 20 AND name = 'anon' AND age = 40") 1L);
+    assert (Int64.equal (ok (R.Session.find c copy D.Args.[18l])) 2L);
+    assert (Int64.equal (count c "SELECT count(*) FROM archive WHERE id IN (1, 20)") 2L);
+    (* A key violation is an ordinary request error. *)
+    match R.Session.find c named D.Args.[1L; "again"] with
+    | Error { D.Error.cause = Native _; _ } -> ()
+    | _ -> failwith "duplicate key accepted");
+  rejected "a value mentioning the table" (fun () -> S.(command Params.[] (fun [] ->
+    insert users (fun [uid; uname; _] -> values [uid := I64.(uid + int64 1L); uname := string "x"]))));
+  let leaked = ref None in
+  ignore (S.(command Params.[] (fun [] -> delete users (fun [uid; _; _] -> Stdlib.(leaked := Some uid); all))));
+  rejected "a target of another table" (fun () -> S.(command Params.[] (fun [] ->
+    insert archive (fun [_; aname] -> select_into Targets.[Option.value_exn !leaked; aname]
+      (from users (fun [uid; uname; _] -> select Exprs.[uid; uname] ~row:(fun i n -> (i, n))))))));
+  Stdlib.print_endline "dml: insert values, defaults, returning keys, select_into, key violation=ok"
