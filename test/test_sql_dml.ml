@@ -132,3 +132,60 @@ let () =
     insert archive (fun [_; aname] -> select_into Targets.[Option.value_exn !leaked; aname]
       (from users (fun [uid; uname; _] -> select Exprs.[uid; uname] ~row:(fun i n -> (i, n))))))));
   Stdlib.print_endline "dml: insert values, defaults, returning keys, select_into, key violation=ok"
+
+(* ON CONFLICT on a declared key: DO NOTHING keeps the row; DO UPDATE
+   assigns from the proposed row (excluded), unless its WHERE fails. *)
+let keyed = T.(declare "users" Columns.["id", int64; "name", string; "age", nullable int32]
+  ~row:(fun id name age -> (id, name, age))
+  ~constraints:(fun [id; _; _] -> Constraint.[ primary_key Key.[id] ]))
+let keep = S.(command Params.[int64; string] (fun [id; name] ->
+  insert keyed (fun [uid; uname; _] -> values [uid := param id; uname := param name] ~on_conflict:(nothing_on Keys.[uid]))))
+let upsert = S.(command Params.[int64; string] (fun [id; name] ->
+  insert keyed (fun [uid; uname; _] ->
+    values [uid := param id; uname := param name]
+      ~on_conflict:(update_on Keys.[uid] (fun [_; proposed; _] -> [uname := proposed])))))
+let upsert_young = S.(command Params.[int64; string] (fun [id; name] ->
+  insert keyed (fun [uid; uname; uage] ->
+    values [uid := param id; uname := param name]
+      ~on_conflict:(update_on Keys.[uid] ~where:(is_true Null.(uage < nullable (int32 18l)))
+                      (fun [_; proposed; _] -> [uname := proposed]))
+    |> returning Exprs.[uid; uname] ~row:(fun i n -> (i, n)))))
+let refill = S.(command Params.[] (fun [] ->
+  insert keyed (fun [uid; uname; _] -> select_into Targets.[uid; uname] ~on_conflict:(nothing_on Keys.[uid])
+    (from archive (fun [aid; aname] -> select Exprs.[aid; aname] ~row:(fun i n -> (i, n)))))))
+let () =
+  expect_sql "upsert" upsert
+    "INSERT INTO \"main\".\"users\" AS t0 (\"id\", \"name\") VALUES (CAST($1 AS BIGINT), CAST($2 AS VARCHAR)) \
+     ON CONFLICT (\"id\") DO UPDATE SET \"name\" = excluded.\"name\"";
+  expect_sql "upsert_young" upsert_young
+    "INSERT INTO \"main\".\"users\" AS t0 (\"id\", \"name\") VALUES (CAST($1 AS BIGINT), CAST($2 AS VARCHAR)) \
+     ON CONFLICT (\"id\") DO UPDATE SET \"name\" = excluded.\"name\" WHERE ((t0.\"age\" < CAST(18 AS INTEGER)) IS TRUE) \
+     RETURNING t0.\"id\", t0.\"name\"";
+  connected (fun c ->
+    seed c;
+    let name id = ok (R.Session.find c (R.one D.Fields.[int64] D.Fields.[string] ~row:Fn.id
+      "SELECT name FROM users WHERE id = ?") D.Args.[id]) in
+    assert (Int64.equal (ok (R.Session.find c keep D.Args.[1L; "zed"])) 0L);
+    assert (String.equal (name 1L) "ada");
+    assert (Int64.equal (ok (R.Session.find c keep D.Args.[7L; "new"])) 1L);
+    assert (Int64.equal (ok (R.Session.find c upsert D.Args.[1L; "ada l."])) 1L);
+    assert (String.equal (name 1L) "ada l.");
+    (* ada is 36: the WHERE fails, nothing returned; cy is 17: updated. *)
+    (match ok (R.Session.collect c upsert_young D.Args.[1L; "no"]) with [] -> () | _ -> failwith "upsert adult");
+    assert (String.equal (name 1L) "ada l.");
+    (match ok (R.Session.collect c upsert_young D.Args.[3L; "cyd"]) with [ (3L, "cyd") ] -> () | _ -> failwith "upsert young");
+    ddl c "CREATE TABLE archive(id BIGINT NOT NULL, name VARCHAR NOT NULL)";
+    ddl c "INSERT INTO archive VALUES (1, 'old'), (50, 'fresh')";
+    assert (Int64.equal (ok (R.Session.find c refill D.Args.[])) 1L);
+    assert (String.equal (name 1L) "ada l.");
+    assert (String.equal (name 50L) "fresh"));
+  rejected "an undeclared conflict key" (fun () -> S.(command Params.[] (fun [] ->
+    insert keyed (fun [uid; uname; _] -> values [uid := int64 1L; uname := string "x"] ~on_conflict:(nothing_on Keys.[uname])))));
+  rejected "a table without keys" (fun () -> S.(command Params.[] (fun [] ->
+    insert users (fun [uid; uname; _] -> values [uid := int64 1L; uname := string "x"] ~on_conflict:(nothing_on Keys.[uid])))));
+  let leaked = ref None in
+  ignore (S.(command Params.[] (fun [] -> delete keyed (fun [uid; _; _] -> Stdlib.(leaked := Some uid); all))));
+  rejected "a conflict key of another table" (fun () -> S.(command Params.[] (fun [] ->
+    insert keyed (fun [uid; uname; _] -> values [uid := int64 1L; uname := string "x"]
+      ~on_conflict:(nothing_on Keys.[Option.value_exn !leaked])))));
+  Stdlib.print_endline "dml: on conflict do nothing / do update with excluded and where, on select_into=ok"
