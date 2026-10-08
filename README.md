@@ -165,10 +165,37 @@ let save = S.(command Params.[int64; string] (fun [id; name] ->
 
 Also `delete … (filter …)`, `values []` (DEFAULT VALUES), `select_into`
 (INSERT … SELECT) and `nothing_on`. Inside `S.( … )`, `:=` is assignment;
-write `Stdlib.( := )` for references. Window functions are not covered
-yet; write those as SQL requests. See [typed SQL](docs/design/typed-sql.md),
-[query composition](docs/design/query-composition.md) and
-[typed DML](docs/design/dml.md).
+write `Stdlib.( := )` for references.
+
+Window functions have their own kind, `'k windowed`, accepted only by
+`select_over`'s list, QUALIFY and ORDER BY, so a window in WHERE, HAVING or
+an aggregate does not compile. Other columns join a windowed list through
+`lift`:
+
+```ocaml
+let sales = D.Table.(declare "sales"
+  Columns.["region", string; "day", int32; "amount", int64]
+  ~row:(fun region day amount -> (region, day, amount)))
+
+(* Each region's three best days, with a running total per region. *)
+let best_days = S.(
+  query Params.[] (fun [] ->
+    from sales (fun [region; day; amount] ->
+      let by_amount = window ~partition_by:[part region] ~order_by:[desc amount] () in
+      let running = window ~partition_by:[part region] ~order_by:[asc day]
+          ~frame:(rows ~start:Unbounded_preceding ~end_:Current_row) () in
+      select_over Exprs.[lift region; lift day; rank by_amount; Over.sum amount running]
+        ~row:(fun r d k t -> (r, d, k, t))
+        ~qualify:(row_number by_amount <= int64 3L) ~order_by:[asc (lift region); asc (lift day)])))
+(* : (unit, string * int32 * int64 * int64 option, many) Request.t *)
+```
+
+Also `dense_rank`, `ntile`, `percent_rank`, `cume_dist`, `lag`/`lead` (and
+`_or` with a default), `first_value`, `last_value`, `nth_value`,
+`Over.count`/`min`/`max`/`avg`, RANGE frames, and windows over aggregates
+inside `group_by`. See [typed SQL](docs/design/typed-sql.md),
+[query composition](docs/design/query-composition.md),
+[typed DML](docs/design/dml.md) and [window functions](docs/design/windows.md).
 
 ## Schema
 

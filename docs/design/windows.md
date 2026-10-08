@@ -1,6 +1,7 @@
 # Window functions (sub-project 4c)
 
-Status: approved, 2026-10-08. Extends [typed SQL](typed-sql.md) and
+Status: implemented, 2026-10-08; refined while implementing (see
+[Refinements](#refinements-found-while-implementing)). Extends [typed SQL](typed-sql.md) and
 [query composition](query-composition.md); roadmap row 4c of the
 [core redesign](core-redesign.md).
 
@@ -112,6 +113,20 @@ module Null : sig … val lag, lead, first_value, last_value, nth_value over nul
 - `aggregates` stops at `Over` (a window aggregate does not make a select
   an aggregate); `mentioned` recurses into its partition and order.
 - Rendering keeps textual order (window clauses left to right).
+
+## Refinements found while implementing
+
+- `ntile n` and `nth_value n` require `n >= 1` (`Invalid_argument`
+  otherwise); offsets and frame bounds `>= 0`. A negative frame offset is
+  raised by `rows`/`range` when the frame is built.
+- `select_over` is `select` plus `qualify`, re-typing the order keys, so it
+  shares `select`'s non-empty list and limit checks.
+- A window aggregate inside `aggregate` is a type error (the list's kind is
+  `grouped`, a window's `grouped windowed`), so no check when built is
+  needed for it; `aggregates` ignores `Over` nodes for `select_over`.
+- `Over.Null.sum (sum v) w` renders `CAST(sum(CAST(sum(v) AS BIGINT)) OVER
+  () AS BIGINT)`: both casts are the existing sum's cast back to the
+  operand type.
 
 ## Errors
 

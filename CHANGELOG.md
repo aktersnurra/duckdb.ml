@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Window functions (sub-project 4c)
+
+[Design](docs/design/windows.md).
+
+Added to `Sql`:
+- The kind `'k windowed`; `window ?partition_by ?order_by ?frame ()`,
+  `part`, `rows`/`range` frames; `select_over` (with `~qualify`) and `lift`.
+- `row_number`, `rank`, `dense_rank`, `ntile`, `percent_rank`,
+  `cume_dist`; `lag`, `lead`, `lag_or`, `lead_or`, `first_value`,
+  `last_value`, `nth_value` (and `Null` versions); `Over.count_star`,
+  `count`, `min`, `max`, `sum`, `avg` (and `Over.Null`); `sum_over` and
+  `avg_over` in `INTEGRAL`/`FRACTIONAL`.
+- `test/test_sql_window.ml`; 7 fixtures in `test/window_compile`.
+
+Fixed: `test/async/typed_request_async.ml` printed its result through
+Async's buffered stdout, which was sometimes not flushed before exit.
+
 ### Typed INSERT, UPDATE and DELETE (sub-project 4b)
 
 [Design](docs/design/dml.md).
