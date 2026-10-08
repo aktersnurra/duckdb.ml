@@ -621,6 +621,25 @@ module Sql : sig
   val percent_rank : 'k window -> (float, Codec.non_null, 'k windowed) expr
   val cume_dist : 'k window -> (float, Codec.non_null, 'k windowed) expr
 
+  (** Aggregates over windows: arguments of the base kind (aggregates inside
+      [group_by], e.g. [Over.Null.sum (sum v) w]). Sums are cast back to the
+      operand type (DuckDB returns HUGEINT); [I32.sum_over], [F64.avg_over], …
+      for other number types. *)
+  module Over : sig
+    val count_star : 'k window -> (int64, Codec.non_null, 'k windowed) expr
+    val count : (_, _, 'k) expr -> 'k window -> (int64, Codec.non_null, 'k windowed) expr
+    val min : ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+    val max : ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+    val sum : (int64, Codec.non_null, 'k) expr -> 'k window -> (int64 option, Codec.nullable, 'k windowed) expr
+    val avg : (int64, Codec.non_null, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
+    module Null : sig
+      val min : ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+      val max : ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+      val sum : (int64 option, Codec.nullable, 'k) expr -> 'k window -> (int64 option, Codec.nullable, 'k windowed) expr
+      val avg : (int64 option, Codec.nullable, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
+    end
+  end
+
   (** Offsets ([?offset] default 1, [nth_value]'s position) are literal; a
       negative one, or [nth_value] below 1, raises [Invalid_argument].
       [lag]/[lead] are NULL past the partition edge; [lag_or]/[lead_or]
@@ -785,6 +804,8 @@ module Sql : sig
     val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t option, Codec.nullable, 'k) expr
     val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
     val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  val sum_over : (t, Codec.non_null, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+  val avg_over : (t, Codec.non_null, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
     module Null : sig
       val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
       val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
@@ -792,6 +813,8 @@ module Sql : sig
       val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
       val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
       val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    val sum_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+    val avg_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
     end
   end
 
@@ -804,6 +827,8 @@ module Sql : sig
     val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
     val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
     val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  val sum_over : (t, Codec.non_null, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+  val avg_over : (t, Codec.non_null, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
     module Null : sig
       val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
       val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
@@ -811,6 +836,8 @@ module Sql : sig
       val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
       val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
       val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    val sum_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+    val avg_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
     end
   end
   module I64 : INTEGRAL with type t := int64

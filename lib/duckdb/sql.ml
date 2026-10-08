@@ -395,6 +395,17 @@ let sum (e : (_, Codec.non_null, _) expr) =
 let null_sum (e : (_, Codec.nullable, _) expr) = { node = Cast (Apply ("sum", [e.node]), sql_type e.codec); codec = e.codec }
 let avg (e : _ expr) = { node = Cast (Apply ("avg", [e.node]), "DOUBLE"); codec = Codec.Values.(nullable float64) }
 
+(* Window functions: [f(…) OVER (…)]. *)
+type 'k window = window_spec
+let over name args w codec = { node = Over (Apply (name, args), w); codec }
+(* DuckDB sums to HUGEINT and averages to DOUBLE: cast back, as [sum]. *)
+let sum_over (e : (_, Codec.non_null, _) expr) w =
+  { node = Cast (Over (Apply ("sum", [ e.node ]), w), sql_type e.codec); codec = Codec.Values.nullable e.codec }
+let null_sum_over (e : (_, Codec.nullable, _) expr) w =
+  { node = Cast (Over (Apply ("sum", [ e.node ]), w), sql_type e.codec); codec = e.codec }
+let avg_over (e : _ expr) w =
+  { node = Cast (Over (Apply ("avg", [ e.node ]), w), "DOUBLE"); codec = Codec.Values.(nullable float64) }
+
 (* Arithmetic signatures, constrained per type by [I64] … [F32]. *)
 module type INTEGRAL = sig
   type t
@@ -404,6 +415,8 @@ module type INTEGRAL = sig
   val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t option, Codec.nullable, 'k) expr
   val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
   val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  val sum_over : (t, Codec.non_null, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+  val avg_over : (t, Codec.non_null, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
   module Null : sig
     val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
     val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
@@ -411,6 +424,8 @@ module type INTEGRAL = sig
     val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
     val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
     val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    val sum_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+    val avg_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
   end
 end
 
@@ -423,6 +438,8 @@ module type FRACTIONAL = sig
   val ( / ) : (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr -> (t, Codec.non_null, 'k) expr
   val sum : (t, Codec.non_null, row) expr -> (t option, Codec.nullable, grouped) expr
   val avg : (t, Codec.non_null, row) expr -> (float option, Codec.nullable, grouped) expr
+  val sum_over : (t, Codec.non_null, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+  val avg_over : (t, Codec.non_null, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
   module Null : sig
     val ( + ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
     val ( - ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
@@ -430,6 +447,8 @@ module type FRACTIONAL = sig
     val ( / ) : (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr -> (t option, Codec.nullable, 'k) expr
     val sum : (t option, Codec.nullable, row) expr -> (t option, Codec.nullable, grouped) expr
     val avg : (t option, Codec.nullable, row) expr -> (float option, Codec.nullable, grouped) expr
+    val sum_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (t option, Codec.nullable, 'k windowed) expr
+    val avg_over : (t option, Codec.nullable, 'k) expr -> 'k window -> (float option, Codec.nullable, 'k windowed) expr
   end
 end
 module Integral = struct
@@ -440,6 +459,8 @@ module Integral = struct
   let ( / ) a b = null_division "//" a b
   let sum = sum
   let avg = avg
+  let sum_over = sum_over
+  let avg_over = avg_over
   module Null = struct
     let ( + ) a b = arith "+" a b
     let ( - ) a b = arith "-" a b
@@ -447,6 +468,8 @@ module Integral = struct
     let ( / ) a b = arith "//" a b
     let sum = null_sum
     let avg = avg
+    let sum_over = null_sum_over
+    let avg_over = avg_over
   end
 end
 module Fractional = struct
@@ -456,6 +479,8 @@ module Fractional = struct
   let ( / ) a b = arith "/" a b
   let sum = sum
   let avg = avg
+  let sum_over = sum_over
+  let avg_over = avg_over
   module Null = struct
     let ( + ) a b = arith "+" a b
     let ( - ) a b = arith "-" a b
@@ -463,6 +488,8 @@ module Fractional = struct
     let ( / ) a b = arith "/" a b
     let sum = null_sum
     let avg = avg
+    let sum_over = null_sum_over
+    let avg_over = avg_over
   end
 end
 module I64 = Integral
@@ -474,7 +501,6 @@ module F32 = Fractional
 
 (* Windows. *)
 type 'k part = node
-type 'k window = window_spec
 type bound = Unbounded_preceding | Preceding of int | Current_row | Following of int | Unbounded_following
 type frame = string
 let render_bound = function
@@ -489,7 +515,6 @@ let part (e : _ expr) = e.node
 let window ?(partition_by = []) ?(order_by = []) ?frame () : _ window =
   { partition = partition_by; order = List.map order_by ~f:(fun o -> (o.key, o.descending)); frame }
 let lift (e : _ expr) = { node = e.node; codec = e.codec }
-let over name args w codec = { node = Over (Apply (name, args), w); codec }
 let positive name n = if n < 1 then invalid_arg ("Duckdb.Sql." ^ name ^ ": must be positive")
 let row_number w = over "row_number" [] w Codec.Values.int64
 let rank w = over "rank" [] w Codec.Values.int64
@@ -522,6 +547,21 @@ let null_last_value (e : _ expr) w = over "last_value" [ e.node ] w e.codec
 let null_nth_value n (e : _ expr) w =
   positive "nth_value" n;
   over "nth_value" [ e.node; count_literal "nth_value" n ] w e.codec
+(* Aggregates over windows. *)
+module Over = struct
+  let count_star w = { node = Over (Count_star, w); codec = Codec.Values.int64 }
+  let count (e : _ expr) w = over "count" [ e.node ] w Codec.Values.int64
+  let min (e : (_, Codec.non_null, _) expr) w = over "min" [ e.node ] w (Codec.Values.nullable e.codec)
+  let max (e : (_, Codec.non_null, _) expr) w = over "max" [ e.node ] w (Codec.Values.nullable e.codec)
+  let sum = I64.sum_over
+  let avg = I64.avg_over
+  module Null = struct
+    let min (e : (_, Codec.nullable, _) expr) w = over "min" [ e.node ] w e.codec
+    let max (e : (_, Codec.nullable, _) expr) w = over "max" [ e.node ] w e.codec
+    let sum = I64.Null.sum_over
+    let avg = I64.Null.avg_over
+  end
+end
 let select_over ?distinct ?where ?having ?qualify ?(order_by = []) ?limit ?offset exprs ~row =
   let (Body b) = select ?distinct ?where ?having ?limit ?offset exprs ~row in
   Body { columns = b.columns; row = b.row; list = b.list; distinct = b.distinct; joins = b.joins;

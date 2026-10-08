@@ -107,3 +107,40 @@ let () =
   rejected "nth_value 0" (fun () -> S.(query Params.[] (fun [] -> from sales (fun [_; d; v; _] ->
     select_over Exprs.[nth_value 0 v (window ~order_by:[asc d] ())] ~row:Fn.id))));
   Stdlib.print_endline "window: lag, lead, defaults, first/last/nth value, rows and range frames=ok"
+
+(* Aggregates over windows: running and partition totals cast back to the
+   operand type; windows over aggregates in a grouped select; over a join. *)
+let regions = T.(declare "regions" Columns.["k", string; "name", string] ~row:(fun k name -> (k, name)))
+let totals = S.(query Params.[] (fun [] -> from sales (fun [k; d; v; n] ->
+  let running = window ~partition_by:[part k] ~order_by:[asc d] ~frame:(rows ~start:Unbounded_preceding ~end_:Current_row) () in
+  let whole = window ~partition_by:[part k] () in
+  select_over Exprs.[Over.sum v running; I32.sum_over d whole; Over.count_star whole; Over.count n whole;
+                     Over.min v whole; Over.max v whole; Over.avg v whole; Over.Null.sum n whole]
+    ~row:(fun a b c d e f g h -> (a, b, c, d, e, f, g, h)) ~order_by:[asc (lift k); asc (lift d)])))
+let shares = S.(query Params.[] (fun [] -> from sales (fun [k; _; v; _] ->
+  group_by Keys.[k] (fun [k] ->
+    select_over Exprs.[lift k; Over.Null.sum (sum v) (window ()); rank (window ~order_by:[desc (sum v)] ())]
+      ~row:(fun k t r -> (k, t, r)) ~order_by:[asc (lift k)]))))
+let per_region = S.(query Params.[] (fun [] -> from sales (fun [k; _; _; _] ->
+  join regions ~on:(fun [rk; _] -> rk = k) (fun [_; name] ->
+    select_over Exprs.[lift name; Over.count_star (window ~partition_by:[part name] ())] ~distinct:true
+      ~row:(fun n c -> (n, c)) ~order_by:[asc (lift name)]))))
+let () =
+  expect_sql "shares" shares
+    "SELECT t0.\"k\", CAST(sum(CAST(sum(t0.\"v\") AS BIGINT)) OVER () AS BIGINT), \
+     rank() OVER (ORDER BY CAST(sum(t0.\"v\") AS BIGINT) DESC) FROM \"main\".\"sales\" AS t0 \
+     GROUP BY t0.\"k\" ORDER BY t0.\"k\" ASC";
+  connected (fun c ->
+    seed c;
+    ddl c "CREATE TABLE regions(k VARCHAR NOT NULL, name VARCHAR NOT NULL)";
+    ddl c "INSERT INTO regions VALUES ('a', 'north'), ('b', 'south')";
+    (match run c totals with
+     | [ (Some 10L, Some 6l, 3L, 2L, Some 10L, Some 30L, Some a, Some 15L);
+         (Some 30L, Some 6l, 3L, 2L, Some 10L, Some 30L, _, Some 15L);
+         (Some 60L, Some 6l, 3L, 2L, Some 10L, Some 30L, _, Some 15L);
+         (Some 5L, Some 3l, 2L, 1L, Some 5L, Some 7L, Some b, Some 7L);
+         (Some 12L, Some 3l, 2L, 1L, Some 5L, Some 7L, _, Some 7L) ] -> assert (near a 20. && near b 6.)
+     | _ -> failwith "totals");
+    (match run c shares with [ ("a", Some 72L, 1L); ("b", Some 72L, 2L) ] -> () | _ -> failwith "shares");
+    (match run c per_region with [ ("north", 3L); ("south", 2L) ] -> () | _ -> failwith "per_region"));
+  Stdlib.print_endline "window: aggregates over windows, windows over aggregates, over a join=ok"
