@@ -32,7 +32,7 @@ loader's lookup of the `libhegel` bundled in the release tarball, which
   `vendor/hegel/libhegel.so`. It applies
   `tools/patches/hegel-0.17.2-no-dune-site.patch` (drops `from_site`, the
   `Hegel_sites` rule and the `dune-site` library). `--install` adds the
-  conflict-free dependencies `ctypes-foreign`, `ipaddr`, `ocplib-endian`.
+  conflict-free dependencies `ctypes-foreign`, `ipaddr`, `ocplib-endian`, `yojson`.
 - The root `dune` declares `(vendored_dirs vendor)`.
 - `tools/run` sets `HEGEL_LIBHEGEL_PATH=<root>/vendor/hegel/libhegel.so`
   and `HEGEL_LIBHEGEL_NO_DOWNLOAD=1`: tests never download or use

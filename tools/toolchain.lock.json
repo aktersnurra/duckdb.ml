@@ -11,7 +11,8 @@
         "ctypes.0.24.0+ox",
         "ctypes-foreign.0.24.0+ox",
         "ipaddr.5.6.2",
-        "ocplib-endian.1.2"
+        "ocplib-endian.1.2",
+        "yojson.2.2.2+ox"
     ],
     "archives": {
         "ox": {
