@@ -347,6 +347,12 @@ CAMLprim value ml_duckdb_open(value v, value path, value threads, value memory, 
     }
     if (state == DuckDBSuccess)
         state = duckdb_set_config(owner->config, "access_mode", read_only ? "READ_ONLY" : "READ_WRITE");
+    /* DuckDB 1.5.5's compressed materialization bakes the statistics seen at
+       prepare time into the plan; a cached statement then corrupts values
+       outside them once the data changes (e.g. 255 for 0). Prepared
+       statements are cached, so the optimizer stays off. */
+    if (state == DuckDBSuccess)
+        state = duckdb_set_config(owner->config, "disabled_optimizers", "compressed_materialization");
     if (state == DuckDBSuccess)
         state = duckdb_open_ext(length ? owner->path : NULL, &owner->database,
                                 owner->config, &owner->open_error);

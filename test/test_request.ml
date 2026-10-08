@@ -412,3 +412,28 @@ let () =
   connected (fun c -> check ~oneshot:false c; check ~oneshot:true c);
   connected ~statement_cache:0 (fun c -> check ~oneshot:false c);
   Stdlib.print_endline "request: parameterised table functions validated against executed columns=ok"
+
+(* DuckDB 1.5.5's compressed materialization bakes the statistics seen when
+   a statement is prepared into its plan: a cached statement prepared on an
+   empty table returned corrupted values (255/256 for 0/1, or 1 256 for
+   1000 1001) once rows outside those statistics arrived. Every database is
+   opened with that optimizer disabled. Found by the window property test. *)
+let () =
+  let sorted = R.many D.Fields.[] D.Fields.[int64; int64] ~row:(fun a b -> (a, b)) "SELECT id, v FROM w ORDER BY id" in
+  let ranked = R.many D.Fields.[] D.Fields.[int64; int64] ~row:(fun a b -> (a, b))
+    "SELECT id, row_number() OVER (ORDER BY v) FROM w ORDER BY id" in
+  connected (fun c ->
+    ok (C.exec c (R.exec D.Fields.[] "CREATE TABLE w(id BIGINT NOT NULL, v BIGINT NOT NULL)") D.Args.[]);
+    (* Prepared (and cached) while the table is empty. *)
+    assert (List.is_empty (ok (C.collect c sorted D.Args.[])));
+    assert (List.is_empty (ok (C.collect c ranked D.Args.[])));
+    ok (C.exec c (R.exec D.Fields.[] "INSERT INTO w SELECT i, 1000 + i FROM range(5) t(i)") D.Args.[]);
+    let expected_sorted = List.init 5 ~f:(fun i -> (Int64.of_int i, Int64.of_int (1000 + i))) in
+    let expected_ranked = List.init 5 ~f:(fun i -> (Int64.of_int i, Int64.of_int (i + 1))) in
+    for _ = 1 to 3 do
+      assert (List.equal Poly.equal (ok (C.collect c sorted D.Args.[])) expected_sorted);
+      assert (List.equal Poly.equal (ok (C.collect c ranked D.Args.[])) expected_ranked)
+    done;
+    assert (String.equal (ok (C.find c (R.one D.Fields.[] D.Fields.[string] ~row:Fn.id
+      "SELECT current_setting('disabled_optimizers')") D.Args.[])) "compressed_materialization"));
+  Stdlib.print_endline "request: cached statements stay correct after the data outgrows prepare-time statistics=ok"
