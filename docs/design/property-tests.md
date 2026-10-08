@@ -4,7 +4,7 @@ Status: implemented, 2026-10-09; one DuckDB bug found and worked around
 (see [Failures found](#failures-found)). Replaces roadmap row "later" (the
 `[@@deriving duckdb]` ppx, dropped: declarations are one line per column,
 written once; the real friction, positional binders, needs no ppx). Comes
-before the 0.1.0 release.
+before the 0.2.0 release.
 
 ## Goal
 

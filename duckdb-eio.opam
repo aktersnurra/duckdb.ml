@@ -1,10 +1,18 @@
 opam-version: "2.0"
 synopsis: "Bounded Eio DuckDB requests for pinned OxCaml"
+description: "Optional Eio SQL requests over a bounded connection pool, with fiber cancellation; no Async dependency."
 maintainer: "Gustaf Rydholm <gustaf.rydholm@gmail.com>"
 authors: ["Gustaf Rydholm"]
 license: "MIT"
 homepage: "https://github.com/aktersnurra/duckdb.ml"
 bug-reports: "https://github.com/aktersnurra/duckdb.ml/issues"
 dev-repo: "git+https://github.com/aktersnurra/duckdb.ml.git"
-depends: [ "ocaml" {= "5.2.0+ox"} "dune" {>= "3.20"} "base" "eio" {= "1.3+ox"} "duckdb" ]
-build: [ ["dune" "build" "-p" name] ]
+depends: [
+  "oxcaml-compiler" {= "5.2.0minus39"}
+  "dune" {= "3.22.2+ox"}
+  "base" {= "v0.18~preview.130.106+341"}
+  "eio" {= "1.3+ox"}
+  "duckdb" {= version}
+]
+build: [["dune" "build" "-p" name "-j" jobs]]
+install: [["dune" "install" "--prefix" prefix name]]

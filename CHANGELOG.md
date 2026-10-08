@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-09)
+
+Everything since the `v0.1.0` tag (2026-09-09), which had no changelog. The
+API changed incompatibly in the core redesign; see "Changed (breaking)".
 
 ### Property-based tests (sub-project 5)
 

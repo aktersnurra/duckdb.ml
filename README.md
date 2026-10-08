@@ -11,6 +11,28 @@ over connection pools.
 It is full OxCaml, not upstream OCaml: it uses modes (`local`, `unique`,
 `global`), modalities and `int8`/`int16`/`float32`.
 
+## Installing
+
+The packages need the exact pinned toolchain (OxCaml `5.2.0minus39`, Dune
+`3.22.2+ox`, Base `v0.18~preview.130.106+341`; see
+[`tools/toolchain.lock.json`](tools/toolchain.lock.json)) and the DuckDB
+1.5.5 shared library, which they do not bundle. In a switch with that
+toolchain:
+
+```sh
+python3 tools/setup_duckdb.py --prefix "$HOME/.local/duckdb-1.5.5"   # from a checkout
+export DUCKDB_INCLUDE_DIR="$HOME/.local/duckdb-1.5.5"
+export LIBRARY_PATH="$DUCKDB_INCLUDE_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$DUCKDB_INCLUDE_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+opam pin add duckdb-ffi git+https://github.com/aktersnurra/duckdb.ml.git#v0.2.0
+opam pin add duckdb git+https://github.com/aktersnurra/duckdb.ml.git#v0.2.0
+# optional adapters: duckdb-async, duckdb-eio (same URL)
+```
+
+The packages are not in the opam repository: their dependencies are OxCaml
+builds. [Native dependency](docs/native-dependency.md) covers deployment of
+`libduckdb.so`.
+
 ## Example
 
 ```ocaml
