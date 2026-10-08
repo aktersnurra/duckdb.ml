@@ -72,7 +72,7 @@ end
 let resolve ~schema ~scope (constraints : Constraint.t list) =
   let names columns =
     List.map columns ~f:(fun (s, name) -> if s <> scope then Sql.foreign () else name) in
-  let render node = Sql.render ~qualifier:"" ~columns:scope ~params:(-1) node in
+  let render node = Sql.render_bare ~scope node in
   let resolved = List.map constraints ~f:(function
     | Constraint.Primary_key columns -> Table_constraint.Primary_key (names columns)
     | Constraint.Unique columns -> Table_constraint.Unique (names columns)

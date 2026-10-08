@@ -244,3 +244,83 @@ let () =
     S.(query Params.[] (fun [] -> from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id ~offset:(-1)))));
   ignore (S.(query Params.[] (fun [] -> from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id ~limit:0 ~offset:0))));
   Stdlib.print_endline "sql: negative limit and offset rejected when built=ok"
+
+(* Query composition (sub-project 4a). Joins: aliases t0, t1, … in order of
+   appearance; a LEFT JOIN's right columns decode as options through
+   [outer]/[Null.outer]. *)
+let posts = T.(declare "posts" Columns.["id", int64; "owner", int64; "title", string; "score", nullable int32]
+  ~row:(fun id owner title score -> (id, owner, title, score)))
+let comments = T.(declare "comments" Columns.["id", int64; "post", int64; "body", nullable string]
+  ~row:(fun id post body -> (id, post, body)))
+let seed_posts c =
+  seed c;
+  ddl c "CREATE TABLE posts(id BIGINT NOT NULL, owner BIGINT NOT NULL, title VARCHAR NOT NULL, score INTEGER)";
+  ddl c "INSERT INTO posts VALUES (10, 1, 'intro', 5), (11, 1, 'more', NULL), (12, 3, 'hello', 2)";
+  ddl c "CREATE TABLE comments(id BIGINT NOT NULL, post BIGINT NOT NULL, body VARCHAR)";
+  ddl c "INSERT INTO comments VALUES (100, 10, 'nice'), (101, 10, NULL), (102, 12, 'hi')"
+let titles = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [pid; _; title; _] ->
+        select Exprs.[name; title] ~row:(fun n t -> (n, t)) ~order_by:[asc pid]))))
+let with_posts = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      left_join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [pid; _; title; score] ->
+        select Exprs.[name; outer title; Null.outer score] ~row:(fun n t s -> (n, t, s))
+          ~order_by:[asc uid; asc (outer pid)]))))
+let threads = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [pid; _; title; _] ->
+        left_join comments ~on:(fun [_; post; _] -> post = pid) (fun [cid; _; body] ->
+          select Exprs.[name; title; Null.outer body] ~row:(fun n t b -> (n, t, b))
+            ~order_by:[asc pid; asc (outer cid)])))))
+let pairs = S.(
+  query Params.[] (fun [] ->
+    from users (fun [_; _; _] -> cross_join posts (fun [_; _; _; _] -> aggregate Exprs.[count_star] ~row:Fn.id))))
+let names = S.(
+  query Params.[] (fun [] ->
+    from users (fun [_; name; _] -> select Exprs.[name] ~distinct:true ~row:Fn.id ~order_by:[asc name])))
+let () =
+  expect_sql "titles" titles
+    "SELECT t0.\"name\", t1.\"title\" FROM \"main\".\"users\" AS t0 \
+     INNER JOIN \"main\".\"posts\" AS t1 ON (t1.\"owner\" = t0.\"id\") ORDER BY t1.\"id\" ASC";
+  expect_sql "threads" threads
+    "SELECT t0.\"name\", t1.\"title\", t2.\"body\" FROM \"main\".\"users\" AS t0 \
+     INNER JOIN \"main\".\"posts\" AS t1 ON (t1.\"owner\" = t0.\"id\") \
+     LEFT JOIN \"main\".\"comments\" AS t2 ON (t2.\"post\" = t1.\"id\") ORDER BY t1.\"id\" ASC, t2.\"id\" ASC";
+  expect_sql "pairs" pairs
+    "SELECT count(*) FROM \"main\".\"users\" AS t0 CROSS JOIN \"main\".\"posts\" AS t1";
+  expect_sql "names" names "SELECT DISTINCT t0.\"name\" FROM \"main\".\"users\" AS t0 ORDER BY t0.\"name\" ASC";
+  connected (fun c ->
+    seed_posts c;
+    (match ok (R.Session.collect c titles D.Args.[]) with
+     | [ ("ada", "intro"); ("ada", "more"); ("cy", "hello") ] -> ()
+     | _ -> failwith "titles");
+    (match ok (R.Session.collect c with_posts D.Args.[]) with
+     | [ ("ada", Some "intro", Some 5l); ("ada", Some "more", None); ("bob", None, None);
+         ("cy", Some "hello", Some 2l); ("ada", None, None) ] -> ()
+     | _ -> failwith "with_posts");
+    (match ok (R.Session.collect c threads D.Args.[]) with
+     | [ ("ada", "intro", Some "nice"); ("ada", "intro", None); ("ada", "more", None); ("cy", "hello", Some "hi") ] -> ()
+     | _ -> failwith "threads");
+    (* Inside a join an aggregate is [many] by type; it returns one row. *)
+    (match ok (R.Session.collect c pairs D.Args.[]) with [ 12L ] -> () | _ -> failwith "pairs");
+    (match ok (R.Session.collect c names D.Args.[]) with
+     | [ "ada"; "bob"; "cy" ] -> ()
+     | _ -> failwith "names"));
+  (* Aliases do not depend on scope ids: building twice gives one text. *)
+  let build () = S.(query Params.[] (fun [] -> from users (fun [uid; _; _] ->
+    join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [pid; _; _; _] -> select Exprs.[pid] ~row:Fn.id)))) in
+  assert (String.equal (R.query (build ())) (R.query (build ())));
+  (* A join binder smuggled into another query is foreign there. *)
+  let leaked = ref None in
+  ignore (S.(query Params.[] (fun [] -> from users (fun [uid; _; _] ->
+    join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [pid; _; _; _] ->
+      leaked := Some pid; select Exprs.[pid] ~row:Fn.id)))));
+  (match S.(query Params.[] (fun [] -> from users (fun [id; _; _] ->
+     select Exprs.[id] ~row:Fn.id ~where:(id = Option.value_exn !leaked)))) with
+   | exception Invalid_argument _ -> ()
+   | _ -> failwith "leaked join binder accepted");
+  Stdlib.print_endline "sql: inner, left (outer), cross and nested joins; distinct; stable aliases=ok"

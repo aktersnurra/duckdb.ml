@@ -541,10 +541,36 @@ module Sql : sig
   (** Binds the table's columns as row expressions, in declaration order. *)
   val from : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('row, row, 'm) body) -> ('row, 'm) source
 
+  (** Joins. Each binds its table's columns for [~on] and its body; the body
+      may also use every enclosing table's binders. Tables are aliased [t0],
+      [t1], … in order of appearance. Joined rows multiply, so the result is
+      [many]. *)
+  val join : (_, 'shape, _) Request.table -> on:(('shape, row) Binders.t -> (bool, Codec.non_null, row) expr) ->
+    (('shape, row) Binders.t -> ('row, row, _) body) -> ('row, row, Request.many) body
+  val cross_join : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('row, row, _) body) ->
+    ('row, row, Request.many) body
+
+  (** A LEFT JOIN's right column in the join body: NULL when no row matched.
+      Usable only lifted, by [outer] (non-null column) or [Null.outer]
+      (nullable column). *)
+  type ('a, 'n) outer
+  module Outer : sig
+    type 'shape t =
+      | [] : unit t
+      | (::) : ('a, 'n) outer * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+  end
+
+  (** [~on] sees the right table's columns as row expressions (ON is
+      evaluated before NULL extension); the body sees them as [outer]. *)
+  val left_join : (_, 'shape, _) Request.table -> on:(('shape, row) Binders.t -> (bool, Codec.non_null, row) expr) ->
+    ('shape Outer.t -> ('row, row, _) body) -> ('row, row, Request.many) body
+  val outer : ('a, Codec.non_null) outer -> ('a option, Codec.nullable, row) expr
+
   (** Any number of rows. [~where] filters rows; [~having] filters groups and
       belongs inside [group_by]. The select list is non-empty (by type); a
-      negative [~limit] or [~offset] raises [Invalid_argument]. *)
-  val select : ?where:(bool, Codec.non_null, row) expr -> ?having:(bool, Codec.non_null, grouped) expr ->
+      negative [~limit] or [~offset] raises [Invalid_argument].
+      [~distinct:true] renders [SELECT DISTINCT]. *)
+  val select : ?distinct:bool -> ?where:(bool, Codec.non_null, row) expr -> ?having:(bool, Codec.non_null, grouped) expr ->
     ?order_by:'k order list -> ?limit:int -> ?offset:int -> ('a * 'list, 'fn, 'row, 'k) Exprs.t -> row:'fn ->
     ('row, 'k, Request.many) body
 
@@ -670,6 +696,7 @@ module Sql : sig
     val ( && ) : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
     val ( || ) : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
     val not : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
+    val outer : ('a option, Codec.nullable) outer -> ('a option, Codec.nullable, row) expr
     val min : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
     val max : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
     val ( + ) : (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr

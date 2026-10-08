@@ -24,14 +24,26 @@ type node =
 let next_scope = Stdlib.Atomic.make 0
 let fresh_scope () = Stdlib.Atomic.fetch_and_add next_scope 1
 let foreign () = invalid_arg "Duckdb.Sql: an expression from another query"
-(* [qualifier] prefixes column names: ["t0."] in queries, [""] in a table's
-   own CHECK and DEFAULT clauses. *)
-let rec render ?(qualifier = "t0.") ~columns ~params node =
-  let render = render ~qualifier ~columns ~params in
+(* Rendering context: the alias of each table in scope (by binding scope),
+   the parameters' scope, and the next free alias number. Aliases are
+   numbered in order of appearance, so the text does not depend on scope
+   ids. A table's own CHECK and DEFAULT clauses use the alias [""]: no
+   qualifier. *)
+type context = { aliases : (int * string) list; params : int; next : int ref }
+let alias context =
+  let n = !(context.next) in
+  context.next := n + 1;
+  "t" ^ Int.to_string n
+let rec render context node =
+  let render = render context in
   match node with
-  | Column { scope; name } -> if scope <> columns then foreign () else qualifier ^ Request.quote name
+  | Column { scope; name } ->
+    (match List.Assoc.find context.aliases scope ~equal:Int.equal with
+     | None -> foreign ()
+     | Some "" -> Request.quote name
+     | Some alias -> alias ^ "." ^ Request.quote name)
   | Param { scope; index; sql_type } ->
-    if scope <> params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
+    if scope <> context.params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
   | Literal { sql; _ } -> sql
   | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
   | Infix (op, a, b) -> "(" ^ render a ^ " " ^ op ^ " " ^ render b ^ ")"
@@ -39,6 +51,8 @@ let rec render ?(qualifier = "t0.") ~columns ~params node =
   | Postfix (a, op) -> "(" ^ render a ^ " " ^ op ^ ")"
   | Cast (a, sql_type) -> "CAST(" ^ render a ^ " AS " ^ sql_type ^ ")"
   | Count_star -> "count(*)"
+(* A table's CHECK or DEFAULT expression: its own columns, unqualified. *)
+let render_bare ~scope node = render { aliases = [ (scope, "") ]; params = -1; next = ref 0 } node
 (* The column names a node mentions, without duplicates. *)
 let mentioned node =
   let rec go acc = function
@@ -90,8 +104,12 @@ module Exprs = struct
     | (::) : ('a, _, 'k) expr * ('list, 'fn, 'result, 'k) t -> ('a * 'list, 'a -> 'fn, 'result, 'k) t
 end
 
+type join_kind = Inner | Left | Cross
+(* A joined table: [on] is absent for a CROSS JOIN. *)
+type join = { kind : join_kind; target : string; scope : int; on : node option }
 type ('row, 'k, 'm) body =
-  Body : { columns : (_, 'fn, 'row) Fields.t; row : 'fn; list : node list; where : node option;
+  Body : { columns : (_, 'fn, 'row) Fields.t; row : 'fn; list : node list; distinct : bool;
+           joins : join list; where : node option;
            group_by : node list; having : node option; order_by : 'k order list;
            limit : int option; offset : int option } -> ('row, 'k, 'm) body
 type ('row, 'm) source = { target : string; scope : int; body : ('row, row, 'm) body }
@@ -102,17 +120,17 @@ let rec fields_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> (l, f, r) Fields
 let rec nodes_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> node list = function
   | Exprs.[] -> []
   | Exprs.(e :: rest) -> e.node :: nodes_of_exprs rest
-let body exprs ~row ~where ~group_by ~having ~order_by ~limit ~offset =
-  Body { columns = fields_of_exprs exprs; row; list = nodes_of_exprs exprs;
+let body ?(distinct = false) exprs ~row ~where ~group_by ~having ~order_by ~limit ~offset =
+  Body { columns = fields_of_exprs exprs; row; list = nodes_of_exprs exprs; distinct; joins = [];
          where = Option.map where ~f:(fun (e : _ expr) -> e.node); group_by;
          having = Option.map having ~f:(fun (e : _ expr) -> e.node); order_by; limit; offset }
 
-let select ?where ?having ?(order_by = []) ?limit ?offset exprs ~row =
+let select ?distinct ?where ?having ?(order_by = []) ?limit ?offset exprs ~row =
   let non_negative name = Option.iter ~f:(fun n ->
     if n < 0 then invalid_arg ("Duckdb.Sql.select: a negative " ^ name)) in
   non_negative "limit" limit;
   non_negative "offset" offset;
-  body exprs ~row ~where ~group_by:[] ~having ~order_by ~limit ~offset
+  body ?distinct exprs ~row ~where ~group_by:[] ~having ~order_by ~limit ~offset
 (* Whether a node computes an aggregate. A select list of only literals and
    parameters has no GROUP BY and no aggregate, so it would return a row per
    table row. *)
@@ -135,7 +153,8 @@ let rec rebind : type s. s Keys.t -> (s, grouped) Binders.t = function
   | Keys.(k :: rest) -> Binders.({ node = k.node; codec = k.codec } :: rebind rest)
 let group_by keys f =
   let (Body b) = f (rebind keys) in
-  Body { columns = b.columns; row = b.row; list = b.list; where = b.where; group_by = key_nodes keys;
+  Body { columns = b.columns; row = b.row; list = b.list; distinct = b.distinct; joins = b.joins;
+         where = b.where; group_by = key_nodes keys;
          having = b.having; order_by = List.map b.order_by ~f:(fun o -> { key = o.key; descending = o.descending });
          limit = b.limit; offset = b.offset }
 
@@ -144,9 +163,40 @@ let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> (s, row) 
   | Columns.[] -> Binders.[]
   | Columns.((name, codec) :: rest) ->
     Binders.({ node = Column { scope; name }; codec } :: binders rest ~scope)
-let from (Request.Table_def t : (_, _, _) Request.table) f =
+let target_of (Request.Table_def t : (_, _, _) Request.table) = Request.quote t.schema ^ "." ^ Request.quote t.name
+let from (Request.Table_def t as table : (_, _, _) Request.table) f =
   let scope = fresh_scope () in
-  { target = Request.quote t.schema ^ "." ^ Request.quote t.name; scope; body = f (binders t.columns ~scope) }
+  { target = target_of table; scope; body = f (binders t.columns ~scope) }
+
+(* Joins prepend themselves to the body their callback builds; the joined
+   rows multiply, so the result is [many]. *)
+let joined kind table scope ~on (Body b : (_, _, _) body) : (_, _, _) body =
+  Body { b with joins = { kind; target = target_of table; scope; on } :: b.joins }
+let join (Request.Table_def t as table : (_, _, _) Request.table) ~on f =
+  let scope = fresh_scope () in
+  let condition = (on (binders t.columns ~scope)).node in
+  joined Inner table scope ~on:(Some condition) (f (binders t.columns ~scope))
+let cross_join (Request.Table_def t as table : (_, _, _) Request.table) f =
+  let scope = fresh_scope () in
+  joined Cross table scope ~on:None (f (binders t.columns ~scope))
+(* A LEFT JOIN's right columns may be NULL-extended: its body sees them as
+   [outer] values, which [outer]/[Null.outer] lift to nullable expressions. *)
+type ('a, 'n) outer = Outer of ('a, 'n, row) expr [@@unboxed]
+module Outer = struct
+  type 'shape t =
+    | [] : unit t
+    | (::) : ('a, 'n) outer * 'shape t -> (('a, 'n) Codec.slot * 'shape) t
+end
+let rec outer_binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> s Outer.t = fun columns ~scope ->
+  match columns with
+  | Columns.[] -> Outer.[]
+  | Columns.((name, codec) :: rest) -> Outer.(Outer { node = Column { scope; name }; codec } :: outer_binders rest ~scope)
+let left_join (Request.Table_def t as table : (_, _, _) Request.table) ~on f =
+  let scope = fresh_scope () in
+  let condition = (on (binders t.columns ~scope)).node in
+  joined Left table scope ~on:(Some condition) (f (outer_binders t.columns ~scope))
+let outer (Outer e : (_, Codec.non_null) outer) = { node = e.node; codec = Codec.Values.nullable e.codec }
+let null_outer (Outer e : (_, Codec.nullable) outer) = e
 
 type 'l packed_fields = Packed_fields : ('l, _, _) Fields.t -> 'l packed_fields
 let rec fields_of_params : type l s. (l, s) Params.t -> l packed_fields = function
@@ -159,8 +209,15 @@ let rec bound : type l s. (l, s) Params.t -> scope:int -> index:int -> s Bound.t
   | Params.[] -> Bound.[]
   | Params.(codec :: rest) -> Bound.({ scope; index; codec } :: bound rest ~scope ~index:(index + 1))
 
-let render_select ~target ~columns ~params (Body b) =
-  let render = render ~columns ~params in
+let join_keyword = function Inner -> "INNER JOIN" | Left -> "LEFT JOIN" | Cross -> "CROSS JOIN"
+(* Every table of the select is aliased before any expression renders, so
+   subqueries continue the numbering after them. *)
+let render_select context ~target ~scope (Body b) =
+  let first = alias context in
+  let joins = List.map b.joins ~f:(fun j -> (j, alias context)) in
+  let context = { context with aliases = (scope, first) :: List.map joins ~f:(fun (j, a) -> (j.scope, a))
+                                         @ context.aliases } in
+  let render = render context in
   let clause keyword = function None -> "" | Some node -> " " ^ keyword ^ " " ^ render node in
   let listed nodes = String.concat ~sep:", " (List.map nodes ~f:render) in
   let group_by = match b.group_by with [] -> "" | keys -> " GROUP BY " ^ listed keys in
@@ -169,14 +226,18 @@ let render_select ~target ~columns ~params (Body b) =
     | orders -> " ORDER BY " ^ String.concat ~sep:", " (List.map orders ~f:(fun o ->
         render o.key ^ if o.descending then " DESC" else " ASC")) in
   let number keyword = function None -> "" | Some n -> " " ^ keyword ^ " " ^ Int.to_string n in
-  "SELECT " ^ listed b.list ^ " FROM " ^ target ^ " AS t0" ^ clause "WHERE" b.where ^ group_by
+  let joined = String.concat (List.map joins ~f:(fun (j, a) ->
+    " " ^ join_keyword j.kind ^ " " ^ j.target ^ " AS " ^ a ^ clause "ON" j.on)) in
+  "SELECT " ^ (if b.distinct then "DISTINCT " else "") ^ listed b.list ^ " FROM " ^ target ^ " AS " ^ first
+  ^ joined ^ clause "WHERE" b.where ^ group_by
   ^ clause "HAVING" b.having ^ order_by ^ number "LIMIT" b.limit ^ number "OFFSET" b.offset
 
 let query params f =
   let (Packed_fields fields) = fields_of_params params in
   let scope = fresh_scope () in
   let { target; scope = columns; body = Body b as body } = f (bound params ~scope ~index:1) in
-  Request.generated fields b.columns ~row:b.row (render_select ~target ~columns ~params:scope body)
+  let context = { aliases = []; params = scope; next = ref 0 } in
+  Request.generated fields b.columns ~row:b.row (render_select context ~target ~scope:columns body)
 
 (* Expressions. *)
 let param (p : (_, _) param) =
@@ -361,6 +422,7 @@ module Null = struct
   let ( && ) a b = null_compare "AND" a b
   let ( || ) a b = null_compare "OR" a b
   let not (e : _ expr) = { node = Prefix ("NOT", e.node); codec = e.codec }
+  let outer = null_outer
   let min e = null_extreme "min" e
   let max e = null_extreme "max" e
   let ( + ) = I64.Null.( + )
