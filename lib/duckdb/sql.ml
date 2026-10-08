@@ -497,6 +497,31 @@ let dense_rank w = over "dense_rank" [] w Codec.Values.int64
 let ntile n w = positive "ntile" n; over "ntile" [ Literal { sql = Int.to_string n; constant = None } ] w Codec.Values.int64
 let percent_rank w = over "percent_rank" [] w Codec.Values.float64
 let cume_dist w = over "cume_dist" [] w Codec.Values.float64
+(* Offsets are literal integers, rendered as such. *)
+let count_literal name n =
+  if n < 0 then invalid_arg ("Duckdb.Sql." ^ name ^ ": a negative offset");
+  Literal { sql = Int.to_string n; constant = None }
+let shifted name ?(offset = 1) (e : _ expr) w codec = over name [ e.node; count_literal name offset ] w codec
+let lag ?offset e w = shifted "lag" ?offset e w (Codec.Values.nullable e.codec)
+let lead ?offset e w = shifted "lead" ?offset e w (Codec.Values.nullable e.codec)
+let null_lag ?offset (e : _ expr) w = shifted "lag" ?offset e w e.codec
+let null_lead ?offset (e : _ expr) w = shifted "lead" ?offset e w e.codec
+let shifted_or name ?(offset = 1) ~(default : _ expr) (e : _ expr) w =
+  checked e default;
+  over name [ e.node; count_literal name offset; default.node ] w e.codec
+let lag_or ?offset ~default e w = shifted_or "lag" ?offset ~default e w
+let lead_or ?offset ~default e w = shifted_or "lead" ?offset ~default e w
+(* A frame may be empty, and nth_value may run past it: nullable. *)
+let first_value (e : _ expr) w = over "first_value" [ e.node ] w (Codec.Values.nullable e.codec)
+let last_value (e : _ expr) w = over "last_value" [ e.node ] w (Codec.Values.nullable e.codec)
+let nth_value n (e : _ expr) w =
+  positive "nth_value" n;
+  over "nth_value" [ e.node; count_literal "nth_value" n ] w (Codec.Values.nullable e.codec)
+let null_first_value (e : _ expr) w = over "first_value" [ e.node ] w e.codec
+let null_last_value (e : _ expr) w = over "last_value" [ e.node ] w e.codec
+let null_nth_value n (e : _ expr) w =
+  positive "nth_value" n;
+  over "nth_value" [ e.node; count_literal "nth_value" n ] w e.codec
 let select_over ?distinct ?where ?having ?qualify ?(order_by = []) ?limit ?offset exprs ~row =
   let (Body b) = select ?distinct ?where ?having ?limit ?offset exprs ~row in
   Body { columns = b.columns; row = b.row; list = b.list; distinct = b.distinct; joins = b.joins;
@@ -744,6 +769,11 @@ module Null = struct
   let ( || ) a b = null_compare "OR" a b
   let not (e : _ expr) = { node = Prefix ("NOT", e.node); codec = e.codec }
   let outer = null_outer
+  let lag = null_lag
+  let lead = null_lead
+  let first_value = null_first_value
+  let last_value = null_last_value
+  let nth_value = null_nth_value
   let scalar = null_scalar
   let min e = null_extreme "min" e
   let max e = null_extreme "max" e

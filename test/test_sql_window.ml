@@ -64,3 +64,46 @@ let () =
   rejected "negative ntile" (fun () -> S.(query Params.[] (fun [] -> from sales (fun [_; d; _; _] ->
     select_over Exprs.[ntile (-1) (window ~order_by:[asc d] ())] ~row:Fn.id))));
   Stdlib.print_endline "window: ranking functions, qualify, order by a window=ok"
+
+(* Offset functions: NULL past the partition edge, or a default; values of
+   the frame; ROWS and RANGE frames. *)
+let offsets = S.(query Params.[] (fun [] -> from sales (fun [k; d; v; n] ->
+  let w = window ~partition_by:[part k] ~order_by:[asc d] () in
+  let all = window ~partition_by:[part k] ~order_by:[asc d] ~frame:(rows ~start:Unbounded_preceding ~end_:Unbounded_following) () in
+  select_over Exprs.[lag v w; lead ~offset:2 v w; lag_or ~default:(int64 0L) v w; first_value v w; last_value v w;
+                     last_value v all; nth_value 2 v w; Null.lag n w]
+    ~row:(fun a b c d e f g h -> (a, b, c, d, e, f, g, h)) ~order_by:[asc (lift k); asc (lift d)])))
+let framed = S.(query Params.[] (fun [] -> from sales (fun [k; d; v; _] ->
+  let previous = window ~partition_by:[part k] ~order_by:[asc d] ~frame:(rows ~start:(Preceding 1) ~end_:Current_row) () in
+  let nearby = window ~order_by:[asc d] ~frame:(range ~start:(Preceding 1) ~end_:(Following 0)) () in
+  select_over Exprs.[first_value v previous; Null.first_value (nullable v) nearby]
+    ~row:(fun a b -> (a, b)) ~order_by:[asc (lift k); asc (lift d)])))
+let () =
+  expect_sql "framed" framed
+    "SELECT first_value(t0.\"v\") OVER (PARTITION BY t0.\"k\" ORDER BY t0.\"d\" ASC ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), \
+     first_value(t0.\"v\") OVER (ORDER BY t0.\"d\" ASC RANGE BETWEEN 1 PRECEDING AND 0 FOLLOWING) \
+     FROM \"main\".\"sales\" AS t0 ORDER BY t0.\"k\" ASC, t0.\"d\" ASC";
+  connected (fun c ->
+    seed c;
+    (match run c offsets with
+     | [ (None, Some 30L, 0L, Some 10L, Some 10L, Some 30L, None, None);
+         (Some 10L, None, 10L, Some 10L, Some 20L, Some 30L, Some 20L, Some 10L);
+         (Some 20L, None, 20L, Some 10L, Some 30L, Some 30L, Some 20L, None);
+         (None, None, 0L, Some 5L, Some 5L, Some 7L, None, None);
+         (Some 5L, None, 5L, Some 5L, Some 7L, Some 7L, Some 7L, None) ] -> ()
+     | _ -> failwith "offsets");
+    (* first_value over all rows by d within 1 of the current d: the rows'
+       order within one d is unspecified, so only the previous-row frame is
+       compared exactly. *)
+    match run c framed with
+    | [ (a1, _); (a2, _); (a3, _); (b1, _); (b2, _) ] ->
+      assert (List.equal (Option.equal Int64.equal) [ a1; a2; a3; b1; b2 ] [ Some 10L; Some 10L; Some 20L; Some 5L; Some 5L ])
+    | _ -> failwith "framed");
+  rejected "negative lag offset" (fun () -> S.(query Params.[] (fun [] -> from sales (fun [_; d; v; _] ->
+    select_over Exprs.[lag ~offset:(-1) v (window ~order_by:[asc d] ())] ~row:Fn.id))));
+  rejected "negative frame offset" (fun () -> S.(query Params.[] (fun [] -> from sales (fun [_; d; v; _] ->
+    select_over Exprs.[first_value v (window ~order_by:[asc d] ~frame:(rows ~start:(Preceding (-1)) ~end_:Current_row) ())]
+      ~row:Fn.id))));
+  rejected "nth_value 0" (fun () -> S.(query Params.[] (fun [] -> from sales (fun [_; d; v; _] ->
+    select_over Exprs.[nth_value 0 v (window ~order_by:[asc d] ())] ~row:Fn.id))));
+  Stdlib.print_endline "window: lag, lead, defaults, first/last/nth value, rows and range frames=ok"

@@ -621,6 +621,22 @@ module Sql : sig
   val percent_rank : 'k window -> (float, Codec.non_null, 'k windowed) expr
   val cume_dist : 'k window -> (float, Codec.non_null, 'k windowed) expr
 
+  (** Offsets ([?offset] default 1, [nth_value]'s position) are literal; a
+      negative one, or [nth_value] below 1, raises [Invalid_argument].
+      [lag]/[lead] are NULL past the partition edge; [lag_or]/[lead_or]
+      substitute a default. [first_value], [last_value] and [nth_value] are
+      nullable: a frame may be empty. [Null] holds them for nullable
+      operands. *)
+  val lag : ?offset:int -> ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+  val lead : ?offset:int -> ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+  val lag_or : ?offset:int -> default:('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> 'k window ->
+    ('a, Codec.non_null, 'k windowed) expr
+  val lead_or : ?offset:int -> default:('a, Codec.non_null, 'k) expr -> ('a, Codec.non_null, 'k) expr -> 'k window ->
+    ('a, Codec.non_null, 'k windowed) expr
+  val first_value : ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+  val last_value : ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+  val nth_value : int -> ('a, Codec.non_null, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+
   (** Subqueries: any [from …] source, which may use the enclosing queries'
       binders (correlation) and the [query]'s parameters. [in_] is three-valued:
       no match against a subquery holding a NULL is NULL (use [is_true]).
@@ -828,6 +844,11 @@ module Sql : sig
     val ( || ) : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
     val not : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
     val outer : ('a option, Codec.nullable) outer -> ('a option, Codec.nullable, row) expr
+    val lag : ?offset:int -> ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+    val lead : ?offset:int -> ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+    val first_value : ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+    val last_value : ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
+    val nth_value : int -> ('a option, Codec.nullable, 'k) expr -> 'k window -> ('a option, Codec.nullable, 'k windowed) expr
     val scalar : ('a option * unit, _, Request.one) source -> ('a option, Codec.nullable, 'k) expr
     val min : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
     val max : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
