@@ -47,19 +47,28 @@ empty map plus `~qualifier:""`.
 - [ ] Implement: alias map rendering; `join`, `left_join`, `cross_join`, `Outer`, `outer`, `Null.outer`; `select ?distinct`.
 - [ ] Green: `./tools/run exec test/test_sql.exe`; all earlier `sql:` lines still `=ok`; `./tools/run exec test/test_schema.exe` (CHECK rendering unchanged).
 
-### Task 2: `value`
+### Task 2: `value` — DONE
 
 - [ ] Tests: custom-codec `value` compared with its column (accepted; rows); `value` of `date`, `timestamp_us`, `timestamp_ms`, `timestamp_s`, `timestamp_ns`, `timestamp_tz` and `blob` selected and decoded equal to the input (with `SET TimeZone='America/New_York'` for TZ); an encode error raises `Invalid_argument`; a timestamp `value` as `Table` default is accepted by `create` and rejected by `Migration.add_column`.
 - [ ] Implement per the spec's rendering table.
 - [ ] Green as above, plus `./tools/run exec test/test_migration.exe`.
 
-### Task 3: Subqueries
+### Task 3: Subqueries — DONE (with Task 4)
 
 - [ ] Tests: correlated `exists`; `in_` true / NULL (subquery with a NULL) / false; `scalar` over `aggregate count_star` correlated; `Null.scalar` over `max` of a nullable column; `Invalid_argument` for `in_` of two columns, `scalar` over a nullable column, `Null.scalar` over a non-null column, `in_` with incompatible codecs (BLOB vs VARCHAR).
 - [ ] Implement nodes, rendering with continued aliases, the checks.
 - [ ] Green.
 
-### Task 4: Set operations
+### Task 4: Set operations — DONE
+
+Refinement (both tasks): `in_`, `scalar` and set operations need the column
+types, which `~row` hides, so `body` and `source` gained a column-list index
+(`('list, 'row, 'k, 'm) body`, `('list, 'row, 'm) source`): column count and
+types are now static, codecs (BLOB vs VARCHAR, custom) checked when built.
+The type change touched both tasks at once, so their code came before their
+tests; each runtime check was then mutation-tested (disabled → its test
+fails). Rendering binds pieces with `let` in textual order (`^` evaluates
+right to left), so aliases number left to right.
 
 - [ ] Tests: `union`, `union_all`, `intersect`, `except_` results; each side keeps its own ORDER BY/LIMIT; nesting; a set operation as an `in_` subquery; `Invalid_argument` for different column counts and incompatible codecs.
 - [ ] Implement.

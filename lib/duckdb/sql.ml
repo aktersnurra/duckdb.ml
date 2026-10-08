@@ -8,6 +8,7 @@ type grouped = private Grouped_kind
    bound them, so an expression smuggled into another query is rejected
    instead of binding that query's same-named column or same-numbered
    parameter. *)
+type join_kind = Inner | Left | Cross
 type node =
   | Column of { scope : int; name : string }
   | Param of { scope : int; index : int; sql_type : string }
@@ -21,6 +22,24 @@ type node =
   | Postfix of node * string
   | Cast of node * string
   | Count_star
+  | Exists of packed_source
+  | In_subquery of node * packed_source
+  | Scalar of packed_source
+(* A joined table: [on] is absent for a CROSS JOIN. *)
+and join = { kind : join_kind; target : string; scope : int; on : node option }
+and 'k order = { key : node; descending : bool }
+(* A select: ['list] is its column value types, ['row] what a row decodes
+   to, ['k] the select list's kind, ['m] the multiplicity. *)
+and ('list, 'row, 'k, 'm) body =
+  Body : { columns : ('list, 'fn, 'row) Fields.t; row : 'fn; list : node list; distinct : bool;
+           joins : join list; where : node option;
+           group_by : node list; having : node option; order_by : 'k order list;
+           limit : int option; offset : int option } -> ('list, 'row, 'k, 'm) body
+(* Rows decode with the left-most select's row function. *)
+and ('list, 'row, 'm) source =
+  | Select : { target : string; scope : int; body : ('list, 'row, row, 'm) body } -> ('list, 'row, 'm) source
+  | Set : { op : string; left : ('list, 'row, _) source; right : ('list, 'row, _) source } -> ('list, 'row, 'm) source
+and packed_source = Packed : (_, _, _) source -> packed_source
 
 let next_scope = Stdlib.Atomic.make 0
 let fresh_scope () = Stdlib.Atomic.fetch_and_add next_scope 1
@@ -35,30 +54,12 @@ let alias context =
   let n = !(context.next) in
   context.next := n + 1;
   "t" ^ Int.to_string n
-let rec render context node =
-  let render = render context in
-  match node with
-  | Column { scope; name } ->
-    (match List.Assoc.find context.aliases scope ~equal:Int.equal with
-     | None -> foreign ()
-     | Some "" -> Request.quote name
-     | Some alias -> alias ^ "." ^ Request.quote name)
-  | Param { scope; index; sql_type } ->
-    if scope <> context.params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
-  | Literal { sql; _ } -> sql
-  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
-  | Infix (op, a, b) -> "(" ^ render a ^ " " ^ op ^ " " ^ render b ^ ")"
-  | Prefix (op, a) -> "(" ^ op ^ " " ^ render a ^ ")"
-  | Postfix (a, op) -> "(" ^ render a ^ " " ^ op ^ ")"
-  | Cast (a, sql_type) -> "CAST(" ^ render a ^ " AS " ^ sql_type ^ ")"
-  | Count_star -> "count(*)"
-(* A table's CHECK or DEFAULT expression: its own columns, unqualified. *)
-let render_bare ~scope node = render { aliases = [ (scope, "") ]; params = -1; next = ref 0 } node
 (* The column names a node mentions, without duplicates. *)
 let mentioned node =
   let rec go acc = function
     | Column { name; _ } -> if List.mem acc name ~equal:String.equal then acc else name :: acc
-    | Param _ | Literal _ | Count_star -> acc
+    (* A subquery's columns belong to its own tables. *)
+    | Param _ | Literal _ | Count_star | Exists _ | In_subquery _ | Scalar _ -> acc
     | Apply (_, args) -> List.fold args ~init:acc ~f:go
     | Infix (_, a, b) -> go (go acc a) b
     | Prefix (_, a) | Postfix (a, _) | Cast (a, _) -> go acc a in
@@ -76,7 +77,6 @@ type ('a, 'n, 'k) expr = { node : node; codec : ('a, 'n) Codec.t }
 type ('a, 'n) column = { scope : int; name : string; codec : ('a, 'n) Codec.t }
 let column (c : (_, _) column) = { node = Column { scope = c.scope; name = c.name }; codec = c.codec }
 type ('a, 'n) param = { scope : int; index : int; codec : ('a, 'n) Codec.t }
-type 'k order = { key : node; descending : bool }
 
 module Params = struct
   include Codec.Values
@@ -105,15 +105,6 @@ module Exprs = struct
     | (::) : ('a, _, 'k) expr * ('list, 'fn, 'result, 'k) t -> ('a * 'list, 'a -> 'fn, 'result, 'k) t
 end
 
-type join_kind = Inner | Left | Cross
-(* A joined table: [on] is absent for a CROSS JOIN. *)
-type join = { kind : join_kind; target : string; scope : int; on : node option }
-type ('row, 'k, 'm) body =
-  Body : { columns : (_, 'fn, 'row) Fields.t; row : 'fn; list : node list; distinct : bool;
-           joins : join list; where : node option;
-           group_by : node list; having : node option; order_by : 'k order list;
-           limit : int option; offset : int option } -> ('row, 'k, 'm) body
-type ('row, 'm) source = { target : string; scope : int; body : ('row, row, 'm) body }
 
 let rec fields_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> (l, f, r) Fields.t = function
   | Exprs.[] -> Fields.[]
@@ -141,7 +132,7 @@ let rec aggregates = function
   | Apply (_, args) -> List.exists args ~f:aggregates
   | Infix (_, a, b) -> aggregates a || aggregates b
   | Prefix (_, a) | Postfix (a, _) | Cast (a, _) -> aggregates a
-  | Column _ | Param _ | Literal _ -> false
+  | Column _ | Param _ | Literal _ | Exists _ | In_subquery _ | Scalar _ -> false
 let aggregate ?where exprs ~row =
   if not (List.exists (nodes_of_exprs exprs) ~f:aggregates) then
     invalid_arg "Duckdb.Sql.aggregate: the select list needs an aggregate";
@@ -167,11 +158,11 @@ let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> (s, row) 
 let target_of (Request.Table_def t : (_, _, _) Request.table) = Request.quote t.schema ^ "." ^ Request.quote t.name
 let from (Request.Table_def t as table : (_, _, _) Request.table) f =
   let scope = fresh_scope () in
-  { target = target_of table; scope; body = f (binders t.columns ~scope) }
+  Select { target = target_of table; scope; body = f (binders t.columns ~scope) }
 
 (* Joins prepend themselves to the body their callback builds; the joined
    rows multiply, so the result is [many]. *)
-let joined kind table scope ~on (Body b : (_, _, _) body) : (_, _, _) body =
+let joined kind table scope ~on (Body b : (_, _, _, _) body) : (_, _, _, _) body =
   Body { b with joins = { kind; target = target_of table; scope; on } :: b.joins }
 let join (Request.Table_def t as table : (_, _, _) Request.table) ~on f =
   let scope = fresh_scope () in
@@ -211,9 +202,33 @@ let rec bound : type l s. (l, s) Params.t -> scope:int -> index:int -> s Bound.t
   | Params.(codec :: rest) -> Bound.({ scope; index; codec } :: bound rest ~scope ~index:(index + 1))
 
 let join_keyword = function Inner -> "INNER JOIN" | Left -> "LEFT JOIN" | Cross -> "CROSS JOIN"
+(* Pieces render in textual order (bound by [let]; [^] evaluates its right
+   operand first), so subquery aliases number left to right. *)
+let rec render context node =
+  let render = render context in
+  match node with
+  | Column { scope; name } ->
+    (match List.Assoc.find context.aliases scope ~equal:Int.equal with
+     | None -> foreign ()
+     | Some "" -> Request.quote name
+     | Some alias -> alias ^ "." ^ Request.quote name)
+  | Param { scope; index; sql_type } ->
+    if scope <> context.params then foreign () else Printf.sprintf "CAST($%d AS %s)" index sql_type
+  | Literal { sql; _ } -> sql
+  | Apply (name, args) -> name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:render) ^ ")"
+  | Infix (op, a, b) -> let a = render a in let b = render b in "(" ^ a ^ " " ^ op ^ " " ^ b ^ ")"
+  | Prefix (op, a) -> "(" ^ op ^ " " ^ render a ^ ")"
+  | Postfix (a, op) -> "(" ^ render a ^ " " ^ op ^ ")"
+  | Cast (a, sql_type) -> "CAST(" ^ render a ^ " AS " ^ sql_type ^ ")"
+  | Count_star -> "count(*)"
+  | Exists (Packed s) -> "EXISTS (" ^ render_source context s ^ ")"
+  | In_subquery (a, Packed s) -> let a = render a in "(" ^ a ^ " IN (" ^ render_source context s ^ "))"
+  | Scalar (Packed s) -> "(" ^ render_source context s ^ ")"
 (* Every table of the select is aliased before any expression renders, so
-   subqueries continue the numbering after them. *)
-let render_select context ~target ~scope (Body b) =
+   subqueries continue the numbering after them. A subquery sees the
+   enclosing tables' aliases (correlation). *)
+and render_select : type l r k m. context -> target:string -> scope:int -> (l, r, k, m) body -> string =
+  fun context ~target ~scope (Body b) ->
   let first = alias context in
   let joins = List.map b.joins ~f:(fun j -> (j, alias context)) in
   let context = { context with aliases = (scope, first) :: List.map joins ~f:(fun (j, a) -> (j.scope, a))
@@ -221,24 +236,38 @@ let render_select context ~target ~scope (Body b) =
   let render = render context in
   let clause keyword = function None -> "" | Some node -> " " ^ keyword ^ " " ^ render node in
   let listed nodes = String.concat ~sep:", " (List.map nodes ~f:render) in
+  let number keyword = function None -> "" | Some n -> " " ^ keyword ^ " " ^ Int.to_string n in
+  let list = listed b.list in
+  let joined = String.concat (List.map joins ~f:(fun (j, a) ->
+    " " ^ join_keyword j.kind ^ " " ^ j.target ^ " AS " ^ a ^ clause "ON" j.on)) in
+  let where = clause "WHERE" b.where in
   let group_by = match b.group_by with [] -> "" | keys -> " GROUP BY " ^ listed keys in
+  let having = clause "HAVING" b.having in
   let order_by = match b.order_by with
     | [] -> ""
     | orders -> " ORDER BY " ^ String.concat ~sep:", " (List.map orders ~f:(fun o ->
         render o.key ^ if o.descending then " DESC" else " ASC")) in
-  let number keyword = function None -> "" | Some n -> " " ^ keyword ^ " " ^ Int.to_string n in
-  let joined = String.concat (List.map joins ~f:(fun (j, a) ->
-    " " ^ join_keyword j.kind ^ " " ^ j.target ^ " AS " ^ a ^ clause "ON" j.on)) in
-  "SELECT " ^ (if b.distinct then "DISTINCT " else "") ^ listed b.list ^ " FROM " ^ target ^ " AS " ^ first
-  ^ joined ^ clause "WHERE" b.where ^ group_by
-  ^ clause "HAVING" b.having ^ order_by ^ number "LIMIT" b.limit ^ number "OFFSET" b.offset
+  "SELECT " ^ (if b.distinct then "DISTINCT " else "") ^ list ^ " FROM " ^ target ^ " AS " ^ first
+  ^ joined ^ where ^ group_by ^ having ^ order_by ^ number "LIMIT" b.limit ^ number "OFFSET" b.offset
+and render_source : type l r m. context -> (l, r, m) source -> string = fun context -> function
+  | Select { target; scope; body } -> render_select context ~target ~scope body
+  | Set { op; left; right } ->
+    let left = render_source context left in
+    "(" ^ left ^ ") " ^ op ^ " (" ^ render_source context right ^ ")"
+(* A table's CHECK or DEFAULT expression: its own columns, unqualified. *)
+let render_bare ~scope node = render { aliases = [ (scope, "") ]; params = -1; next = ref 0 } node
 
+type ('list, 'row) any_body = Any_body : ('list, 'row, row, _) body -> ('list, 'row) any_body
+let rec leftmost : type l r m. (l, r, m) source -> (l, r) any_body = function
+  | Select { body; _ } -> Any_body body
+  | Set { left; _ } -> leftmost left
 let query params f =
   let (Packed_fields fields) = fields_of_params params in
   let scope = fresh_scope () in
-  let { target; scope = columns; body = Body b as body } = f (bound params ~scope ~index:1) in
+  let source = f (bound params ~scope ~index:1) in
+  let (Any_body (Body b)) = leftmost source in
   let context = { aliases = []; params = scope; next = ref 0 } in
-  Request.generated fields b.columns ~row:b.row (render_select context ~target ~scope:columns body)
+  Request.generated fields b.columns ~row:b.row (render_source context source)
 
 (* Expressions. *)
 let param (p : (_, _) param) =
@@ -310,7 +339,7 @@ let value (type a) (codec : (a, Codec.non_null) Codec.t) (v : a) =
    OCaml type; DuckDB would compare them after an implicit cast (a string
    literal against a BLOB has its \xHH escapes decoded) or unencoded. A
    custom codec matches only itself (the same codec value). *)
-let compatible : type a n. (a, n) Codec.t -> (a, n) Codec.t -> bool = fun a b ->
+let compatible : type a n m. (a, n) Codec.t -> (a, m) Codec.t -> bool = fun a b ->
   let same : type x. x Codec.plan -> x Codec.plan -> bool = fun p q ->
     match p, q with
     | Codec.Identity s, Codec.Identity t -> String.equal (Scalar.name s) (Scalar.name t)
@@ -319,6 +348,7 @@ let compatible : type a n. (a, n) Codec.t -> (a, n) Codec.t -> bool = fun a b ->
   match a, b with
   | Codec.Non_null p, Codec.Non_null q -> same p q
   | Codec.Nullable p, Codec.Nullable q -> same p q
+  | _ -> false
 let checked (a : _ expr) (b : _ expr) =
   if not (compatible a.codec b.codec) then
     invalid_arg "Duckdb.Sql: operands of different codecs (base types, or a custom codec and a plain value)"
@@ -423,6 +453,43 @@ module I8 = Integral
 module F64 = Fractional
 module F32 = Fractional
 
+(* Subqueries. *)
+let exists (s : (_, _, _) source) = { node = Exists (Packed s); codec = Codec.Values.bool }
+let in_ (type a) (x : (a, _, _) expr) (s : (a * unit, _, _) source) =
+  let (Any_body (Body b)) = leftmost s in
+  let compatible_column = match b.columns with Fields.(column :: _) -> compatible x.codec column in
+  if not compatible_column then
+    invalid_arg "Duckdb.Sql.in_: the subquery's column has another codec";
+  { node = In_subquery (x.node, Packed s); codec = Codec.Values.(nullable bool) }
+(* No row is NULL, so a non-null column becomes nullable; a nullable one
+   would decode as an option of an option. *)
+let scalar (type a) (s : (a * unit, _, _) source) : (a option, Codec.nullable, _) expr =
+  let (Any_body (Body b)) = leftmost s in
+  match b.columns with
+  | Fields.(Codec.Non_null plan :: _) -> { node = Scalar (Packed s); codec = Codec.Nullable plan }
+  | Fields.(Codec.Nullable _ :: _) -> invalid_arg "Duckdb.Sql.scalar: a nullable column (use Null.scalar)"
+let null_scalar (type a) (s : (a option * unit, _, _) source) : (a option, Codec.nullable, _) expr =
+  let (Any_body (Body b)) = leftmost s in
+  match b.columns with
+  | Fields.((Codec.Nullable _ as codec) :: _) -> { node = Scalar (Packed s); codec }
+  | Fields.(Codec.Non_null _ :: _) -> invalid_arg "Duckdb.Sql.Null.scalar: a non-null column (use scalar)"
+
+(* Set operations: the column types agree by type; the codecs must too. *)
+let rec compatible_fields : type l f g r q. (l, f, r) Fields.t -> (l, g, q) Fields.t -> bool = fun a b ->
+  match a, b with
+  | Fields.[], Fields.[] -> true
+  | Fields.(c :: rest), Fields.(d :: rest') -> compatible c d && compatible_fields rest rest'
+let set_operation op left right =
+  let (Any_body (Body l)) = leftmost left in
+  let (Any_body (Body r)) = leftmost right in
+  if not (compatible_fields l.columns r.columns) then
+    invalid_arg "Duckdb.Sql: set operation sides of different codecs";
+  Set { op; left; right }
+let union left right = set_operation "UNION" left right
+let union_all left right = set_operation "UNION ALL" left right
+let intersect left right = set_operation "INTERSECT" left right
+let except_ left right = set_operation "EXCEPT" left right
+
 (* Defined last: these shadow Base's operators. *)
 let compare op (a : _ expr) (b : _ expr) = checked a b; { node = Infix (op, a.node, b.node); codec = Codec.Values.bool }
 let null_compare op (a : _ expr) (b : _ expr) =
@@ -460,6 +527,7 @@ module Null = struct
   let ( || ) a b = null_compare "OR" a b
   let not (e : _ expr) = { node = Prefix ("NOT", e.node); codec = e.codec }
   let outer = null_outer
+  let scalar = null_scalar
   let min e = null_extreme "min" e
   let max e = null_extreme "max" e
   let ( + ) = I64.Null.( + )

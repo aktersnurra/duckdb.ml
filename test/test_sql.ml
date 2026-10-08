@@ -369,3 +369,90 @@ let () =
    | _ -> failwith "add_column with an expression default accepted");
   ignore (D.Migration.add_column events (fun [_; _; tag] -> D.Migration.Column tag));
   Stdlib.print_endline "sql: value literals of every scalar and custom codecs=ok"
+
+(* Subqueries: correlated exists and scalar; in_ is three-valued; misuse
+   rejected when built. *)
+let active = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      select Exprs.[name; scalar (from posts (fun [_; owner; _; _] ->
+                             aggregate Exprs.[count_star] ~row:Fn.id ~where:(owner = uid)))]
+        ~row:(fun n c -> (n, c)) ~order_by:[asc uid]
+        ~where:(exists (from posts (fun [_; owner; _; _] -> select Exprs.[owner] ~row:Fn.id ~where:(owner = uid)))))))
+let best = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; _; _] ->
+      select Exprs.[uid; Null.scalar (from posts (fun [_; owner; _; score] ->
+                             aggregate Exprs.[Null.max score] ~row:Fn.id ~where:(owner = uid)))]
+        ~row:(fun u s -> (u, s)) ~order_by:[asc uid])))
+let scored = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; _; age] ->
+      select Exprs.[uid; in_ age (from posts (fun [_; _; _; score] -> select Exprs.[score] ~row:Fn.id))]
+        ~row:(fun u m -> (u, m)) ~order_by:[asc uid])))
+let () =
+  expect_sql "active" active
+    "SELECT t0.\"name\", (SELECT count(*) FROM \"main\".\"posts\" AS t1 WHERE (t1.\"owner\" = t0.\"id\")) \
+     FROM \"main\".\"users\" AS t0 WHERE EXISTS (SELECT t2.\"owner\" FROM \"main\".\"posts\" AS t2 \
+     WHERE (t2.\"owner\" = t0.\"id\")) ORDER BY t0.\"id\" ASC";
+  connected (fun c ->
+    seed_posts c;
+    (match ok (R.Session.collect c active D.Args.[]) with
+     | [ ("ada", Some 2L); ("cy", Some 1L) ] -> ()
+     | _ -> failwith "active");
+    (match ok (R.Session.collect c best D.Args.[]) with
+     | [ (1L, Some 5l); (2L, None); (3L, Some 2l); (4L, None) ] -> ()
+     | _ -> failwith "best");
+    (* Scores are 5, NULL, 2: age 36 does not match, and the NULL makes it
+       NULL, not false; a NULL age is NULL. *)
+    ddl c "UPDATE users SET age = 5 WHERE id = 3";
+    (match ok (R.Session.collect c scored D.Args.[]) with
+     | [ (1L, None); (2L, None); (3L, Some true); (4L, None) ] -> ()
+     | _ -> failwith "scored"));
+  let rejected name build = match build () with
+    | exception Invalid_argument _ -> ()
+    | (_ : (unit, _, _) R.t) -> failwith (name ^ ": accepted") in
+  rejected "scalar of a nullable column" (fun () -> S.(query Params.[] (fun [] -> from users (fun [_; _; _] ->
+    select Exprs.[scalar (from posts (fun [_; _; _; score] -> aggregate Exprs.[Null.max score] ~row:Fn.id))]
+      ~row:Fn.id))));
+  (* Only a non-null custom codec has an option type without being nullable. *)
+  let some = D.Codec.Values.custom ~encode:(fun o -> Or_error.of_option o ~error:(Error.of_string "none"))
+    ~decode:(fun n -> Or_error.return (Some n)) D.Codec.Values.int64 in
+  rejected "Null.scalar of a non-null column" (fun () -> S.(query Params.[] (fun [] -> from users (fun [_; _; _] ->
+    select Exprs.[Null.scalar (from users (fun [_; _; _] ->
+      aggregate Exprs.[coalesce (max (value some (Some 1L))) ~default:(value some (Some 1L))] ~row:Fn.id))]
+      ~row:Fn.id))));
+  let tagged = T.(declare "tagged" Columns.["tag", blob] ~row:Fn.id) in
+  rejected "in_ of a BLOB column for a VARCHAR" (fun () -> S.(query Params.[] (fun [] -> from users (fun [_; name; _] ->
+    select Exprs.[name] ~row:Fn.id ~where:(is_true (in_ name (from tagged (fun [tag] -> select Exprs.[tag] ~row:Fn.id))))))));
+  Stdlib.print_endline "sql: exists, in_ (three-valued), scalar and Null.scalar subqueries=ok"
+
+(* Set operations: each side keeps its ORDER BY and LIMIT; they nest and
+   serve as subqueries; codecs must match. *)
+let () =
+  let ids order = S.(from users (fun [uid; _; _] -> select Exprs.[uid] ~row:Fn.id ~order_by:[order uid] ~limit:1)) in
+  let owners = S.(from posts (fun [_; owner; _; _] -> select Exprs.[owner] ~row:Fn.id)) in
+  let run c source = ok (R.Session.collect c S.(query Params.[] (fun [] -> source)) D.Args.[]) in
+  let sorted = List.sort ~compare:Int64.compare in
+  let union_sql = R.query S.(query Params.[] (fun [] -> union_all (ids asc) (ids desc))) in
+  if String.( <> ) union_sql
+       "(SELECT t0.\"id\" FROM \"main\".\"users\" AS t0 ORDER BY t0.\"id\" ASC LIMIT 1) UNION ALL \
+        (SELECT t1.\"id\" FROM \"main\".\"users\" AS t1 ORDER BY t1.\"id\" DESC LIMIT 1)" then failwith union_sql;
+  connected (fun c ->
+    seed_posts c;
+    assert (List.equal Int64.equal (run c S.(union_all (ids asc) (ids desc))) [ 1L; 4L ]);
+    assert (List.equal Int64.equal (sorted (run c S.(union owners owners))) [ 1L; 3L ]);
+    assert (List.equal Int64.equal (sorted (run c S.(union_all owners owners))) [ 1L; 1L; 1L; 1L; 3L; 3L ]);
+    assert (List.equal Int64.equal (sorted (run c S.(intersect (from users (fun [uid; _; _] ->
+      select Exprs.[uid] ~row:Fn.id)) owners))) [ 1L; 3L ]);
+    assert (List.equal Int64.equal (sorted (run c S.(except_ (from users (fun [uid; _; _] ->
+      select Exprs.[uid] ~row:Fn.id)) owners))) [ 2L; 4L ]);
+    assert (List.equal Int64.equal (sorted (run c S.(union (union_all (ids asc) (ids desc)) owners))) [ 1L; 3L; 4L ]);
+    let posting = S.(query Params.[] (fun [] -> from users (fun [uid; _; _] ->
+      select Exprs.[uid] ~row:Fn.id ~order_by:[asc uid] ~where:(is_true (in_ uid (union owners owners)))))) in
+    assert (List.equal Int64.equal (ok (R.Session.collect c posting D.Args.[])) [ 1L; 3L ]));
+  let tags = T.(declare "tags" Columns.["tag", blob] ~row:Fn.id) in
+  match S.(union (from users (fun [_; name; _] -> select Exprs.[name] ~row:Fn.id))
+             (from tags (fun [tag] -> select Exprs.[tag] ~row:Fn.id))) with
+  | exception Invalid_argument _ -> Stdlib.print_endline "sql: union, union all, intersect, except; nesting; codecs match=ok"
+  | _ -> failwith "union of VARCHAR and BLOB accepted"

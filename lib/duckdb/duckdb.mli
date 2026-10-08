@@ -530,25 +530,27 @@ module Sql : sig
       | (::) : ('a, _, 'k) expr * ('list, 'fn, 'result, 'k) t -> ('a * 'list, 'a -> 'fn, 'result, 'k) t
   end
 
-  (** What a [from] callback returns: rows ['row] of select-list kind ['k]
+  (** What a [from] callback returns: columns of value types ['list]
+      (e.g. [int64 * (string * unit)]), rows ['row], select-list kind ['k]
       and multiplicity ['m]. *)
-  type ('row, 'k, 'm) body
-  type ('row, 'm) source
+  type ('list, 'row, 'k, 'm) body
+  type ('list, 'row, 'm) source
 
   (** Parameters render as [$1], [$2], … in declaration order. *)
-  val query : ('params, 'shape) Params.t -> ('shape Bound.t -> ('row, 'm) source) -> ('params, 'row, 'm) Request.t
+  val query : ('params, 'shape) Params.t -> ('shape Bound.t -> (_, 'row, 'm) source) -> ('params, 'row, 'm) Request.t
 
   (** Binds the table's columns as row expressions, in declaration order. *)
-  val from : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('row, row, 'm) body) -> ('row, 'm) source
+  val from : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('list, 'row, row, 'm) body) ->
+    ('list, 'row, 'm) source
 
   (** Joins. Each binds its table's columns for [~on] and its body; the body
       may also use every enclosing table's binders. Tables are aliased [t0],
       [t1], … in order of appearance. Joined rows multiply, so the result is
       [many]. *)
   val join : (_, 'shape, _) Request.table -> on:(('shape, row) Binders.t -> (bool, Codec.non_null, row) expr) ->
-    (('shape, row) Binders.t -> ('row, row, _) body) -> ('row, row, Request.many) body
-  val cross_join : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('row, row, _) body) ->
-    ('row, row, Request.many) body
+    (('shape, row) Binders.t -> ('list, 'row, row, _) body) -> ('list, 'row, row, Request.many) body
+  val cross_join : (_, 'shape, _) Request.table -> (('shape, row) Binders.t -> ('list, 'row, row, _) body) ->
+    ('list, 'row, row, Request.many) body
 
   (** A LEFT JOIN's right column in the join body: NULL when no row matched.
       Usable only lifted, by [outer] (non-null column) or [Null.outer]
@@ -563,7 +565,7 @@ module Sql : sig
   (** [~on] sees the right table's columns as row expressions (ON is
       evaluated before NULL extension); the body sees them as [outer]. *)
   val left_join : (_, 'shape, _) Request.table -> on:(('shape, row) Binders.t -> (bool, Codec.non_null, row) expr) ->
-    ('shape Outer.t -> ('row, row, _) body) -> ('row, row, Request.many) body
+    ('shape Outer.t -> ('list, 'row, row, _) body) -> ('list, 'row, row, Request.many) body
   val outer : ('a, Codec.non_null) outer -> ('a option, Codec.nullable, row) expr
 
   (** Any number of rows. [~where] filters rows; [~having] filters groups and
@@ -572,17 +574,37 @@ module Sql : sig
       [~distinct:true] renders [SELECT DISTINCT]. *)
   val select : ?distinct:bool -> ?where:(bool, Codec.non_null, row) expr -> ?having:(bool, Codec.non_null, grouped) expr ->
     ?order_by:'k order list -> ?limit:int -> ?offset:int -> ('a * 'list, 'fn, 'row, 'k) Exprs.t -> row:'fn ->
-    ('row, 'k, Request.many) body
+    ('a * 'list, 'row, 'k, Request.many) body
 
   (** Aggregates without GROUP BY: exactly one row. A select list without
       any aggregate raises [Invalid_argument] when built (it would return a
       row per table row). *)
   val aggregate : ?where:(bool, Codec.non_null, row) expr -> ('a * 'list, 'fn, 'row, grouped) Exprs.t -> row:'fn ->
-    ('row, row, Request.one) body
+    ('a * 'list, 'row, row, Request.one) body
 
   (** Rebinds the keys as grouped expressions for a grouped [select]. *)
-  val group_by : 'shape Keys.t -> (('shape, grouped) Binders.t -> ('row, grouped, Request.many) body) ->
-    ('row, row, Request.many) body
+  val group_by : 'shape Keys.t -> (('shape, grouped) Binders.t -> ('list, 'row, grouped, Request.many) body) ->
+    ('list, 'row, row, Request.many) body
+
+  (** Subqueries: any [from …] source, which may use the enclosing queries'
+      binders (correlation) and the [query]'s parameters. [in_] is three-valued:
+      no match against a subquery holding a NULL is NULL (use [is_true]).
+      [in_] requires the operand's codec (a BLOB never meets a VARCHAR) and
+      [scalar] a non-null column ([Null.scalar]: a nullable one), else
+      [Invalid_argument] when built. [scalar] takes only one-row sources
+      ([aggregate]): DuckDB fails on a scalar subquery of several rows. *)
+  val exists : (_, _, _) source -> (bool, Codec.non_null, 'k) expr
+  val in_ : ('a, _, 'k) expr -> ('a * unit, _, _) source -> (bool option, Codec.nullable, 'k) expr
+  val scalar : ('a * unit, _, Request.one) source -> ('a option, Codec.nullable, 'k) expr
+
+  (** Set operations over sources of the same column types; rows decode
+      with the left source's row function. Codecs must match pairwise, else
+      [Invalid_argument] (DuckDB would cast BIGINT and VARCHAR to VARCHAR).
+      Each side keeps its own ORDER BY and LIMIT. *)
+  val union : ('list, 'row, _) source -> ('list, 'row, _) source -> ('list, 'row, Request.many) source
+  val union_all : ('list, 'row, _) source -> ('list, 'row, _) source -> ('list, 'row, Request.many) source
+  val intersect : ('list, 'row, _) source -> ('list, 'row, _) source -> ('list, 'row, Request.many) source
+  val except_ : ('list, 'row, _) source -> ('list, 'row, _) source -> ('list, 'row, Request.many) source
 
   val param : ('a, 'n) param -> ('a, 'n, 'k) expr
   val asc : (_, _, 'k) expr -> 'k order
@@ -704,6 +726,7 @@ module Sql : sig
     val ( || ) : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
     val not : (bool option, Codec.nullable, 'k) expr -> (bool option, Codec.nullable, 'k) expr
     val outer : ('a option, Codec.nullable) outer -> ('a option, Codec.nullable, row) expr
+    val scalar : ('a option * unit, _, Request.one) source -> ('a option, Codec.nullable, 'k) expr
     val min : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
     val max : ('a option, Codec.nullable, row) expr -> ('a option, Codec.nullable, grouped) expr
     val ( + ) : (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr -> (int64 option, Codec.nullable, 'k) expr
