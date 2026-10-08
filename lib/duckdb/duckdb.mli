@@ -149,7 +149,10 @@ module Config : sig
       must be nonempty, NUL-free and colon-free (no special/remote URI paths).
       Read-only mode requires a file. [statement_cache] bounds each connection's
       typed-request statement cache (default 64; 0 disables; negative is
-      rejected). *)
+      rejected). Every database is opened with DuckDB's
+      [compressed_materialization] optimizer disabled: in DuckDB 1.5.5 it
+      bakes prepare-time statistics into the plan, and a cached statement
+      then returns corrupted values once the data changes. *)
   val create : ?threads:int -> ?memory_limit_bytes:int -> ?statement_cache:int -> ?access:access ->
     storage -> (t, Error.t) result
 end

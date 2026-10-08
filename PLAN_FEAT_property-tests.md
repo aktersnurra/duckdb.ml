@@ -23,33 +23,33 @@
 
 ### Task 1: Vendoring — DONE
 
-- [ ] `tools/test_bootstrap.py`: the lock has a `hegel` archive (https, sha256, no revision); `validate_lock` requires it; `vendor_hegel` on a synthetic tarball (`hegel-0.17.2/lib/…`, `LICENSE`, `prebuilt/libhegel-linux-amd64.so`) extracts `lib` without `lib/jane`, `LICENSE` and `libhegel.so`, rejects an unknown platform, and re-extracts cleanly. Run: `python3 -m unittest tools/test_bootstrap.py` (red).
-- [ ] Implement the lock entry, `vendor_hegel`, the patch application (`patch -p1 --forward`), `--install` extra packages (`ctypes-foreign ipaddr ocplib-endian`), and the call from `prepare`/`fetch`. Green.
-- [ ] Run `python3 tools/bootstrap.py --fetch` and the vendoring step; `./tools/run build vendor` builds Hegel.
+- [x] `tools/test_bootstrap.py`: the lock has a `hegel` archive (https, sha256, no revision); `validate_lock` requires it; `vendor_hegel` on a synthetic tarball (`hegel-0.17.2/lib/…`, `LICENSE`, `prebuilt/libhegel-linux-amd64.so`) extracts `lib` without `lib/jane`, `LICENSE` and `libhegel.so`, rejects an unknown platform, and re-extracts cleanly. Run: `python3 -m unittest tools/test_bootstrap.py` (red).
+- [x] Implement the lock entry, `vendor_hegel`, the patch application (`patch -p1 --forward`), `--install` extra packages (`ctypes-foreign ipaddr ocplib-endian`), and the call from `prepare`/`fetch`. Green.
+- [x] Run `python3 tools/bootstrap.py --fetch` and the vendoring step; `./tools/run build vendor` builds Hegel.
 
 ### Task 2: Runner and a first property — DONE
 
-- [ ] `tools/run` sets `HEGEL_LIBHEGEL_PATH` and `HEGEL_LIBHEGEL_NO_DOWNLOAD=1`; root `dune` `(vendored_dirs vendor)`; `.gitignore` `vendor/`.
-- [ ] `test/property/prop_support.ml` (`property` runner with `PROPERTY_CASES`, database off; a connected-session helper), `prop_codec.ml` with the int64 parameter round trip; a deliberately false property checked to fail with a shrunk counterexample, then removed.
-- [ ] Green under `./tools/run runtest`.
+- [x] `tools/run` sets `HEGEL_LIBHEGEL_PATH` and `HEGEL_LIBHEGEL_NO_DOWNLOAD=1`; root `dune` `(vendored_dirs vendor)`; `.gitignore` `vendor/`.
+- [x] `test/property/prop_support.ml` (`property` runner with `PROPERTY_CASES`, database off; a connected-session helper), `prop_codec.ml` with the int64 parameter round trip; a deliberately false property checked to fail with a shrunk counterexample, then removed.
+- [x] Green under `./tools/run runtest`.
 
-### Task 3: Codec round trips
+### Task 3: Codec round trips — DONE
 
-- [ ] All scalars and nullable forms, custom codec, through parameters, the appender and `value`.
+- [x] All scalars and nullable forms, custom codec, through parameters, the appender and `value`.
 
-### Task 4: SQL semantics
+### Task 4: SQL semantics — DONE
 
-- [ ] Expression generator and evaluator; per-row comparison.
+- [x] Expression generator and evaluator; per-row comparison.
 
-### Task 5: Query algebra
+### Task 5: Query algebra — DONE
 
-- [ ] where/order/limit/offset/distinct, group_by aggregates, joins, set operations against lists.
+- [x] where/order/limit/offset/distinct, group_by aggregates, joins, set operations against lists.
 
-### Task 6: DML and windows
+### Task 6: DML and windows — DONE
 
-- [ ] Operation sequences against a map model; windows against a reference.
+- [x] Operation sequences against a map model; windows against a reference.
 
-### Task 7: Documentation
+### Task 7: Documentation — DONE
 
-- [ ] README "Development", CHANGELOG, roadmap (ppx dropped, row 5), design note status and failures found.
-- [ ] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.
+- [x] README "Development", CHANGELOG, roadmap (ppx dropped, row 5), design note status and failures found.
+- [x] `./tools/run build @all` clean; `./tools/run runtest --force` exit 0.

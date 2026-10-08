@@ -1,6 +1,7 @@
 # Property-based tests (sub-project 5)
 
-Status: approved, 2026-10-08. Replaces roadmap row "later" (the
+Status: implemented, 2026-10-09; one DuckDB bug found and worked around
+(see [Failures found](#failures-found)). Replaces roadmap row "later" (the
 `[@@deriving duckdb]` ppx, dropped: declarations are one line per column,
 written once; the real friction, positional binders, needs no ppx). Comes
 before the 0.1.0 release.
@@ -99,7 +100,32 @@ A failing property is triaged: a library bug becomes a regression example
 test and a fix (test-first); a DuckDB behaviour the model missed corrects
 the model and is recorded below.
 
-(None yet.)
+**DuckDB 1.5.5: stale statistics in reused prepared statements.** The window
+property reuses one query across cases. From the second case on, DuckDB
+returned 256, 257, … for ids 0, 1, …. A C program against DuckDB's own API
+reproduced it: a statement prepared while a table was empty (or held other
+values) returned corrupted values for rows outside the prepare-time
+statistics, e.g. `SELECT id, v FROM w ORDER BY id` and `SELECT id,
+row_number() OVER (ORDER BY v) FROM w ORDER BY id`, even on its first
+execution after the data changed. Disabling `compressed_materialization`
+(or `statistics_propagation`) fixed every surveyed shape. The library
+caches prepared statements (64 per connection by default), so it opens
+every database with `disabled_optimizers = 'compressed_materialization'`
+(`lib/ffi/resource_stubs.c`). Regression test: `test/test_request.ml`
+(cached statements prepared on an empty table, then reused over rows of
+1000+). The property suites now reuse statements on purpose: the window
+query, the algebra queries built once at top level, and "a cached ordered
+select over changing data" (which fails within 2 cases when the optimizer
+is re-enabled). Not yet reported upstream.
+
+## DuckDB facts confirmed by the models
+
+| Fact | Model |
+|---|---|
+| Integer `//` truncates toward zero; a zero divisor is NULL | `Int64.( / )`, `None` |
+| `Int64.min_value // -1` | Native overflow error (values kept small) |
+| LIKE has no default escape: `\` is a literal | `%` any run, `_` one character |
+| Three-valued AND/OR/NOT | Kleene logic |
 
 ## Acceptance
 

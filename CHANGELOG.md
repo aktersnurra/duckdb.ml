@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Property-based tests (sub-project 5)
+
+[Design](docs/design/property-tests.md).
+
+Added: 73 Hegel properties in `test/property` (codec round trips through
+parameters, the appender and `value`; expressions against a three-valued
+model; queries, joins and set operations against lists; DML sequences,
+windows and cached statements against models). `tools/bootstrap.py`
+vendors Hegel 0.17.2 (sha256-pinned) into `vendor/hegel` without
+`dune-site`; `tools/run` points it at the vendored engine.
+
+Fixed: databases are opened with DuckDB's `compressed_materialization`
+optimizer disabled. In DuckDB 1.5.5 a cached prepared statement returned
+corrupted values (e.g. 255 for 0) once the data left the statistics seen
+at prepare time; found by the window property, reproduced in C.
+
+Dropped: the planned `[@@deriving duckdb]` ppx.
+
 ### Window functions (sub-project 4c)
 
 [Design](docs/design/windows.md).

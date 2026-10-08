@@ -341,6 +341,19 @@ For a provisioned checkout:
 bash test/install_adapters_smoke.sh
 ```
 
+`python3 tools/bootstrap.py --install` provisions the project-local switch
+and vendors [Hegel](https://github.com/hegeldev/hegel-ocaml) (pinned,
+checksummed) into `vendor/hegel` for the property tests in
+[`test/property`](test/property), which `runtest` runs at 100 cases each;
+`PROPERTY_CASES=1000 ./tools/run runtest --force` searches further. They
+never download anything: `tools/run` points Hegel at the vendored engine.
+
+Every database is opened with DuckDB's `compressed_materialization`
+optimizer disabled: in DuckDB 1.5.5 it bakes prepare-time statistics into a
+plan, and the cached prepared statements this library reuses then return
+corrupted values once the data changes
+([property tests](docs/design/property-tests.md#failures-found)).
+
 ## Scope and roadmap
 
 Local DuckDB databases and typed local Parquet reads and exports are

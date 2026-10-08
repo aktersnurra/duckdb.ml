@@ -23,7 +23,8 @@ plan and implementation:
 | 4a | Query composition | Joins, DISTINCT, literals of any codec, subqueries, set operations. Done: [query composition](query-composition.md) |
 | 4b | DML builders | Typed INSERT, UPDATE, DELETE. Done: [typed DML](dml.md) |
 | 4c | Window functions | `OVER (PARTITION BY … ORDER BY …)`. Done: [window functions](windows.md) |
-| later | `[@@deriving duckdb]` | Optional ppx that generates `Columns`/row declarations. Added only if hand-written declarations turn out to be tedious; nothing in 1–3 depends on it |
+| 5 | Property-based tests | Hegel properties for codecs, SQL semantics, query algebra, DML and windows. Done: [property tests](property-tests.md) |
+| dropped | `[@@deriving duckdb]` | Optional ppx for `Columns`/row declarations. Dropped: a declaration is one line per column, written once |
 
 Sub-project 2 reverses the earlier non-goal "no SQL DSL" in
 `docs/architecture.md` and in the L3 row of `typed-requests.md`; both are
