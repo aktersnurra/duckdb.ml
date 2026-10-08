@@ -585,6 +585,42 @@ module Sql : sig
   val group_by : 'shape Keys.t -> (('shape, grouped) Binders.t -> ('list, 'row, grouped, Request.many) body) ->
     ('list, 'row, row, Request.many) body
 
+  (** {2 Window functions}
+
+      Window results have the kind ['k windowed] over the base kind ['k]
+      ([row], or [grouped] inside [group_by]); only [select_over]'s list,
+      QUALIFY and ORDER BY accept them, so a window in WHERE, HAVING,
+      GROUP BY, an aggregate, a join's ON, an assignment or another window
+      is a compile error. Other expressions join a windowed list through
+      [lift]; literals and parameters are of any kind. *)
+  type 'k windowed
+  type 'k window
+  type 'k part
+  val part : (_, _, 'k) expr -> 'k part
+
+  (** Frame bounds; a negative offset raises [Invalid_argument]. *)
+  type bound = Unbounded_preceding | Preceding of int | Current_row | Following of int | Unbounded_following
+  type frame
+  val rows : start:bound -> end_:bound -> frame
+  val range : start:bound -> end_:bound -> frame
+  val window : ?partition_by:'k part list -> ?order_by:'k order list -> ?frame:frame -> unit -> 'k window
+  val lift : ('a, 'n, 'k) expr -> ('a, 'n, 'k windowed) expr
+
+  (** [select] over a windowed list; the result is an ordinary ['k] body. *)
+  val select_over : ?distinct:bool -> ?where:(bool, Codec.non_null, row) expr ->
+    ?having:(bool, Codec.non_null, grouped) expr -> ?qualify:(bool, Codec.non_null, 'k windowed) expr ->
+    ?order_by:'k windowed order list -> ?limit:int -> ?offset:int ->
+    ('a * 'list, 'fn, 'row, 'k windowed) Exprs.t -> row:'fn -> ('a * 'list, 'row, 'k, Request.many) body
+
+  (** Ranking. [ntile n] takes a literal [n] (DuckDB does not bind a
+      parameter there); [n < 1] raises [Invalid_argument]. *)
+  val row_number : 'k window -> (int64, Codec.non_null, 'k windowed) expr
+  val rank : 'k window -> (int64, Codec.non_null, 'k windowed) expr
+  val dense_rank : 'k window -> (int64, Codec.non_null, 'k windowed) expr
+  val ntile : int -> 'k window -> (int64, Codec.non_null, 'k windowed) expr
+  val percent_rank : 'k window -> (float, Codec.non_null, 'k windowed) expr
+  val cume_dist : 'k window -> (float, Codec.non_null, 'k windowed) expr
+
   (** Subqueries: any [from …] source, which may use the enclosing queries'
       binders (correlation) and the [query]'s parameters. [in_] is three-valued:
       no match against a subquery holding a NULL is NULL (use [is_true]).

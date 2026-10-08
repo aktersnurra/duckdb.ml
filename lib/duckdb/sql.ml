@@ -2,6 +2,9 @@ open! Base
 
 type row = private Row_kind
 type grouped = private Grouped_kind
+(* Window results over base kind ['k]: only a windowed select list, its
+   QUALIFY and its ORDER BY accept them. *)
+type 'k windowed = private Windowed_kind
 
 (* Expressions are untyped nodes; the phantom indices live in the interface.
    Columns and parameters carry the scope (one [from] or [query] call) that
@@ -25,6 +28,9 @@ type node =
   | Exists of packed_source
   | In_subquery of node * packed_source
   | Scalar of packed_source
+  | Over of node * window_spec
+(* A window: PARTITION BY, ORDER BY (key, descending) and a rendered frame. *)
+and window_spec = { partition : node list; order : (node * bool) list; frame : string option }
 (* A joined table: [on] is absent for a CROSS JOIN. *)
 and join = { kind : join_kind; target : string; scope : int; on : node option }
 and 'k order = { key : node; descending : bool }
@@ -33,7 +39,7 @@ and 'k order = { key : node; descending : bool }
 and ('list, 'row, 'k, 'm) body =
   Body : { columns : ('list, 'fn, 'row) Fields.t; row : 'fn; list : node list; distinct : bool;
            joins : join list; where : node option;
-           group_by : node list; having : node option; order_by : 'k order list;
+           group_by : node list; having : node option; qualify : node option; order_by : 'k order list;
            limit : int option; offset : int option } -> ('list, 'row, 'k, 'm) body
 (* Rows decode with the left-most select's row function. *)
 and ('list, 'row, 'm) source =
@@ -60,6 +66,7 @@ let mentioned node =
     | Column { name; _ } -> if List.mem acc name ~equal:String.equal then acc else name :: acc
     (* A subquery's columns belong to its own tables. *)
     | Param _ | Literal _ | Count_star | Exists _ | In_subquery _ | Scalar _ -> acc
+    | Over (f, w) -> List.fold (w.partition @ List.map w.order ~f:fst) ~init:(go acc f) ~f:go
     | Apply (_, args) -> List.fold args ~init:acc ~f:go
     | Infix (_, a, b) -> go (go acc a) b
     | Prefix (_, a) | Postfix (a, _) | Cast (a, _) -> go acc a in
@@ -115,7 +122,7 @@ let rec nodes_of_exprs : type l f r k. (l, f, r, k) Exprs.t -> node list = funct
 let body ?(distinct = false) exprs ~row ~where ~group_by ~having ~order_by ~limit ~offset =
   Body { columns = fields_of_exprs exprs; row; list = nodes_of_exprs exprs; distinct; joins = [];
          where = Option.map where ~f:(fun (e : _ expr) -> e.node); group_by;
-         having = Option.map having ~f:(fun (e : _ expr) -> e.node); order_by; limit; offset }
+         having = Option.map having ~f:(fun (e : _ expr) -> e.node); qualify = None; order_by; limit; offset }
 
 let select ?distinct ?where ?having ?(order_by = []) ?limit ?offset exprs ~row =
   let non_negative name = Option.iter ~f:(fun n ->
@@ -132,7 +139,8 @@ let rec aggregates = function
   | Apply (_, args) -> List.exists args ~f:aggregates
   | Infix (_, a, b) -> aggregates a || aggregates b
   | Prefix (_, a) | Postfix (a, _) | Cast (a, _) -> aggregates a
-  | Column _ | Param _ | Literal _ | Exists _ | In_subquery _ | Scalar _ -> false
+  (* A window aggregate does not make the select an aggregate. *)
+  | Column _ | Param _ | Literal _ | Exists _ | In_subquery _ | Scalar _ | Over _ -> false
 let aggregate ?where exprs ~row =
   if not (List.exists (nodes_of_exprs exprs) ~f:aggregates) then
     invalid_arg "Duckdb.Sql.aggregate: the select list needs an aggregate";
@@ -147,7 +155,7 @@ let group_by keys f =
   let (Body b) = f (rebind keys) in
   Body { columns = b.columns; row = b.row; list = b.list; distinct = b.distinct; joins = b.joins;
          where = b.where; group_by = key_nodes keys;
-         having = b.having; order_by = List.map b.order_by ~f:(fun o -> { key = o.key; descending = o.descending });
+         having = b.having; qualify = b.qualify; order_by = List.map b.order_by ~f:(fun o -> { key = o.key; descending = o.descending });
          limit = b.limit; offset = b.offset }
 
 let rec binders : type l f r s. (l, f, r, s) Columns.t -> scope:int -> (s, row) Binders.t = fun columns ~scope ->
@@ -224,6 +232,16 @@ let rec render context node =
   | Exists (Packed s) -> "EXISTS (" ^ render_source context s ^ ")"
   | In_subquery (a, Packed s) -> let a = render a in "(" ^ a ^ " IN (" ^ render_source context s ^ "))"
   | Scalar (Packed s) -> "(" ^ render_source context s ^ ")"
+  | Over (f, w) ->
+    let f = render f in
+    let partition = match w.partition with
+      | [] -> None
+      | keys -> Some ("PARTITION BY " ^ String.concat ~sep:", " (List.map keys ~f:render)) in
+    let order = match w.order with
+      | [] -> None
+      | keys -> Some ("ORDER BY " ^ String.concat ~sep:", " (List.map keys ~f:(fun (key, descending) ->
+          render key ^ if descending then " DESC" else " ASC"))) in
+    f ^ " OVER (" ^ String.concat ~sep:" " (List.filter_opt [ partition; order; w.frame ]) ^ ")"
 (* Every table of the select is aliased before any expression renders, so
    subqueries continue the numbering after them. A subquery sees the
    enclosing tables' aliases (correlation). *)
@@ -243,12 +261,13 @@ and render_select : type l r k m. context -> target:string -> scope:int -> (l, r
   let where = clause "WHERE" b.where in
   let group_by = match b.group_by with [] -> "" | keys -> " GROUP BY " ^ listed keys in
   let having = clause "HAVING" b.having in
+  let qualify = clause "QUALIFY" b.qualify in
   let order_by = match b.order_by with
     | [] -> ""
     | orders -> " ORDER BY " ^ String.concat ~sep:", " (List.map orders ~f:(fun o ->
         render o.key ^ if o.descending then " DESC" else " ASC")) in
   "SELECT " ^ (if b.distinct then "DISTINCT " else "") ^ list ^ " FROM " ^ target ^ " AS " ^ first
-  ^ joined ^ where ^ group_by ^ having ^ order_by ^ number "LIMIT" b.limit ^ number "OFFSET" b.offset
+  ^ joined ^ where ^ group_by ^ having ^ qualify ^ order_by ^ number "LIMIT" b.limit ^ number "OFFSET" b.offset
 and render_source : type l r m. context -> (l, r, m) source -> string = fun context -> function
   | Select { target; scope; body } -> render_select context ~target ~scope body
   | Set { op; left; right } ->
@@ -452,6 +471,39 @@ module I16 = Integral
 module I8 = Integral
 module F64 = Fractional
 module F32 = Fractional
+
+(* Windows. *)
+type 'k part = node
+type 'k window = window_spec
+type bound = Unbounded_preceding | Preceding of int | Current_row | Following of int | Unbounded_following
+type frame = string
+let render_bound = function
+  | Unbounded_preceding -> "UNBOUNDED PRECEDING"
+  | Preceding n -> if n < 0 then invalid_arg "Duckdb.Sql: a negative frame offset"; Int.to_string n ^ " PRECEDING"
+  | Current_row -> "CURRENT ROW"
+  | Following n -> if n < 0 then invalid_arg "Duckdb.Sql: a negative frame offset"; Int.to_string n ^ " FOLLOWING"
+  | Unbounded_following -> "UNBOUNDED FOLLOWING"
+let rows ~start ~end_ = "ROWS BETWEEN " ^ render_bound start ^ " AND " ^ render_bound end_
+let range ~start ~end_ = "RANGE BETWEEN " ^ render_bound start ^ " AND " ^ render_bound end_
+let part (e : _ expr) = e.node
+let window ?(partition_by = []) ?(order_by = []) ?frame () : _ window =
+  { partition = partition_by; order = List.map order_by ~f:(fun o -> (o.key, o.descending)); frame }
+let lift (e : _ expr) = { node = e.node; codec = e.codec }
+let over name args w codec = { node = Over (Apply (name, args), w); codec }
+let positive name n = if n < 1 then invalid_arg ("Duckdb.Sql." ^ name ^ ": must be positive")
+let row_number w = over "row_number" [] w Codec.Values.int64
+let rank w = over "rank" [] w Codec.Values.int64
+let dense_rank w = over "dense_rank" [] w Codec.Values.int64
+let ntile n w = positive "ntile" n; over "ntile" [ Literal { sql = Int.to_string n; constant = None } ] w Codec.Values.int64
+let percent_rank w = over "percent_rank" [] w Codec.Values.float64
+let cume_dist w = over "cume_dist" [] w Codec.Values.float64
+let select_over ?distinct ?where ?having ?qualify ?(order_by = []) ?limit ?offset exprs ~row =
+  let (Body b) = select ?distinct ?where ?having ?limit ?offset exprs ~row in
+  Body { columns = b.columns; row = b.row; list = b.list; distinct = b.distinct; joins = b.joins;
+         where = b.where; group_by = b.group_by; having = b.having;
+         qualify = Option.map qualify ~f:(fun (e : _ expr) -> e.node);
+         order_by = List.map order_by ~f:(fun o -> { key = o.key; descending = o.descending });
+         limit = b.limit; offset = b.offset }
 
 (* Subqueries. *)
 let exists (s : (_, _, _) source) = { node = Exists (Packed s); codec = Codec.Values.bool }
