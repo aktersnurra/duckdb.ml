@@ -74,7 +74,7 @@ right to left), so aliases number left to right.
 - [ ] Implement.
 - [ ] Green.
 
-### Task 5: Compile fixtures
+### Task 5: Compile fixtures — DONE
 
 - [ ] `positive.ml` gains a join, a left join with `outer`, subqueries and a union.
 - [ ] Fixtures: `outer_unlifted`, `outer_nullable`, `null_outer_non_null`, `scalar_many`, `in_type`, `union_rows`, `find_join`; expectations in `check_sql_types.sh`.

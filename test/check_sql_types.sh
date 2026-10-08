@@ -47,3 +47,10 @@ expect args_type 'type "string"' 'type "int64"'
 expect args_arity '"unit D.Args.t"' "\"('a * 'b) D.Args.t\""
 expect binder_arity 'Type "unit" is not compatible with type' 'Duckdb.Sql.Binders.t'
 expect empty_select 'Type "unit" is not compatible with type' 'Duckdb.Sql.Exprs.t'
+expect outer_unlifted '"(string, Duckdb.Codec.non_null) Duckdb.Sql.outer"' "\"('a, 'b, 'c) Duckdb.Sql.expr\""
+expect outer_nullable 'Type "Duckdb.Codec.nullable" is not compatible with type "Duckdb.Codec.non_null"' 'Duckdb.Sql.outer'
+expect null_outer_non_null 'Type "string" is not compatible with type "'"'"'a option"' 'Duckdb.Sql.outer'
+expect scalar_many '"Duckdb.Request.many" = "[ `Many | `One | `Zero ]" is not compatible with type "Duckdb.Request.one"' 'Duckdb.Sql.source'
+expect in_type 'Type "int64" is not compatible with type "string"' 'Duckdb.Sql.source'
+expect union_rows 'Type "string" is not compatible with type "int64"' 'Duckdb.Sql.source'
+expect find_join '"Duckdb.Request.many"' '[< `One ]'

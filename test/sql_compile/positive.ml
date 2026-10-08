@@ -23,3 +23,24 @@ let run (c : D.connection) =
   match D.Request.Session.collect c adults D.Args.[18l] with
   | Error e -> Error e
   | Ok (_ : (int64 * string) list) -> D.Request.Session.find c total D.Args.[]
+
+(* Query composition. *)
+let posts = D.Table.(declare "posts" Columns.["id", int64; "owner", int64; "title", string; "score", nullable int32]
+  ~row:(fun id owner title score -> (id, owner, title, score)))
+let with_posts : (unit, string * string option * int32 option, D.Request.many) D.Request.t = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      left_join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [_; _; title; score] ->
+        select Exprs.[name; outer title; Null.outer score] ~distinct:true ~row:(fun n t s -> (n, t, s))))))
+let counted : (unit, string * int64 option, D.Request.many) D.Request.t = S.(
+  query Params.[] (fun [] ->
+    from users (fun [uid; name; _] ->
+      join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [_; _; title; _] ->
+        select Exprs.[title; scalar (from posts (fun [_; owner; _; _] ->
+          aggregate Exprs.[count_star] ~row:Fn.id ~where:(owner = uid)))] ~row:(fun t n -> (t, n))
+          ~where:(exists (from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id ~where:(id = uid)))
+                  && is_true (in_ name (from users (fun [_; n; _] -> select Exprs.[n] ~row:Fn.id))))))))
+let ids : (unit, int64, D.Request.many) D.Request.t = S.(
+  query Params.[] (fun [] ->
+    union_all (from users (fun [id; _; _] -> select Exprs.[id] ~row:Fn.id))
+      (from posts (fun [_; owner; _; _] -> select Exprs.[owner] ~row:Fn.id ~where:(owner = value D.Codec.Values.int64 1L)))))

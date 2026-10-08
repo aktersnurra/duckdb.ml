@@ -1,0 +1,9 @@
+module D = Duckdb
+module S = D.Sql
+let users = D.Table.(declare "users" Columns.["id", int64; "name", string; "age", nullable int32]
+  ~row:(fun id name age -> (id, name, age)))
+let posts = D.Table.(declare "posts" Columns.["id", int64; "owner", int64; "title", string; "score", nullable int32]
+  ~row:(fun id owner title score -> (id, owner, title, score)))
+let q = S.(query Params.[] (fun [] -> from users (fun [uid; _; _] ->
+  join posts ~on:(fun [_; owner; _; _] -> owner = uid) (fun [_; _; _; _] -> aggregate Exprs.[count_star] ~row:(fun x -> x)))))
+let run (c : D.connection) = D.Request.Session.find c q D.Args.[]
