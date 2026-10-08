@@ -116,7 +116,8 @@ every database with `disabled_optimizers = 'compressed_materialization'`
 1000+). The property suites now reuse statements on purpose: the window
 query, the algebra queries built once at top level, and "a cached ordered
 select over changing data" (which fails within 2 cases when the optimizer
-is re-enabled). Not yet reported upstream.
+is re-enabled). Reported upstream as
+[duckdb/duckdb#26784](https://github.com/duckdb/duckdb/issues/26784).
 
 ## DuckDB facts confirmed by the models
 
