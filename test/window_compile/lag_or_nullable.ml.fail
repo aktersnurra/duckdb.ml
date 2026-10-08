@@ -1,0 +1,6 @@
+module D = Duckdb
+module S = D.Sql
+let sales = D.Table.(declare "sales" Columns.["k", string; "d", int32; "v", int64; "n", nullable int64]
+  ~row:(fun k d v n -> (k, d, v, n)))
+let q = S.(query Params.[] (fun [] -> from sales (fun [_; d; _; n] ->
+  select_over Exprs.[lag_or ~default:(int64 0L) n (window ~order_by:[asc d] ())] ~row:(fun a -> a))))
