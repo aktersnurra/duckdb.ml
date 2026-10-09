@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-10-09)
 
 ### Named binders
 
@@ -11,6 +11,12 @@ Added: `Table.fields` returns a table's columns as named handles
 projects a handle from `from`, join and DML binders and `Sql.( .%?() )`
 from a `left_join` body's `outer` binders. Additive: positional binders are
 unchanged.
+
+### Fixed
+
+- `tools/toolchain.lock.json` locks `yojson.2.2.2+ox`, which the vendored
+  Hegel needs. A clean bootstrap of `v0.2.0` could not build the property
+  tests; the installed packages were unaffected.
 
 ## 0.2.0 (2026-10-09)
 

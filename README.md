@@ -24,8 +24,8 @@ python3 tools/setup_duckdb.py --prefix "$HOME/.local/duckdb-1.5.5"   # from a ch
 export DUCKDB_INCLUDE_DIR="$HOME/.local/duckdb-1.5.5"
 export LIBRARY_PATH="$DUCKDB_INCLUDE_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$DUCKDB_INCLUDE_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-opam pin add duckdb-ffi git+https://github.com/aktersnurra/duckdb.ml.git#v0.2.0
-opam pin add duckdb git+https://github.com/aktersnurra/duckdb.ml.git#v0.2.0
+opam pin add duckdb-ffi git+https://github.com/aktersnurra/duckdb.ml.git#v0.2.1
+opam pin add duckdb git+https://github.com/aktersnurra/duckdb.ml.git#v0.2.1
 # optional adapters: duckdb-async, duckdb-eio (same URL)
 ```
 
